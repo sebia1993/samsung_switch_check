@@ -24,8 +24,12 @@ public static class AgentErrorCodes
     public const string CredentialCorrupt = "CREDENTIAL_CORRUPT";
     public const string CertificateUnavailable = "CERTIFICATE_UNAVAILABLE";
     public const string PairingRateLimited = "PAIRING_RATE_LIMITED";
+    public const string TokenLimitReached = "TOKEN_LIMIT_REACHED";
+    public const string TokenNotFound = "TOKEN_NOT_FOUND";
+    public const string CertificateExpired = "CERTIFICATE_EXPIRED";
     public const string CollectorInitializing = "COLLECTOR_INITIALIZING";
     public const string CollectorUnusable = "COLLECTOR_UNUSABLE";
+    public const string CollectorStale = "COLLECTOR_STALE";
 }
 
 public sealed class AgentOperationException(string code, string safeMessage, int statusCode = 400) : Exception(safeMessage)
@@ -135,7 +139,22 @@ public sealed record AuditEntry(
     string Outcome,
     string Detail);
 
-public sealed record CertificateStatus(bool HttpsEnabled, string? Sha256Fingerprint);
+public sealed record CertificateStatus(
+    bool HttpsEnabled,
+    string? Sha256Fingerprint,
+    DateTimeOffset? NotAfterUtc = null,
+    int? DaysRemaining = null,
+    string State = "disabled",
+    IReadOnlyList<string>? AcceptedSha256Fingerprints = null);
+
+public sealed record ApiTokenInfo(
+    string Id,
+    DateTimeOffset CreatedUtc,
+    DateTimeOffset? LastUsedUtc,
+    DateTimeOffset? RevokedUtc,
+    DateTimeOffset AbsoluteExpiresUtc,
+    DateTimeOffset IdleExpiresUtc,
+    bool Expired);
 
 public sealed record EventSummary(long LastSequence, long ActiveCritical, long Unacknowledged);
 

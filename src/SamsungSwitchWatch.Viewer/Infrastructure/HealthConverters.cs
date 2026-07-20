@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Windows;
 using System.Windows.Data;
 using System.Windows.Media;
 using SamsungSwitchWatch.Viewer.Models;
@@ -11,6 +12,10 @@ public sealed class HealthToBrushConverter : IValueConverter
     {
         var health = value is DeviceHealth typed ? typed : DeviceHealth.Empty;
         var background = string.Equals(parameter?.ToString(), "Background", StringComparison.OrdinalIgnoreCase);
+        if (SystemParameters.HighContrast)
+        {
+            return background ? System.Windows.SystemColors.WindowBrush : System.Windows.SystemColors.WindowTextBrush;
+        }
         var hex = (health, background) switch
         {
             (DeviceHealth.Normal, false) => "#16A34A",
@@ -49,6 +54,7 @@ public sealed class HealthToTextConverter : IValueConverter
 
 public sealed class BoolToOpacityConverter : IValueConverter
 {
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value is true ? 0.52 : 1.0;
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        SystemParameters.HighContrast ? 1.0 : value is true ? 0.52 : 1.0;
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
 }

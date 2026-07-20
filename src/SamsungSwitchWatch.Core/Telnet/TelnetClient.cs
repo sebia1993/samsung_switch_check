@@ -82,7 +82,13 @@ public sealed class TelnetClient : ITelnetClient
         try
         {
             await ConnectAsync(transport, endpoint, sessionToken).ConfigureAwait(false);
-            await AuthenticateAsync(transport, negotiator, credentials, profile.Telnet, sessionToken).ConfigureAwait(false);
+            var devicePromptPattern = await AuthenticateAsync(
+                    transport,
+                    negotiator,
+                    credentials,
+                    profile.Telnet,
+                    sessionToken)
+                .ConfigureAwait(false);
             authenticated = true;
 
             var outputs = new List<CommandOutput>(commands.Length);
@@ -99,7 +105,7 @@ public sealed class TelnetClient : ITelnetClient
                 var raw = await ReadUntilAsync(
                         transport,
                         negotiator,
-                        [profile.Telnet.DevicePromptPattern],
+                        [devicePromptPattern],
                         [],
                         profile.Telnet.PagingMarkers,
                         profile.Telnet.PagingContinueByte,
@@ -114,9 +120,9 @@ public sealed class TelnetClient : ITelnetClient
                     command.Command,
                     raw.Text,
                     OutputNormalizer.NormalizeCommandOutput(
-                        raw.Text,
+                        raw.VisibleText,
                         command.Command,
-                        profile.Telnet.DevicePromptPattern,
+                        devicePromptPattern,
                         profile.Telnet.PagingMarkers),
                     _timeProvider.GetUtcNow()));
             }
@@ -191,7 +197,7 @@ public sealed class TelnetClient : ITelnetClient
         }
     }
 
-    private async Task AuthenticateAsync(
+    private async Task<string> AuthenticateAsync(
         IByteTransport transport,
         TelnetNegotiator negotiator,
         TelnetCredentials credentials,
@@ -218,7 +224,7 @@ public sealed class TelnetClient : ITelnetClient
 
         if (initial.PatternIndex == 2)
         {
-            return;
+            return CreateExactPromptPattern(initial.MatchedText);
         }
 
         if (initial.PatternIndex == 0)
@@ -250,7 +256,7 @@ public sealed class TelnetClient : ITelnetClient
 
             if (passwordPrompt.PatternIndex == 2)
             {
-                return;
+                return CreateExactPromptPattern(passwordPrompt.MatchedText);
             }
         }
 
@@ -278,6 +284,8 @@ public sealed class TelnetClient : ITelnetClient
         {
             throw AuthFailure();
         }
+
+        return CreateExactPromptPattern(authenticated.MatchedText);
     }
 
     private async Task<ReadMatch> ReadUntilAsync(
@@ -359,14 +367,24 @@ public sealed class TelnetClient : ITelnetClient
                 {
                     if (failures[index].IsMatch(visibleText))
                     {
-                        return new ReadMatch(rawOutput.ToString(), index, true);
+                        return new ReadMatch(
+                            rawOutput.ToString(),
+                            visibleOutput.ToString(),
+                            index,
+                            true,
+                            null);
                     }
                 }
 
-                var terminalIndex = FindTerminalAtEnd(terminals, visibleText);
-                if (terminalIndex >= 0)
+                var terminal = FindTerminalAtEnd(terminals, visibleText);
+                if (terminal is not null)
                 {
-                    return new ReadMatch(rawOutput.ToString(), terminalIndex, false);
+                    return new ReadMatch(
+                        rawOutput.ToString(),
+                        visibleOutput.ToString(),
+                        terminal.PatternIndex,
+                        false,
+                        terminal.MatchedText);
                 }
             }
         }
@@ -427,29 +445,21 @@ public sealed class TelnetClient : ITelnetClient
             return;
         }
 
-        var longestMarker = pagingMarkers.Max(static marker => marker.Length);
         while (true)
         {
-            var start = Math.Max(0, visibleOutput.Length - _options.DetectionWindowCharacters - longestMarker);
+            var longestMarker = pagingMarkers.Max(static marker => marker.Length);
+            var start = Math.Max(0, visibleOutput.Length - _options.DetectionWindowCharacters - longestMarker - 4);
             var tail = visibleOutput.ToString(start, visibleOutput.Length - start);
-            var selectedIndex = -1;
-            var selectedLength = 0;
-            foreach (var marker in pagingMarkers)
-            {
-                var index = tail.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-                if (index >= 0 && (selectedIndex < 0 || index < selectedIndex))
-                {
-                    selectedIndex = index;
-                    selectedLength = marker.Length;
-                }
-            }
-
-            if (selectedIndex < 0)
+            var markerMatch = FindTerminalPagingMarker(
+                tail,
+                pagingMarkers,
+                start == 0 || visibleOutput[start - 1] is '\r' or '\n');
+            if (markerMatch is null)
             {
                 return;
             }
 
-            visibleOutput.Remove(start + selectedIndex, selectedLength);
+            visibleOutput.Remove(start + markerMatch.Index, markerMatch.Length);
             await transport.WriteAsync(new byte[] { pagingContinueByte }, cancellationToken).ConfigureAwait(false);
         }
     }
@@ -470,7 +480,7 @@ public sealed class TelnetClient : ITelnetClient
         return source;
     }
 
-    private static int FindTerminalAtEnd(IReadOnlyList<Regex> patterns, string text)
+    private static TerminalPatternMatch? FindTerminalAtEnd(IReadOnlyList<Regex> patterns, string text)
     {
         for (var index = 0; index < patterns.Count; index++)
         {
@@ -478,12 +488,70 @@ public sealed class TelnetClient : ITelnetClient
             {
                 if (text.AsSpan(match.Index + match.Length).Trim().IsEmpty)
                 {
-                    return index;
+                    return new TerminalPatternMatch(index, match.Value);
                 }
             }
         }
 
-        return -1;
+        return null;
+    }
+
+    private static PagingMarkerMatch? FindTerminalPagingMarker(
+        string text,
+        IReadOnlyList<string> pagingMarkers,
+        bool startIsLineBoundary)
+    {
+        PagingMarkerMatch? selected = null;
+        foreach (var marker in pagingMarkers)
+        {
+            if (string.IsNullOrWhiteSpace(marker))
+            {
+                continue;
+            }
+
+            var pattern = $@"(?:^|(?<=\r)|(?<=\n))[ \t]*{Regex.Escape(marker)}[ \t]*(?:\r\n|\r|\n)?\z";
+            var match = Regex.Match(
+                text,
+                pattern,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(1));
+            if (!match.Success || match.Index == 0 && !startIsLineBoundary)
+            {
+                continue;
+            }
+
+            if (selected is null || match.Index < selected.Index)
+            {
+                var removableLength = match.Length;
+                if (match.Value.EndsWith("\r\n", StringComparison.Ordinal))
+                {
+                    removableLength -= 2;
+                }
+                else if (match.Value.EndsWith('\r') || match.Value.EndsWith('\n'))
+                {
+                    removableLength--;
+                }
+
+                selected = new PagingMarkerMatch(match.Index, removableLength);
+            }
+        }
+
+        return selected;
+    }
+
+    private static string CreateExactPromptPattern(string? matchedText)
+    {
+        var prompt = OutputNormalizer.CleanControlCharacters(matchedText ?? string.Empty)
+            .TrimEnd('\r', '\n', ' ', '\t');
+        if (string.IsNullOrWhiteSpace(prompt) || prompt.Contains('\r') || prompt.Contains('\n'))
+        {
+            throw Failure(
+                ErrorCodes.PromptParseFailed,
+                "authentication",
+                "The authenticated device prompt could not be captured safely.");
+        }
+
+        return $@"(?m)^{Regex.Escape(prompt)}[ \t]*\r?$";
     }
 
     private static SwitchWatchException AuthFailure() => Failure(
@@ -499,5 +567,14 @@ public sealed class TelnetClient : ITelnetClient
         Exception? exception = null) =>
         new(new DiagnosticError(code, stage, message, retryable), exception);
 
-    private sealed record ReadMatch(string Text, int PatternIndex, bool IsFailure);
+    private sealed record ReadMatch(
+        string Text,
+        string VisibleText,
+        int PatternIndex,
+        bool IsFailure,
+        string? MatchedText);
+
+    private sealed record TerminalPatternMatch(int PatternIndex, string MatchedText);
+
+    private sealed record PagingMarkerMatch(int Index, int Length);
 }

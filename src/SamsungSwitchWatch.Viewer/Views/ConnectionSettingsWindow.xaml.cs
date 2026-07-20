@@ -13,7 +13,8 @@ public partial class ConnectionSettingsWindow : Window
         _original = settings;
         DemoModeCheckBox.IsChecked = settings.DemoMode;
         AgentUriTextBox.Text = settings.AgentUri;
-        FingerprintTextBox.Text = settings.CertificateFingerprint;
+        FingerprintTextBox.Text = string.Join(Environment.NewLine, settings.AcceptedCertificateFingerprints);
+        StartMinimizedCheckBox.IsChecked = settings.StartMinimizedToTray;
         UpdateLiveControls();
     }
 
@@ -31,11 +32,20 @@ public partial class ConnectionSettingsWindow : Window
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
+        IReadOnlyList<string> fingerprints = [];
+        if (DemoModeCheckBox.IsChecked != true &&
+            !ViewerSettingsSanitizer.TryParseFingerprintInput(FingerprintTextBox.Text, out fingerprints, out var fingerprintReason))
+        {
+            ValidationText.Text = fingerprintReason;
+            return;
+        }
+
         var candidate = new ViewerSettings
         {
             DemoMode = DemoModeCheckBox.IsChecked == true,
             AgentUri = AgentUriTextBox.Text,
-            CertificateFingerprint = FingerprintTextBox.Text,
+            CertificateFingerprint = fingerprints.FirstOrDefault() ?? string.Empty,
+            CertificateFingerprints = fingerprints.ToList(),
             BearerToken = string.IsNullOrEmpty(TokenPasswordBox.Password) ? _original.BearerToken : TokenPasswordBox.Password,
             ProtectedBearerToken = _original.ProtectedBearerToken,
             LastEventSequence = _original.LastEventSequence,
@@ -47,7 +57,7 @@ public partial class ConnectionSettingsWindow : Window
             MainTop = _original.MainTop,
             MainWidth = _original.MainWidth,
             MainHeight = _original.MainHeight,
-            StartMinimizedToTray = _original.StartMinimizedToTray
+            StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true
         };
 
         var clean = ViewerSettingsSanitizer.Sanitize(candidate);

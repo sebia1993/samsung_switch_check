@@ -140,6 +140,7 @@ public sealed class AgentContractMapperTests
         Assert.Equal(DeviceHealth.Normal, result[1].Severity);
         Assert.True(result[1].Acknowledged);
         Assert.True(result[1].Recovered);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-20T08:31:10+00:00"), result[1].RecoveredAt);
     }
 
     [Fact]

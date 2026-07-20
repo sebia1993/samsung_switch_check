@@ -7,10 +7,14 @@ namespace SamsungSwitchWatch.Viewer.Views;
 public partial class AlertPopup : Window
 {
     private readonly DispatcherTimer _timer;
+    private readonly EventViewModel _item;
+    private readonly Action<EventViewModel>? _openRequested;
 
-    public AlertPopup(EventViewModel item)
+    public AlertPopup(EventViewModel item, Action<EventViewModel>? openRequested = null)
     {
         InitializeComponent();
+        _item = item;
+        _openRequested = openRequested;
         DataContext = item;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(7) };
         _timer.Tick += (_, _) => ClosePopup();
@@ -25,7 +29,8 @@ public partial class AlertPopup : Window
 
     private void OpenDashboard_Click(object sender, RoutedEventArgs e)
     {
-        (Application.Current as App)?.ShowDashboard();
+        if (_openRequested is not null) _openRequested(_item);
+        else (Application.Current as App)?.ShowDashboard();
         ClosePopup();
     }
 

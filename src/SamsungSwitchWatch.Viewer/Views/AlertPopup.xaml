@@ -4,8 +4,9 @@
         Width="360" Height="148" WindowStyle="None" ResizeMode="NoResize"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True"
         Background="Transparent" AllowsTransparency="True"
-        AutomationProperties.Name="스위치 변경 알림">
-    <Border Background="White" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="8" Padding="16">
+        AutomationProperties.Name="스위치 변경 알림"
+        AutomationProperties.LiveSetting="Assertive">
+    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="8" Padding="16">
         <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.2"/></Border.Effect>
         <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="5"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="28"/></Grid.ColumnDefinitions>
@@ -15,9 +16,14 @@
                     <TextBlock Text="Samsung Switch Watch" FontSize="11" Foreground="#64748B"/>
                     <TextBlock HorizontalAlignment="Right" Text="{Binding OccurredAt, StringFormat={}{0:HH:mm:ss}}" FontSize="11" Foreground="#64748B"/>
                 </Grid>
-                <TextBlock Margin="0,8,0,0" Text="{Binding DeviceName}" FontWeight="SemiBold"/>
-                <TextBlock Margin="0,4,0,0" Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}"/>
-                <TextBlock Margin="0,3,0,0" Text="{Binding Detail}" FontSize="12" Foreground="#64748B" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                <Grid Margin="0,8,0,0">
+                    <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}"/>
+                    <Border HorizontalAlignment="Right" Padding="7,2" CornerRadius="10" Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                        <TextBlock Text="{Binding StatusText}" FontSize="10" FontWeight="SemiBold"/>
+                    </Border>
+                </Grid>
+                <TextBlock Margin="0,4,0,0" Text="{Binding DeviceName}" FontWeight="SemiBold"/>
+                <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12" Foreground="#64748B" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
                 <Button Margin="0,8,0,0" HorizontalAlignment="Left" Padding="8,3" Content="대시보드에서 보기" Click="OpenDashboard_Click" FontSize="11"/>
             </StackPanel>
             <Button Grid.Column="3" Width="24" Height="24" Content="×" Click="Close_Click" VerticalAlignment="Top"/>

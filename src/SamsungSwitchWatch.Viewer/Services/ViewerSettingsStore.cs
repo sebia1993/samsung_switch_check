@@ -10,6 +10,7 @@ public sealed class ViewerSettings
     public bool DemoMode { get; set; } = true;
     public string AgentUri { get; set; } = "https://localhost:18443";
     public string CertificateFingerprint { get; set; } = string.Empty;
+    public List<string> CertificateFingerprints { get; set; } = [];
     public string ProtectedBearerToken { get; set; } = string.Empty;
     [JsonIgnore] public string BearerToken { get; set; } = string.Empty;
     public long LastEventSequence { get; set; }
@@ -23,9 +24,14 @@ public sealed class ViewerSettings
     public double MainHeight { get; set; } = 900;
     public bool StartMinimizedToTray { get; set; }
 
+    [JsonIgnore]
+    public IReadOnlyList<string> AcceptedCertificateFingerprints => ViewerSettingsSanitizer
+        .NormalizeFingerprints((CertificateFingerprints ?? []).Prepend(CertificateFingerprint));
+
     public string BuildAgentIdentity(string agentId)
     {
-        var material = $"{agentId.Trim()}\n{AgentUri.Trim().ToUpperInvariant()}\n{CertificateFingerprint}";
+        var pins = string.Join(',', AcceptedCertificateFingerprints.Order(StringComparer.Ordinal));
+        var material = $"{agentId.Trim()}\n{AgentUri.Trim().ToUpperInvariant()}\n{pins}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
 
@@ -50,11 +56,13 @@ public static class ViewerSettingsSanitizer
     {
         input ??= new ViewerSettings();
         var uri = NormalizeAgentUri(input.AgentUri);
+        var fingerprints = NormalizeFingerprints((input.CertificateFingerprints ?? []).Prepend(input.CertificateFingerprint));
         return new ViewerSettings
         {
             DemoMode = input.DemoMode,
             AgentUri = uri,
-            CertificateFingerprint = NormalizeFingerprint(input.CertificateFingerprint),
+            CertificateFingerprint = fingerprints.FirstOrDefault() ?? string.Empty,
+            CertificateFingerprints = fingerprints.ToList(),
             ProtectedBearerToken = Limit(input.ProtectedBearerToken, 8192),
             BearerToken = Limit(input.BearerToken, 4096),
             LastEventSequence = Math.Max(0, input.LastEventSequence),
@@ -80,6 +88,55 @@ public static class ViewerSettingsSanitizer
         return hex.Length == 64 ? hex : string.Empty;
     }
 
+    public static IReadOnlyList<string> NormalizeFingerprints(IEnumerable<string?>? values)
+    {
+        if (values is null) return [];
+        return values
+            .SelectMany(SplitFingerprintInput)
+            .Select(NormalizeFingerprint)
+            .Where(value => value.Length == 64)
+            .Distinct(StringComparer.Ordinal)
+            .Take(2)
+            .ToArray();
+    }
+
+    public static bool TryParseFingerprintInput(
+        string? value,
+        out IReadOnlyList<string> fingerprints,
+        out string reason)
+    {
+        var parts = SplitFingerprintInput(value).ToArray();
+        if (parts.Length == 0)
+        {
+            fingerprints = [];
+            reason = "인증서 SHA-256 지문을 하나 이상 입력해야 합니다.";
+            return false;
+        }
+
+        var invalid = parts.Any(part => NormalizeFingerprint(part).Length != 64);
+        var normalized = parts
+            .Select(NormalizeFingerprint)
+            .Where(item => item.Length == 64)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (invalid)
+        {
+            fingerprints = [];
+            reason = "각 인증서 SHA-256 지문은 64자리 16진수여야 합니다.";
+            return false;
+        }
+        if (normalized.Length > 2)
+        {
+            fingerprints = [];
+            reason = "인증서 지문은 현재 인증서와 예정 인증서를 합쳐 최대 2개까지 입력할 수 있습니다.";
+            return false;
+        }
+
+        fingerprints = normalized;
+        reason = string.Empty;
+        return true;
+    }
+
     public static bool IsValidForLiveConnection(ViewerSettings settings, out string reason)
     {
         var clean = Sanitize(settings);
@@ -88,9 +145,9 @@ public static class ViewerSettingsSanitizer
             reason = "Agent 주소는 HTTPS URL이어야 합니다.";
             return false;
         }
-        if (clean.CertificateFingerprint.Length != 64)
+        if (clean.AcceptedCertificateFingerprints.Count is < 1 or > 2)
         {
-            reason = "인증서 SHA-256 지문은 64자리여야 합니다.";
+            reason = "인증서 SHA-256 지문은 64자리이며 최대 2개까지 허용됩니다.";
             return false;
         }
         if (string.IsNullOrWhiteSpace(clean.BearerToken))
@@ -124,6 +181,12 @@ public static class ViewerSettingsSanitizer
 
     private static double NormalizeCoordinate(double value) => IsFinite(value) ? Math.Clamp(value, -32000, 32000) : -32000;
     private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
+
+    private static IEnumerable<string> SplitFingerprintInput(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        return value.Split([',', ';', '\r', '\n', '\t', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
 }
 
 public sealed class ViewerSettingsStore

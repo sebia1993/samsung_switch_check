@@ -63,6 +63,14 @@ public sealed class PersistenceTests
             Assert.Equal(1, counts.RawCount);
             Assert.Equal(2, counts.EventCount);
             Assert.Equal(1, counts.AuditCount);
+            await using (var connection = new SqliteConnection($"Data Source={options.DatabasePath}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT total_bytes FROM raw_storage_stats WHERE singleton=1;";
+                var protectedBytes = Convert.ToInt64(await command.ExecuteScalarAsync());
+                Assert.InRange(protectedBytes, 700L * 1024L, 1024L * 1024L);
+            }
 
             var reopened = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
             await reopened.InitializeAsync();
@@ -108,6 +116,11 @@ public sealed class PersistenceTests
             Assert.True(firstPage.HasMore);
             Assert.Equal([EventChangeKind.Created, EventChangeKind.Acknowledged],
                 firstPage.Changes.Select(item => item.ChangeKind));
+            Assert.Equal(EventState.New, firstPage.Changes[0].Event.State);
+            Assert.Null(firstPage.Changes[0].Event.AcknowledgedUtc);
+            Assert.Equal(EventState.Acknowledged, firstPage.Changes[1].Event.State);
+            Assert.NotNull(firstPage.Changes[1].Event.AcknowledgedUtc);
+            Assert.Null(firstPage.Changes[1].Event.RecoveredUtc);
 
             var secondPage = await store.GetEventChangesAsync(firstPage.NextCursor, 2);
             var recovery = Assert.Single(secondPage.Changes);
@@ -133,7 +146,7 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task VersionOneDatabaseIsBackedUpAndMigratedToVersionTwo()
+    public async Task VersionOneDatabaseIsBackedUpMigratedToVersionFourAndLegacyRawIsPurged()
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-MigrationTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -153,10 +166,17 @@ public sealed class PersistenceTests
                         title TEXT NOT NULL, message TEXT NOT NULL, state TEXT NOT NULL,
                         occurred_utc TEXT NOT NULL, acknowledged_utc TEXT NULL, recovered_utc TEXT NULL,
                         condition_key TEXT NOT NULL, details_json TEXT NOT NULL);
+                    CREATE TABLE raw_blobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+                        command_id TEXT NOT NULL, captured_utc TEXT NOT NULL,
+                        content BLOB NOT NULL, size_bytes INTEGER NOT NULL);
                     INSERT INTO events(event_id, device_id, severity, type, title, message, state,
                         occurred_utc, condition_key, details_json)
                     VALUES('legacy-event', 'TEST-SW-01', 'Warning', 'legacy', 'Legacy', 'Sanitized', 'New',
                         '2026-01-01T00:00:00.0000000Z', 'legacy:1', '{}');
+                    INSERT INTO raw_blobs(device_id, command_id, captured_utc, content, size_bytes)
+                    VALUES('TEST-SW-01', 'system', '2026-01-01T00:00:00.0000000Z',
+                        CAST('legacy plaintext evidence' AS BLOB), 25);
                     """;
                 await command.ExecuteNonQueryAsync();
             }
@@ -168,11 +188,154 @@ public sealed class PersistenceTests
             var page = await store.GetEventChangesAsync(0);
 
             Assert.True(readiness.Ready);
-            Assert.Equal(2, readiness.SchemaVersion);
-            Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v1-*.bak"));
+            Assert.Equal(4, readiness.SchemaVersion);
+            var backupPath = Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v1-*.bak"));
+            await using (var current = new SqliteConnection($"Data Source={path}"))
+            {
+                await current.OpenAsync();
+                await using (var rawCount = current.CreateCommand())
+                {
+                    rawCount.CommandText = "SELECT COUNT(*) FROM raw_blobs;";
+                    Assert.Equal(0L, Convert.ToInt64(await rawCount.ExecuteScalarAsync()));
+                }
+                await using (var schema = current.CreateCommand())
+                {
+                    schema.CommandText =
+                        "SELECT COUNT(*) FROM pragma_table_info('raw_blobs') WHERE name='protection_version';";
+                    Assert.Equal(1L, Convert.ToInt64(await schema.ExecuteScalarAsync()));
+                }
+            }
+            await using (var backup = new SqliteConnection($"Data Source={backupPath}"))
+            {
+                await backup.OpenAsync();
+                await using var rawCount = backup.CreateCommand();
+                rawCount.CommandText = "SELECT COUNT(*) FROM raw_blobs;";
+                Assert.Equal(0L, Convert.ToInt64(await rawCount.ExecuteScalarAsync()));
+            }
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", backupPath, backupPath + "-wal" }
+                         .Where(File.Exists))
+            {
+                Assert.DoesNotContain("legacy plaintext evidence",
+                    System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(candidate)),
+                    StringComparison.Ordinal);
+            }
             var migrated = Assert.Single(page.Changes);
             Assert.Equal("legacy-event", migrated.Event.Id);
             Assert.Equal(EventChangeKind.Created, migrated.ChangeKind);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+                // Best-effort temporary cleanup on Windows.
+            }
+        }
+    }
+
+    [Fact]
+    public async Task VersionThreeDatabaseUpgradePurgesLegacyRawBeforeCreatingBackup()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-V3RawMigrationTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, "switchwatch.db");
+        try
+        {
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL);
+                    INSERT INTO schema_migrations VALUES(1, '2026-01-01T00:00:00.0000000Z');
+                    INSERT INTO schema_migrations VALUES(2, '2026-01-02T00:00:00.0000000Z');
+                    INSERT INTO schema_migrations VALUES(3, '2026-01-03T00:00:00.0000000Z');
+                    CREATE TABLE snapshots (
+                        device_id TEXT NOT NULL, command_id TEXT NOT NULL, captured_utc TEXT NOT NULL,
+                        data_json TEXT NOT NULL, PRIMARY KEY (device_id, command_id));
+                    CREATE TABLE events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+                        device_id TEXT NOT NULL, severity TEXT NOT NULL, type TEXT NOT NULL,
+                        title TEXT NOT NULL, message TEXT NOT NULL, state TEXT NOT NULL,
+                        occurred_utc TEXT NOT NULL, acknowledged_utc TEXT NULL, recovered_utc TEXT NULL,
+                        condition_key TEXT NOT NULL, details_json TEXT NOT NULL,
+                        is_active_condition INTEGER NOT NULL DEFAULT 0);
+                    CREATE TABLE event_changes (
+                        change_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT NOT NULL, change_kind TEXT NOT NULL, occurred_utc TEXT NOT NULL,
+                        event_snapshot_json TEXT NULL,
+                        FOREIGN KEY(event_id) REFERENCES events(event_id) ON DELETE CASCADE);
+                    CREATE TABLE audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_utc TEXT NOT NULL,
+                        action TEXT NOT NULL, actor TEXT NOT NULL, device_id TEXT NULL,
+                        outcome TEXT NOT NULL, detail TEXT NOT NULL);
+                    CREATE TABLE pairing_codes (
+                        code_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
+                        expires_utc TEXT NOT NULL, used_utc TEXT NULL);
+                    CREATE TABLE api_tokens (
+                        token_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
+                        last_used_utc TEXT NULL, revoked_utc TEXT NULL);
+                    CREATE TABLE raw_blobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+                        command_id TEXT NOT NULL, captured_utc TEXT NOT NULL,
+                        content BLOB NOT NULL, size_bytes INTEGER NOT NULL);
+                    CREATE INDEX ix_raw_captured ON raw_blobs(captured_utc);
+                    CREATE TABLE raw_storage_stats (
+                        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                        total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0));
+                    INSERT INTO raw_storage_stats VALUES(1, 0);
+                    CREATE TRIGGER raw_blobs_count_insert AFTER INSERT ON raw_blobs
+                    BEGIN
+                        UPDATE raw_storage_stats SET total_bytes=total_bytes + NEW.size_bytes WHERE singleton=1;
+                    END;
+                    CREATE TRIGGER raw_blobs_count_delete AFTER DELETE ON raw_blobs
+                    BEGIN
+                        UPDATE raw_storage_stats SET total_bytes=MAX(0, total_bytes - OLD.size_bytes) WHERE singleton=1;
+                    END;
+                    INSERT INTO raw_blobs(device_id, command_id, captured_utc, content, size_bytes)
+                    VALUES('TEST-SW-01', 'system', '2026-01-03T00:00:00.0000000Z',
+                        CAST('schema3 plaintext evidence' AS BLOB), 26);
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var store = new SqliteAgentStore(new AgentOptions { DataDirectory = folder },
+                NullLogger<SqliteAgentStore>.Instance);
+            await store.InitializeAsync();
+
+            Assert.Equal(4, (await store.CheckReadinessAsync()).SchemaVersion);
+            var backupPath = Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v3-*.bak"));
+            await using (var current = new SqliteConnection($"Data Source={path}"))
+            {
+                await current.OpenAsync();
+                await using var command = current.CreateCommand();
+                command.CommandText =
+                    "SELECT COUNT(*), COALESCE(MAX(protection_version), 1) FROM raw_blobs;";
+                await using var reader = await command.ExecuteReaderAsync();
+                Assert.True(await reader.ReadAsync());
+                Assert.Equal(0, reader.GetInt32(0));
+            }
+            await using (var backup = new SqliteConnection($"Data Source={backupPath}"))
+            {
+                await backup.OpenAsync();
+                await using var command = backup.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM raw_blobs;";
+                Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+            }
+            SqliteConnection.ClearAllPools();
+            foreach (var candidate in new[] { path, path + "-wal", backupPath, backupPath + "-wal" }
+                         .Where(File.Exists))
+            {
+                Assert.DoesNotContain("schema3 plaintext evidence",
+                    System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(candidate)),
+                    StringComparison.Ordinal);
+            }
         }
         finally
         {
@@ -241,7 +404,7 @@ public sealed class PersistenceTests
             {
                 var readiness = await store.CheckReadinessAsync();
                 Assert.True(readiness.Ready);
-                Assert.Equal(2, readiness.SchemaVersion);
+                Assert.Equal(4, readiness.SchemaVersion);
             }
             Assert.Equal(initialCheck, store.LastIntegrityCheckUtc);
 
@@ -249,7 +412,7 @@ public sealed class PersistenceTests
             {
                 await connection.OpenAsync();
                 await using var command = connection.CreateCommand();
-                command.CommandText = "DELETE FROM schema_migrations WHERE version=2;";
+                command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
                 Assert.Equal(1, await command.ExecuteNonQueryAsync());
             }
 
@@ -262,8 +425,14 @@ public sealed class PersistenceTests
             var refreshed = await store.CheckReadinessAsync();
             Assert.False(refreshed.Ready);
             Assert.Equal(AgentErrorCodes.StorageWriteFailed, refreshed.ErrorCode);
-            Assert.Equal(1, refreshed.SchemaVersion);
+            Assert.Equal(3, refreshed.SchemaVersion);
             Assert.True(store.LastIntegrityCheckUtc > initialCheck);
+
+            var writeFailure = await Assert.ThrowsAsync<AgentOperationException>(() =>
+                store.UpsertSnapshotAsync(new DeviceSnapshot("TEST-SW-01", "blocked-write",
+                    DateTimeOffset.UtcNow, new System.Text.Json.Nodes.JsonObject { ["value"] = 1 })));
+            Assert.Equal(AgentErrorCodes.StorageWriteFailed, writeFailure.Code);
+            Assert.Null(await store.GetSnapshotAsync("TEST-SW-01", "blocked-write"));
         }
         finally
         {
@@ -423,17 +592,97 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public void PocConfigurationRejectsUnsupportedModel()
+    public async Task DatabaseEnforcesOneUnrecoveredActiveEventPerCondition()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ActiveConditionTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var options = new AgentOptions { DataDirectory = folder };
+            var store = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
+            await store.InitializeAsync();
+            await store.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Critical,
+                "uplink-down", "Uplink down", "Sanitized", EventState.New, "uplink:24",
+                IsActiveCondition: true));
+
+            var conflict = await Assert.ThrowsAsync<AgentOperationException>(() => store.InsertEventAsync(
+                new NewEvent("TEST-SW-01", EventSeverity.Critical, "uplink-down", "Duplicate",
+                    "Sanitized", EventState.New, "uplink:24", IsActiveCondition: true)));
+            Assert.Equal(409, conflict.StatusCode);
+
+            await store.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Info,
+                "independent", "Independent", "Sanitized", EventState.New, "info:1"));
+            Assert.Equal(1, (await store.GetEventSummaryAsync()).ActiveCritical);
+            Assert.True((await store.CheckReadinessAsync()).Ready);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+                // Best-effort temporary cleanup on Windows.
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("IES4224GP")]
+    [InlineData("IES4028XP")]
+    [InlineData("IES4226XP")]
+    public void ConfigurationAcceptsSupportedSamsungModels(string model)
     {
         var options = new AgentOptions
         {
             DataDirectory = Path.GetTempPath(),
-            Switches = [new SwitchOptions { Model = "IES4028XP" }]
+            Switches = [new SwitchOptions { Model = model }]
+        };
+
+        AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath());
+
+        Assert.Equal(model, options.Switches[0].Model);
+    }
+
+    [Fact]
+    public void ConfigurationRejectsUnsupportedModel()
+    {
+        var options = new AgentOptions
+        {
+            DataDirectory = Path.GetTempPath(),
+            Switches = [new SwitchOptions { Model = "UNSUPPORTED-SWITCH" }]
         };
 
         var exception = Assert.Throws<AgentConfigurationException>(() =>
             AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath()));
         Assert.Equal("CONFIG_INVALID", exception.Code);
+    }
+
+    [Fact]
+    public void ConfigurationAcceptsMultipleUniqueDevicesAndRejectsDuplicateIds()
+    {
+        var options = new AgentOptions
+        {
+            DataDirectory = Path.GetTempPath(),
+            MaxConcurrentDevices = 2,
+            Switches =
+            [
+                new SwitchOptions { Id = "SW-01", Model = "IES4224GP", Host = "192.0.2.10" },
+                new SwitchOptions { Id = "SW-02", Model = "IES4028XP", Host = "192.0.2.11" },
+                new SwitchOptions { Id = "SW-03", Model = "IES4226XP", Host = "192.0.2.12" }
+            ]
+        };
+
+        AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath());
+        Assert.Equal(3, options.Switches.Count);
+
+        options.Switches[2].Id = "sw-01";
+        var duplicate = Assert.Throws<AgentConfigurationException>(() =>
+            AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath()));
+        Assert.Equal("CONFIG_INVALID", duplicate.Code);
     }
 
     [Fact]

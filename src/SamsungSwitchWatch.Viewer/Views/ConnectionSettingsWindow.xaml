@@ -14,12 +14,21 @@
         <StackPanel Grid.Row="3" Margin="0,18,0,0">
             <TextBlock Text="Agent HTTPS 주소" FontWeight="SemiBold"/>
             <TextBox x:Name="AgentUriTextBox" Margin="0,6,0,12" Height="36" Padding="10,6" AutomationProperties.Name="Agent HTTPS 주소"/>
-            <TextBlock Text="인증서 SHA-256 지문" FontWeight="SemiBold"/>
-            <TextBox x:Name="FingerprintTextBox" Margin="0,6,0,12" Height="56" Padding="10,6" TextWrapping="Wrap" AutomationProperties.Name="서버 인증서 SHA-256 지문"/>
+            <TextBlock Text="인증서 SHA-256 지문 (최대 2개)" FontWeight="SemiBold"/>
+            <TextBox x:Name="FingerprintTextBox" Margin="0,6,0,4" Height="62" Padding="10,6" TextWrapping="Wrap"
+                     AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                     AutomationProperties.Name="서버 인증서 SHA-256 지문"
+                     AutomationProperties.HelpText="현재 인증서와 교체 예정 인증서 지문을 줄바꿈 또는 쉼표로 구분해 최대 두 개 입력합니다."/>
+            <TextBlock Margin="0,0,0,12" Text="인증서 교체 중이면 현재·예정 지문을 줄바꿈 또는 쉼표로 구분하세요. 원격 응답은 자동으로 신뢰하지 않습니다."
+                       FontSize="11" Foreground="{StaticResource MutedTextBrush}"/>
             <TextBlock Text="페어링 토큰" FontWeight="SemiBold"/>
             <PasswordBox x:Name="TokenPasswordBox" Margin="0,6,0,0" Height="36" Padding="10,6" AutomationProperties.Name="페어링 토큰"/>
             <TextBlock Margin="0,5,0,0" Text="비워 두면 현재 토큰을 유지합니다. 토큰은 현재 Windows 사용자용 DPAPI로 보호됩니다." FontSize="11" Foreground="{StaticResource MutedTextBrush}"/>
         </StackPanel>
+
+        <CheckBox Grid.Row="4" x:Name="StartMinimizedCheckBox" Margin="0,14,0,0"
+                  Content="Windows 시작 시 트레이에 최소화"
+                  AutomationProperties.Name="시작 시 트레이에 최소화"/>
 
         <Border Grid.Row="5" Margin="0,14,0,0" Padding="12" Background="#EFF6FF" CornerRadius="4" VerticalAlignment="Bottom">
             <TextBlock Text="Viewer는 Telnet 자격 증명이나 명령 원문을 저장하지 않습니다. 인증서 지문이 다르면 연결을 차단합니다." Foreground="#1E40AF"/>

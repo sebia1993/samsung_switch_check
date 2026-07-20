@@ -134,6 +134,10 @@ function Set-SswRestrictedDirectoryAcl {
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
         throw "ACL을 설정할 폴더가 없습니다: $resolved"
     }
+    $rootItem = Get-Item -LiteralPath $resolved -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "junction 또는 symlink 폴더는 ACL을 자동 변경하지 않습니다: $resolved"
+    }
 
     $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
     $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
@@ -311,4 +315,227 @@ public sealed class SswLocalHealthHttpHandler : HttpClientHandler
     }
 
     throw "Agent readiness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 마지막 상태: $lastStatus"
+}
+
+function Set-SswInstallerBackupAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $resolved = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw "백업 폴더가 없습니다: $resolved" }
+    $rootItem = Get-Item -LiteralPath $resolved -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "junction 또는 symlink 백업 폴더는 사용하지 않습니다: $resolved"
+    }
+    $acl = Get-Acl -LiteralPath $resolved
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @($acl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
+        $acl.PurgeAccessRules($identity)
+    }
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow)))
+    }
+    Set-Acl -LiteralPath $resolved -AclObject $acl
+}
+
+function Grant-SswCertificatePrivateKeyRead {
+    param(
+        [Parameter(Mandatory = $true)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+        [Parameter(Mandatory = $true)][string]$ServiceSid
+    )
+
+    $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
+    if (-not $rsa) { throw 'HTTPS 인증서의 RSA 개인 키를 찾지 못했습니다.' }
+    try {
+        $keyPath = $null
+        if ($rsa -is [Security.Cryptography.RSACng]) {
+            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($rsa.Key.UniqueName)"
+        }
+        elseif ($rsa -is [Security.Cryptography.RSACryptoServiceProvider]) {
+            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\RSA\MachineKeys\$($rsa.CspKeyContainerInfo.UniqueKeyContainerName)"
+        }
+        if ([string]::IsNullOrWhiteSpace($keyPath) -or -not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
+            throw 'HTTPS 인증서 개인 키 파일 위치를 확인하지 못했습니다.'
+        }
+        $acl = Get-Acl -LiteralPath $keyPath
+        $identity = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $identity, [Security.AccessControl.FileSystemRights]::Read,
+            [Security.AccessControl.AccessControlType]::Allow)
+        $acl.SetAccessRule($rule)
+        Set-Acl -LiteralPath $keyPath -AclObject $acl
+        $verified = Get-Acl -LiteralPath $keyPath
+        if (-not ($verified.Access | Where-Object {
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $ServiceSid -and
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne 0
+        })) { throw '서비스 SID의 인증서 개인 키 읽기 권한을 확인하지 못했습니다.' }
+    }
+    finally { $rsa.Dispose() }
+}
+
+function Write-SswOperationJournal {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Operation,
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$Status,
+        [string]$Version,
+        [string[]]$ErrorCodes = @()
+    )
+
+    $journalPath = [IO.Path]::GetFullPath($Path)
+    $parent = Split-Path $journalPath -Parent
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $payload = [ordered]@{
+        formatVersion = 1
+        product = 'SamsungSwitchWatch'
+        operation = $Operation
+        transactionId = $TransactionId
+        stage = $Stage
+        status = $Status
+        version = $Version
+        updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        errorCodes = @($ErrorCodes)
+    } | ConvertTo-Json -Depth 5
+    $temporary = "$journalPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $replaceBackup = "$journalPath.$([Guid]::NewGuid().ToString('N')).bak"
+    try {
+        [IO.File]::WriteAllText($temporary, $payload, (New-Object Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
+            [IO.File]::Replace($temporary, $journalPath, $replaceBackup, $true)
+            if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) { Remove-Item -LiteralPath $replaceBackup -Force }
+        }
+        else {
+            Move-Item -LiteralPath $temporary -Destination $journalPath
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
+        if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) { Remove-Item -LiteralPath $replaceBackup -Force }
+    }
+}
+
+function Invoke-SswBestEffortPlan {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Plan
+    )
+
+    $errors = New-Object Collections.Generic.List[string]
+    foreach ($step in $Plan) {
+        try {
+            & $step.Action
+        }
+        catch {
+            $code = "{0}_FAILED" -f ([string]$step.Name).ToUpperInvariant().Replace('-', '_')
+            $errors.Add($code)
+            Write-Warning ("복구 단계 실패 [{0}]: {1}" -f $step.Name, $_.Exception.Message)
+        }
+    }
+    return @($errors)
+}
+
+function Get-SswAgentFirewallSnapshot {
+    param([string]$DisplayName = 'Samsung Switch Watch Agent HTTPS')
+
+    $rules = @(Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue)
+    if ($rules.Count -eq 0) { return $null }
+    if ($rules.Count -ne 1) { throw "Agent 방화벽 규칙이 중복되어 있습니다: $DisplayName" }
+    $rule = $rules[0]
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule
+    return [pscustomobject]@{
+        Name = [string]$rule.Name
+        DisplayName = [string]$rule.DisplayName
+        Group = [string]$rule.Group
+        Description = [string]$rule.Description
+        Enabled = [string]$rule.Enabled
+        Direction = [string]$rule.Direction
+        Action = [string]$rule.Action
+        Profile = [string]$rule.Profile
+        Protocol = [string]$port.Protocol
+        LocalPort = [string]$port.LocalPort
+        RemoteAddress = @($address.RemoteAddress | ForEach-Object { [string]$_ })
+    }
+}
+
+function Test-SswOwnedAgentFirewallRule {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+    return $Snapshot.Name -eq 'SamsungSwitchWatchAgent-Https' -and
+        $Snapshot.Group -eq 'Samsung Switch Watch' -and
+        $Snapshot.Description -eq 'Owned by SamsungSwitchWatchAgent installer v1'
+}
+
+function Test-SswAgentFirewallRuleExact {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$RemoteAddress
+    )
+
+    return (Test-SswOwnedAgentFirewallRule -Snapshot $Snapshot) -and
+        $Snapshot.Enabled -eq 'True' -and $Snapshot.Direction -eq 'Inbound' -and
+        $Snapshot.Action -eq 'Allow' -and $Snapshot.Protocol -in @('TCP', '6') -and
+        $Snapshot.LocalPort -eq [string]$Port -and $Snapshot.RemoteAddress.Count -eq 1 -and
+        $Snapshot.RemoteAddress[0] -eq $RemoteAddress -and
+        $Snapshot.Profile -notmatch 'Public'
+}
+
+function New-SswAgentFirewallRule {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$RemoteAddress
+    )
+
+    New-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' `
+        -DisplayName 'Samsung Switch Watch Agent HTTPS' -Group 'Samsung Switch Watch' `
+        -Description 'Owned by SamsungSwitchWatchAgent installer v1' `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port `
+        -RemoteAddress $RemoteAddress -Profile Domain,Private | Out-Null
+}
+
+function Restore-SswAgentFirewallSnapshot {
+    param([AllowNull()][object]$Snapshot)
+
+    Get-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    if ($null -eq $Snapshot) { return }
+    $parameters = @{
+        Name = $Snapshot.Name
+        DisplayName = $Snapshot.DisplayName
+        Enabled = $Snapshot.Enabled
+        Direction = $Snapshot.Direction
+        Action = $Snapshot.Action
+        Protocol = $Snapshot.Protocol
+        LocalPort = $Snapshot.LocalPort
+        RemoteAddress = @($Snapshot.RemoteAddress)
+        Profile = $Snapshot.Profile
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Group)) {
+        $parameters.Group = [string]$Snapshot.Group
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Description)) {
+        $parameters.Description = [string]$Snapshot.Description
+    }
+    New-NetFirewallRule @parameters | Out-Null
+}
+
+function Remove-SswOwnedAgentFirewallRule {
+    param([switch]$AllowMissing)
+
+    $snapshot = Get-SswAgentFirewallSnapshot
+    if ($null -eq $snapshot) {
+        if ($AllowMissing) { return }
+        throw 'Agent 방화벽 규칙을 찾지 못했습니다.'
+    }
+    if (-not (Test-SswOwnedAgentFirewallRule -Snapshot $snapshot)) {
+        throw '소유권 표식이 없는 방화벽 규칙은 자동 제거하지 않습니다.'
+    }
+    Get-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' -ErrorAction Stop | Remove-NetFirewallRule
 }

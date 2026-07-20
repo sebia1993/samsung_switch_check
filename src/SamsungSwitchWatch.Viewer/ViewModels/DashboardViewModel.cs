@@ -27,8 +27,13 @@ public static class StatusAggregator
     }
 }
 
+public sealed record EventFilterOption(EventFilter Value, string Label);
+
 public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 {
+    private sealed record AlertCandidate(long ChangeSequence, string ChangeKind, SwitchEventDto Event);
+    private enum AgentChannel { Http, Realtime }
+
     private const int EventPageSize = 500;
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(60);
 
@@ -48,18 +53,25 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private DeviceViewModel? _selectedDevice;
     private EventViewModel? _selectedEvent;
     private AgentConnectionState _connectionState = AgentConnectionState.Connecting;
+    private AgentConnectionState _httpConnectionState = AgentConnectionState.Connecting;
+    private AgentConnectionState _realtimeConnectionState = AgentConnectionState.Connecting;
     private bool _isBusy;
     private string _operationMessage = "초기 상태를 불러오는 중입니다.";
     private string _collectorVersion = "-";
     private string _collectorSummary = "연결 준비 중";
     private DateTimeOffset? _lastRefreshedAt;
+    private DateTimeOffset? _lastSuccessfulReceiptAt;
     private string _selectedCheckId = "interface_status";
     private string _currentAgentId = "agent";
+    private string _eventSearchText = string.Empty;
+    private EventFilterOption _selectedEventFilter;
+    private long? _authoritativeUnacknowledged;
+    private int _apiVersion = 2;
+    private IReadOnlyList<OperationalStatusDto> _snapshotOperationalStatuses = [];
     private long _changeCursor;
     private long _settingsGeneration;
     private long _feedResetCount;
     private bool _hasSnapshot;
-    private bool _lastSnapshotReady = true;
     private bool _allowLiveAlerts;
     private bool _initialized;
     private bool _disposed;
@@ -79,6 +91,16 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _client = CreateInitialClient(_settings);
         SubscribeClient(_client);
 
+        EventFilters =
+        [
+            new(EventFilter.All, "전체"),
+            new(EventFilter.Unacknowledged, "미확인"),
+            new(EventFilter.NewLog, "새 로그"),
+            new(EventFilter.Critical, "장애"),
+            new(EventFilter.Recovered, "복구")
+        ];
+        _selectedEventFilter = EventFilters[0];
+
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy && ConnectionState != AgentConnectionState.NeedsPairing);
         ManualCheckCommand = new AsyncRelayCommand(ExecuteManualCheckAsync, () => !IsBusy && SelectedDevice is not null && ConnectionState != AgentConnectionState.NeedsPairing);
         AcknowledgeCommand = new RelayCommand<EventViewModel>(item => _ = AcknowledgeAsync(item), item => item is { Acknowledged: false });
@@ -87,10 +109,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public ObservableCollection<DeviceViewModel> Devices { get; } = [];
     public ObservableCollection<EventViewModel> RecentEvents { get; } = [];
+    public ObservableCollection<EventViewModel> FilteredEvents { get; } = [];
     public ObservableCollection<EventViewModel> SelectedDeviceLogs { get; } = [];
     public ObservableCollection<EventViewModel> SelectedDeviceChanges { get; } = [];
     public ObservableCollection<DeviceMetricDto> CollectorHealth { get; } = [];
+    public ObservableCollection<OperationalStatusDto> OperationalStatuses { get; } = [];
     public IReadOnlyList<string> RegisteredChecks { get; } = ["interface_status", "system", "log_ram", "version"];
+    public IReadOnlyList<EventFilterOption> EventFilters { get; }
 
     public ICommand RefreshCommand { get; }
     public ICommand ManualCheckCommand { get; }
@@ -132,7 +157,38 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(ConnectionText));
                 OnPropertyChanged(nameof(ConnectionHealth));
+                OnPropertyChanged(nameof(MiniCurrentStatusText));
+                OnPropertyChanged(nameof(MiniIssueTitle));
+                OnPropertyChanged(nameof(MiniIssueDetail));
                 NotifyCommandStates();
+            }
+        }
+    }
+
+    public AgentConnectionState HttpConnectionState
+    {
+        get => _httpConnectionState;
+        private set
+        {
+            if (SetProperty(ref _httpConnectionState, value))
+            {
+                OnPropertyChanged(nameof(HttpConnectionText));
+                UpdateCombinedConnectionState();
+                if (_hasSnapshot && _lastRefreshedAt is { } generatedAt) RebuildCollectorHealth(generatedAt);
+            }
+        }
+    }
+
+    public AgentConnectionState RealtimeConnectionState
+    {
+        get => _realtimeConnectionState;
+        private set
+        {
+            if (SetProperty(ref _realtimeConnectionState, value))
+            {
+                OnPropertyChanged(nameof(RealtimeConnectionText));
+                UpdateCombinedConnectionState();
+                if (_hasSnapshot && _lastRefreshedAt is { } generatedAt) RebuildCollectorHealth(generatedAt);
             }
         }
     }
@@ -142,6 +198,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentConnectionState.Connected => "Agent 연결됨",
         AgentConnectionState.Demo => "데모 모드",
         AgentConnectionState.Connecting => "연결 중",
+        AgentConnectionState.Reconnecting => "실시간 재연결 중",
         AgentConnectionState.Stale => "현재 미확인",
         AgentConnectionState.NeedsPairing => "연결 설정 필요",
         _ => "Agent 오프라인"
@@ -151,8 +208,29 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         AgentConnectionState.Connected or AgentConnectionState.Demo => DeviceHealth.Normal,
         AgentConnectionState.Connecting => DeviceHealth.Loading,
+        AgentConnectionState.Reconnecting => DeviceHealth.Warning,
         AgentConnectionState.Stale => DeviceHealth.Warning,
         _ => DeviceHealth.Disconnected
+    };
+
+    public string HttpConnectionText => HttpConnectionState switch
+    {
+        AgentConnectionState.Connected => "HTTPS 상태 수신 정상",
+        AgentConnectionState.Demo => "데모 상태 수신",
+        AgentConnectionState.Stale => "HTTPS 상태 준비 안 됨",
+        AgentConnectionState.NeedsPairing => "HTTPS 인증 필요",
+        AgentConnectionState.Connecting => "HTTPS 연결 중",
+        _ => "HTTPS 상태 수신 실패"
+    };
+
+    public string RealtimeConnectionText => RealtimeConnectionState switch
+    {
+        AgentConnectionState.Connected => "실시간 이벤트 연결됨",
+        AgentConnectionState.Demo => "데모 이벤트 연결됨",
+        AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
+        AgentConnectionState.Connecting => "실시간 이벤트 연결 중",
+        AgentConnectionState.NeedsPairing => "실시간 이벤트 인증 필요",
+        _ => "실시간 이벤트 연결 끊김"
     };
 
     public bool IsBusy
@@ -190,7 +268,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public string LastRefreshText => _lastRefreshedAt is null
         ? "아직 점검하지 않음"
-        : $"마지막 수신 {_lastRefreshedAt.Value.LocalDateTime:HH:mm:ss}";
+        : $"마지막 상태 생성 {_lastRefreshedAt.Value.LocalDateTime:MM-dd HH:mm:ss}";
+
+    public DateTimeOffset? LastSuccessfulReceiptAt => _lastSuccessfulReceiptAt;
+    public string LastSuccessfulReceiptText => _lastSuccessfulReceiptAt is null
+        ? "성공 수신 없음"
+        : $"마지막 성공 수신 {_lastSuccessfulReceiptAt.Value.LocalDateTime:MM-dd HH:mm:ss}";
 
     public string SelectedCheckId
     {
@@ -198,14 +281,70 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         set => SetProperty(ref _selectedCheckId, value);
     }
 
+    public string EventSearchText
+    {
+        get => _eventSearchText;
+        set
+        {
+            if (SetProperty(ref _eventSearchText, value ?? string.Empty)) RebuildFilteredEvents();
+        }
+    }
+
+    public EventFilterOption SelectedEventFilter
+    {
+        get => _selectedEventFilter;
+        set
+        {
+            if (value is not null && SetProperty(ref _selectedEventFilter, value)) RebuildFilteredEvents();
+        }
+    }
+
     public int TotalCount => HealthSummary.Total;
     public int NormalCount => HealthSummary.Normal;
     public int WarningCount => HealthSummary.Warning;
     public int CriticalCount => HealthSummary.Critical;
     public int DisconnectedCount => HealthSummary.Disconnected;
+    public int CriticalDisplayCount => CriticalCount + DisconnectedCount;
     public int NewLogCount => RecentEvents.Count(item => !item.Acknowledged && IsLogEvent(item));
-    public int UnacknowledgedCount => RecentEvents.Count(item => !item.Acknowledged);
+    public int RecoveredCount => RecentEvents.Count(item => item.Recovered);
+    public int UnacknowledgedCount => (int)Math.Clamp(
+        _authoritativeUnacknowledged ?? RecentEvents.LongCount(item => !item.Acknowledged),
+        0,
+        int.MaxValue);
+    public long? AuthoritativeUnacknowledgedCount => _authoritativeUnacknowledged;
+    public int VisibleEventCount => FilteredEvents.Count;
+    public string EventCountText => $"미확인 {UnacknowledgedCount:N0} · 표시 {VisibleEventCount:N0}";
+    public string ApiVersionText => $"API v{_apiVersion}";
+    public string MiniCurrentStatusText => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+        ? "현재 상태 확인됨"
+        : "현재 상태 미확인";
+    public string MiniIssueTitle => ConnectionState switch
+    {
+        AgentConnectionState.NeedsPairing => "Viewer 연결 설정 필요",
+        AgentConnectionState.Offline => "원격 수집기 연결 끊김",
+        AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
+        AgentConnectionState.Stale => "원격 상태 수신 지연",
+        _ when CriticalDisplayCount > 0 => $"장애 장비 {CriticalDisplayCount}대",
+        _ when WarningCount > 0 => $"경고 장비 {WarningCount}대",
+        _ => "모든 장비 정상"
+    };
+    public string MiniIssueDetail => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+        ? $"새 로그 {NewLogCount}건 · 미확인 {UnacknowledgedCount}건"
+        : "정상 캐시는 유지 · 신규 상태 수신 안 됨";
     public DeviceHealthSummary HealthSummary => StatusAggregator.Aggregate(Devices);
+
+    public bool NavigateToEvent(string? eventId)
+    {
+        if (string.IsNullOrWhiteSpace(eventId) || !_eventsById.TryGetValue(eventId, out var item)) return false;
+        EventSearchText = string.Empty;
+        SelectedEventFilter = EventFilters[0];
+        var device = Devices.FirstOrDefault(candidate => candidate.Id == item.DeviceId);
+        if (device is not null) SelectedDevice = device;
+        SelectedEvent = item;
+        return true;
+    }
+
+    public void ReportOperation(string message) => OperationMessage = message;
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -225,7 +364,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 await RunOnUiAsync(() =>
                 {
-                    ConnectionState = AgentConnectionState.NeedsPairing;
+                    HttpConnectionState = AgentConnectionState.NeedsPairing;
+                    RealtimeConnectionState = AgentConnectionState.NeedsPairing;
                     OperationMessage = "Agent 주소, 인증서 지문과 페어링 토큰을 설정해 주세요.";
                 }).ConfigureAwait(false);
                 _initialized = true;
@@ -233,17 +373,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
 
             AgentSnapshotDto? snapshot = null;
+            var hadPersistedCursor = false;
             try
             {
                 snapshot = await _client.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                ApplyCursorIdentity(snapshot);
+                hadPersistedCursor = ApplyCursorIdentity(snapshot);
                 await RunOnUiAsync(() => ApplySnapshotCore(snapshot)).ConfigureAwait(false);
                 var recent = await _client.GetRecentEventsAsync(EventPageSize, cancellationToken).ConfigureAwait(false);
                 await RunOnUiAsync(() => ApplyRecentEventsCore(recent)).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                await SetUnavailableStateAsync(exception).ConfigureAwait(false);
+                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
             }
 
             var hubStarted = false;
@@ -254,7 +395,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                await SetUnavailableStateAsync(exception).ConfigureAwait(false);
+                await SetUnavailableStateAsync(exception, AgentChannel.Realtime).ConfigureAwait(false);
             }
 
             var changeFeedSynchronized = false;
@@ -262,12 +403,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 try
                 {
-                    await SynchronizeChangesAsync(false, cancellationToken).ConfigureAwait(false);
+                    await SynchronizeChangesAsync(hadPersistedCursor, cancellationToken).ConfigureAwait(false);
                     changeFeedSynchronized = true;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    await SetUnavailableStateAsync(exception).ConfigureAwait(false);
+                    await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
                 }
             }
 
@@ -303,7 +444,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             NotifySummaryChanged();
         });
 
-    public async Task SynchronizeChangesAsync(bool raiseAlerts = false, CancellationToken cancellationToken = default)
+    public async Task SynchronizeChangesAsync(bool raiseCatchupSummary = false, CancellationToken cancellationToken = default)
     {
         if (_client is UnavailableAgentClient || _disposed) return;
         var client = _client;
@@ -312,7 +453,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try
         {
             if (!ReferenceEquals(client, _client)) return;
-            await SynchronizeChangesCoreAsync(client, raiseAlerts, linked.Token).ConfigureAwait(false);
+            await SynchronizeChangesCoreAsync(client, raiseCatchupSummary, linked.Token).ConfigureAwait(false);
         }
         finally
         {
@@ -322,12 +463,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SynchronizeChangesCoreAsync(
         IAgentClient client,
-        bool raiseAlerts,
+        bool raiseCatchupSummary,
         CancellationToken cancellationToken)
     {
-        await DrainBufferedChangesAsync(raiseAlerts, cancellationToken).ConfigureAwait(false);
+        var catchupCandidates = raiseCatchupSummary ? new List<AlertCandidate>() : null;
+        var feedResetBefore = Interlocked.Read(ref _feedResetCount);
+        await DrainBufferedChangesAsync(catchupCandidates, cancellationToken).ConfigureAwait(false);
         long target = -1;
         var pageCount = 0;
+        var completed = false;
         while (!cancellationToken.IsCancellationRequested)
         {
             if (++pageCount > 10_000) throw new InvalidDataException("EVENT_CHANGE_PAGE_LIMIT");
@@ -341,22 +485,31 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
             if (target < 0) target = Math.Max(before, page.HighWatermark);
             BufferChanges(page.Changes, live: false);
-            await DrainBufferedChangesAsync(raiseAlerts, cancellationToken).ConfigureAwait(false);
+            await DrainBufferedChangesAsync(catchupCandidates, cancellationToken).ConfigureAwait(false);
             var after = AppliedChangeCursor;
 
-            if (after >= target && !page.HasMore) break;
+            if (after >= target && !page.HasMore)
+            {
+                completed = true;
+                break;
+            }
             if (after == before)
             {
                 await RunOnUiAsync(() =>
                 {
-                    ConnectionState = _hasSnapshot ? AgentConnectionState.Stale : AgentConnectionState.Offline;
+                    HttpConnectionState = _hasSnapshot ? AgentConnectionState.Stale : AgentConnectionState.Offline;
                     OperationMessage = "이벤트 변경 순서에 빈 구간이 있어 다음 동기화를 기다립니다. · EVENT_CHANGE_GAP";
                 }).ConfigureAwait(false);
                 break;
             }
         }
 
-        await DrainBufferedChangesAsync(raiseAlerts, cancellationToken).ConfigureAwait(false);
+        await DrainBufferedChangesAsync(catchupCandidates, cancellationToken).ConfigureAwait(false);
+        if (completed && catchupCandidates is { Count: > 0 }
+            && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
+        {
+            await RunOnUiAsync(() => RaiseCatchupSummary(catchupCandidates)).ConfigureAwait(false);
+        }
     }
 
     public async Task SwitchClientAsync(ViewerSettings settings, CancellationToken cancellationToken = default)
@@ -410,6 +563,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         _eventsById.Clear();
                         SelectedDevice = null;
                         ApplySnapshotCore(snapshot);
+                        RealtimeConnectionState = snapshot.ConnectionState == AgentConnectionState.Demo
+                            ? AgentConnectionState.Demo
+                            : AgentConnectionState.Connected;
                         ApplyRecentEventsCore(recent);
                     }).ConfigureAwait(false);
                 }
@@ -420,14 +576,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
                 try
                 {
-                    await SynchronizeChangesAsync(false, cancellationToken).ConfigureAwait(false);
+                    await SynchronizeChangesAsync(hasCursor, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     // The replacement already passed snapshot, recent-event, hub,
                     // and change-feed preflight. A later network interruption makes
                     // the new connection stale; it must not resurrect old settings.
-                    await SetUnavailableStateAsync(exception).ConfigureAwait(false);
+                    await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -459,19 +615,21 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         if (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _))
         {
-            ConnectionState = AgentConnectionState.NeedsPairing;
+            HttpConnectionState = AgentConnectionState.NeedsPairing;
+            RealtimeConnectionState = AgentConnectionState.NeedsPairing;
             return new UnavailableAgentClient();
         }
 
         try { return _clientFactory.Create(settings); }
         catch (InvalidOperationException)
         {
-            ConnectionState = AgentConnectionState.NeedsPairing;
+            HttpConnectionState = AgentConnectionState.NeedsPairing;
+            RealtimeConnectionState = AgentConnectionState.NeedsPairing;
             return new UnavailableAgentClient();
         }
     }
 
-    private void ApplyCursorIdentity(AgentSnapshotDto snapshot)
+    private bool ApplyCursorIdentity(AgentSnapshotDto snapshot)
     {
         if (!string.Equals(_currentAgentId, snapshot.AgentId, StringComparison.Ordinal))
         {
@@ -485,16 +643,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         long cursor;
         lock (_settingsSync)
         {
-            if (!_settings.TryGetEventCursor(snapshot.AgentId, out cursor))
+            var hadPersistedCursor = _settings.TryGetEventCursor(snapshot.AgentId, out cursor);
+            if (!hadPersistedCursor)
             {
                 // LastEventSequence belonged to the v1 event stream and is not
                 // compatible with the v2 append-only change sequence.
                 cursor = snapshot.HighWatermark;
                 _settings.SetEventCursor(snapshot.AgentId, cursor);
             }
+            Interlocked.Exchange(ref _changeCursor, cursor);
+            ScheduleSettingsSave();
+            return hadPersistedCursor;
         }
-        Interlocked.Exchange(ref _changeCursor, cursor);
-        ScheduleSettingsSave();
     }
 
     private async Task SnapshotLoopAsync(CancellationToken cancellationToken)
@@ -504,7 +664,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                _ = await RefreshSnapshotAndChangesAsync(false, cancellationToken).ConfigureAwait(false);
+                _ = await RefreshSnapshotAndChangesAsync(true, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -520,7 +680,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }).ConfigureAwait(false);
         try
         {
-            if (await RefreshSnapshotAndChangesAsync(false, _lifetime.Token).ConfigureAwait(false)
+            if (await RefreshSnapshotAndChangesAsync(true, _lifetime.Token).ConfigureAwait(false)
                 && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
             {
                 await RunOnUiAsync(() => OperationMessage = "최신 상태로 갱신했습니다.").ConfigureAwait(false);
@@ -532,7 +692,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task<bool> RefreshSnapshotAndChangesAsync(bool raiseAlerts, CancellationToken cancellationToken)
+    private async Task<bool> RefreshSnapshotAndChangesAsync(bool raiseCatchupSummary, CancellationToken cancellationToken)
     {
         var client = _client;
         try
@@ -561,7 +721,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     _eventsById.Clear();
                     ApplyRecentEventsCore(recent);
                 }).ConfigureAwait(false);
-                await SynchronizeChangesCoreAsync(client, raiseAlerts, linked.Token).ConfigureAwait(false);
+                await SynchronizeChangesCoreAsync(client, raiseCatchupSummary, linked.Token).ConfigureAwait(false);
             }
             finally
             {
@@ -572,7 +732,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return false; }
         catch (Exception exception)
         {
-            await SetUnavailableStateAsync(exception).ConfigureAwait(false);
+            await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
             return false;
         }
     }
@@ -590,7 +750,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             var result = await _client.ExecuteRegisteredCheckAsync(device.Id, SelectedCheckId, _lifetime.Token).ConfigureAwait(false);
             await RunOnUiAsync(() => OperationMessage = result.Accepted ? result.Message : $"점검 거부 · {result.ErrorCode ?? "UNKNOWN"}").ConfigureAwait(false);
-            if (result.Accepted) _ = await RefreshSnapshotAndChangesAsync(false, _lifetime.Token).ConfigureAwait(false);
+            if (result.Accepted) _ = await RefreshSnapshotAndChangesAsync(true, _lifetime.Token).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -612,6 +772,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 await RunOnUiAsync(() =>
                 {
                     item.Acknowledged = true;
+                    RebuildFilteredEvents();
                     NotifySummaryChanged();
                 }).ConfigureAwait(false);
                 await SynchronizeChangesAsync(false, _lifetime.Token).ConfigureAwait(false);
@@ -636,7 +797,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task DrainBufferedChangesAsync(bool raiseAlerts, CancellationToken cancellationToken)
+    private async Task DrainBufferedChangesAsync(
+        List<AlertCandidate>? catchupCandidates,
+        CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -649,7 +812,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 liveAlert = _liveAlertSequences.Remove(next);
             }
 
-            await RunOnUiAsync(() => ApplyEventChangeCore(change, raiseAlerts || liveAlert)).ConfigureAwait(false);
+            await RunOnUiAsync(() => ApplyEventChangeCore(change, liveAlert)).ConfigureAwait(false);
+            if (!liveAlert && catchupCandidates is not null && IsNotifiableChange(change))
+            {
+                catchupCandidates.Add(new AlertCandidate(change.ChangeSequence, change.ChangeKind, change.Event));
+            }
             Interlocked.Exchange(ref _changeCursor, change.ChangeSequence);
             lock (_settingsSync) _settings.SetEventCursor(_currentAgentId, change.ChangeSequence);
             ScheduleSettingsSave();
@@ -683,7 +850,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private void ApplyEventChangeCore(AgentEventChangeDto change, bool raiseAlert)
     {
-        UpsertEvent(change.Event, raiseAlert && change.ChangeKind.Equals("Created", StringComparison.OrdinalIgnoreCase), change.ChangeKind);
+        UpsertEvent(change.Event, raiseAlert, change.ChangeKind);
         RebuildSelectedDeviceEvents();
         NotifySummaryChanged();
     }
@@ -692,15 +859,31 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         foreach (var item in events.OrderBy(item => item.Sequence)) UpsertEvent(item, false, "Recent");
         RebuildSelectedDeviceEvents();
+        RebuildFilteredEvents();
+        if (_hasSnapshot && _lastRefreshedAt is { } generatedAt) RebuildCollectorHealth(generatedAt);
         NotifySummaryChanged();
     }
 
     private void UpsertEvent(SwitchEventDto source, bool raiseAlert, string changeKind)
     {
         if (string.IsNullOrWhiteSpace(source.AgentEventId)) return;
+        if (source.Recovered)
+        {
+            source = source with
+            {
+                Acknowledged = true,
+                RecoveredAt = source.RecoveredAt ?? DateTimeOffset.Now
+            };
+        }
         if (_eventsById.TryGetValue(source.AgentEventId, out var existing))
         {
+            var wasRecovered = existing.Recovered;
             existing.Update(source);
+            if (raiseAlert && source.Recovered && !wasRecovered)
+            {
+                AlertRaised?.Invoke(this, existing);
+            }
+            RebuildFilteredEvents();
             return;
         }
 
@@ -716,13 +899,71 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             RecentEvents.RemoveAt(RecentEvents.Count - 1);
         }
 
-        if (raiseAlert && changeKind.Equals("Created", StringComparison.OrdinalIgnoreCase)
-            && !item.Acknowledged && !item.Recovered
-            && item.Severity is DeviceHealth.Warning or DeviceHealth.Critical or DeviceHealth.Disconnected)
+        if (raiseAlert &&
+            (source.Recovered
+             || (changeKind.Equals("Created", StringComparison.OrdinalIgnoreCase)
+                 && !item.Acknowledged && !item.Recovered
+                 && item.Severity is DeviceHealth.Warning or DeviceHealth.Critical or DeviceHealth.Disconnected)))
         {
             AlertRaised?.Invoke(this, item);
         }
+        RebuildFilteredEvents();
     }
+
+    private static bool IsNotifiableChange(AgentEventChangeDto change) =>
+        change.Event.Recovered || change.ChangeKind.Equals("Recovered", StringComparison.OrdinalIgnoreCase)
+        || (change.ChangeKind.Equals("Created", StringComparison.OrdinalIgnoreCase)
+            && !change.Event.Acknowledged
+            && change.Event.Severity is DeviceHealth.Warning or DeviceHealth.Critical or DeviceHealth.Disconnected);
+
+    private void RaiseCatchupSummary(IReadOnlyList<AlertCandidate> candidates)
+    {
+        var ranked = candidates
+            .OrderByDescending(candidate => AlertPriority(candidate.Event))
+            .ThenByDescending(candidate => candidate.ChangeSequence)
+            .ToArray();
+        var highest = ranked.FirstOrDefault(candidate => _eventsById.ContainsKey(candidate.Event.AgentEventId))
+                      ?? ranked[0];
+        var activeCritical = candidates.Select(candidate => candidate.Event.AgentEventId)
+            .Distinct(StringComparer.Ordinal)
+            .Count(eventId => _eventsById.TryGetValue(eventId, out var current)
+                              && !current.Recovered
+                              && current.Severity is DeviceHealth.Critical or DeviceHealth.Disconnected);
+        var detail = activeCritical > 0
+            ? $"최고 심각도 {HealthText(highest.Event.Severity)} · 활성 장애 {activeCritical}건"
+            : $"최고 심각도 {HealthText(highest.Event.Severity)} · 최근 상태를 확인하세요.";
+        var summary = new EventViewModel(new SwitchEventDto(
+            highest.Event.Sequence,
+            $"viewer-catchup-{_currentAgentId}-{AppliedChangeCursor}",
+            highest.Event.DeviceId,
+            highest.Event.DeviceName,
+            DateTimeOffset.Now,
+            highest.Event.Severity,
+            "동기화 요약",
+            $"놓친 변경 {candidates.Count}건 동기화",
+            detail,
+            Acknowledged: true,
+            Recovered: candidates.All(candidate => candidate.Event.Recovered),
+            ConditionKey: $"viewer-catchup-{AppliedChangeCursor}",
+            NavigationEventId: highest.Event.AgentEventId));
+        AlertRaised?.Invoke(this, summary);
+    }
+
+    private static int AlertPriority(SwitchEventDto item) => item.Recovered ? 0 : item.Severity switch
+    {
+        DeviceHealth.Critical => 4,
+        DeviceHealth.Disconnected => 3,
+        DeviceHealth.Warning => 2,
+        _ => 1
+    };
+
+    private static string HealthText(DeviceHealth health) => health switch
+    {
+        DeviceHealth.Critical => "장애",
+        DeviceHealth.Disconnected => "연결 끊김",
+        DeviceHealth.Warning => "경고",
+        _ => "복구"
+    };
 
     private static int CompareEvents(EventViewModel left, EventViewModel right)
     {
@@ -732,13 +973,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private void ApplySnapshotCore(AgentSnapshotDto snapshot)
     {
-        ConnectionState = snapshot.ConnectionState;
-        _lastSnapshotReady = snapshot.Ready;
+        HttpConnectionState = snapshot.ConnectionState;
         CollectorVersion = snapshot.CollectorVersion;
         CollectorSummary = snapshot.CollectorSummary;
+        _authoritativeUnacknowledged = snapshot.AuthoritativeUnacknowledged;
+        _apiVersion = snapshot.ApiVersion;
+        _snapshotOperationalStatuses = snapshot.OperationalStatuses ?? [];
         _lastRefreshedAt = snapshot.GeneratedAt;
+        _lastSuccessfulReceiptAt = DateTimeOffset.Now;
         _hasSnapshot = true;
         OnPropertyChanged(nameof(LastRefreshText));
+        OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
+        OnPropertyChanged(nameof(LastSuccessfulReceiptText));
 
         var incomingIds = snapshot.Devices.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var stale in Devices.Where(item => !incomingIds.Contains(item.Id)).ToArray()) Devices.Remove(stale);
@@ -778,7 +1024,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception exception) { await SetUnavailableStateAsync(exception).ConfigureAwait(false); }
+        catch (Exception exception) { await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false); }
     }
 
     private void OnConnectionStateChanged(object? sender, AgentConnectionState state)
@@ -787,19 +1033,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         RunOnUi(() =>
         {
             if (!ReferenceEquals(sender, _client)) return;
-            ConnectionState = state switch
-            {
-                AgentConnectionState.Offline when _hasSnapshot => AgentConnectionState.Stale,
-                AgentConnectionState.Connected when _hasSnapshot && !_lastSnapshotReady => AgentConnectionState.Stale,
-                _ => state
-            };
+            RealtimeConnectionState = state;
         });
         if (state == AgentConnectionState.Connected && _initialized) _ = ReconnectCatchupAsync();
     }
 
     private async Task ReconnectCatchupAsync()
     {
-        if (await RefreshSnapshotAndChangesAsync(false, _lifetime.Token).ConfigureAwait(false))
+        if (await RefreshSnapshotAndChangesAsync(true, _lifetime.Token).ConfigureAwait(false))
         {
             await RunOnUiAsync(() => OperationMessage = "재연결 후 누락된 변경을 동기화했습니다.").ConfigureAwait(false);
         }
@@ -829,22 +1070,179 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private void RebuildFilteredEvents()
+    {
+        var query = EventSearchText.Trim();
+        FilteredEvents.Clear();
+        foreach (var item in RecentEvents)
+        {
+            var filterMatch = SelectedEventFilter.Value switch
+            {
+                EventFilter.Unacknowledged => !item.Acknowledged,
+                EventFilter.NewLog => !item.Acknowledged && item.IsLogEvent,
+                EventFilter.Critical => !item.Recovered
+                                        && item.Severity is DeviceHealth.Critical or DeviceHealth.Disconnected,
+                EventFilter.Recovered => item.Recovered,
+                _ => true
+            };
+            if (!filterMatch) continue;
+            if (query.Length > 0
+                && !item.DeviceName.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                && !item.Title.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                && !item.Detail.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                && !item.Kind.Contains(query, StringComparison.CurrentCultureIgnoreCase))
+            {
+                continue;
+            }
+            FilteredEvents.Add(item);
+        }
+        OnPropertyChanged(nameof(VisibleEventCount));
+        OnPropertyChanged(nameof(EventCountText));
+    }
+
     private void RebuildCollectorHealth(DateTimeOffset generatedAt)
     {
         CollectorHealth.Clear();
         CollectorHealth.Add(new("Agent", ConnectionText, ConnectionHealth));
+        CollectorHealth.Add(new("HTTPS 상태", HttpConnectionText,
+            HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
+        CollectorHealth.Add(new("실시간 이벤트", RealtimeConnectionText,
+            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
+        CollectorHealth.Add(new("마지막 성공 수신", LastSuccessfulReceiptText));
         CollectorHealth.Add(new("수집기 버전", CollectorVersion));
         CollectorHealth.Add(new("마지막 상태 생성", generatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")));
         CollectorHealth.Add(new("데이터 범위", "구조화 이벤트만 수신 · 원문 미수신"));
+
+        OperationalStatuses.Clear();
+        OperationalStatuses.Add(new OperationalStatusDto(
+            ConnectionState is AgentConnectionState.Offline ? "AGENT_OFFLINE" : "AGENT_CHANNEL",
+            "원격 수집기",
+            ConnectionState is AgentConnectionState.Offline
+                ? "Agent 연결 끊김 · 정상 캐시는 유지 · 신규 상태 미수신"
+                : ConnectionText,
+            ConnectionHealth));
+        OperationalStatuses.Add(new OperationalStatusDto(
+            "API_CHANNEL",
+            "HTTPS API",
+            HttpConnectionText,
+            HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                ? DeviceHealth.Normal
+                : DeviceHealth.Warning));
+        OperationalStatuses.Add(new OperationalStatusDto(
+            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                ? "REALTIME_AVAILABLE"
+                : "REALTIME_DEGRADED",
+            "SignalR 실시간",
+            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                ? RealtimeConnectionText
+                : $"{RealtimeConnectionText} · HTTPS 캐치업 유지",
+            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                ? DeviceHealth.Normal
+                : DeviceHealth.Warning));
+
+        foreach (var status in _snapshotOperationalStatuses.Where(status =>
+                     status.Code is not "AGENT_CHANNEL" and not "API_CHANNEL"
+                     && !status.Code.StartsWith("REALTIME_", StringComparison.Ordinal)))
+        {
+            if (OperationalStatuses.All(existing => !existing.Code.Equals(status.Code, StringComparison.Ordinal)))
+            {
+                OperationalStatuses.Add(status);
+            }
+        }
+
+        OperationalStatuses.Add(new OperationalStatusDto(
+            "CERT_PIN_CONFIGURED",
+            "Viewer 인증서 Pin",
+            $"로컬에 {_settings.AcceptedCertificateFingerprints.Count}개 고정 · 원격 응답 자동 신뢰 안 함",
+            _settings.AcceptedCertificateFingerprints.Count is >= 1 and <= 2
+                ? DeviceHealth.Normal
+                : DeviceHealth.Critical));
+
+        foreach (var device in Devices)
+        {
+            var unsupported = device.Capabilities.Where(item => !item.Supported).ToArray();
+            if (unsupported.Length == 0) continue;
+            OperationalStatuses.Add(new OperationalStatusDto(
+                $"COLLECTOR_UNSUPPORTED_{device.Id}",
+                $"{device.Name} 일부 수집 미지원",
+                $"장비 상태는 유지 · {string.Join(", ", unsupported.Select(item => item.CommandId))}",
+                DeviceHealth.Warning));
+        }
+
+        if (RecentEvents.Count == 0)
+        {
+            OperationalStatuses.Add(new OperationalStatusDto(
+                "EMPTY",
+                "변경 없음",
+                "현재 필터 범위에 수신된 이벤트가 없습니다.",
+                DeviceHealth.Normal));
+        }
     }
 
-    private async Task SetUnavailableStateAsync(Exception exception)
+    private async Task SetUnavailableStateAsync(Exception exception, AgentChannel channel)
     {
         await RunOnUiAsync(() =>
         {
-            ConnectionState = _hasSnapshot ? AgentConnectionState.Stale : AgentConnectionState.Offline;
+            var typed = exception as AgentClientException;
+            var state = typed?.SuggestedConnectionState ?? AgentConnectionState.Offline;
+            if (state == AgentConnectionState.NeedsPairing)
+            {
+                HttpConnectionState = state;
+                RealtimeConnectionState = state;
+            }
+            else if (channel == AgentChannel.Http)
+            {
+                HttpConnectionState = state;
+            }
+            else
+            {
+                RealtimeConnectionState = state;
+            }
             OperationMessage = $"Agent 상태 미확인 · {SafeMessage(exception)}";
         }).ConfigureAwait(false);
+    }
+
+    private void UpdateCombinedConnectionState()
+    {
+        AgentConnectionState combined;
+        if (HttpConnectionState == AgentConnectionState.NeedsPairing
+            || RealtimeConnectionState == AgentConnectionState.NeedsPairing)
+        {
+            combined = AgentConnectionState.NeedsPairing;
+        }
+        else if (HttpConnectionState == AgentConnectionState.Demo
+                 || RealtimeConnectionState == AgentConnectionState.Demo)
+        {
+            combined = AgentConnectionState.Demo;
+        }
+        else if (HttpConnectionState == AgentConnectionState.Offline)
+        {
+            combined = RealtimeConnectionState == AgentConnectionState.Connected && _hasSnapshot
+                ? AgentConnectionState.Stale
+                : AgentConnectionState.Offline;
+        }
+        else if (HttpConnectionState == AgentConnectionState.Stale
+                 || RealtimeConnectionState == AgentConnectionState.Offline)
+        {
+            combined = AgentConnectionState.Stale;
+        }
+        else if (RealtimeConnectionState == AgentConnectionState.Reconnecting)
+        {
+            combined = AgentConnectionState.Reconnecting;
+        }
+        else if (RealtimeConnectionState == AgentConnectionState.Connecting)
+        {
+            combined = _initialized ? AgentConnectionState.Reconnecting : AgentConnectionState.Connecting;
+        }
+        else if (HttpConnectionState == AgentConnectionState.Connecting)
+        {
+            combined = AgentConnectionState.Connecting;
+        }
+        else
+        {
+            combined = AgentConnectionState.Connected;
+        }
+        ConnectionState = combined;
     }
 
     private void NotifySummaryChanged()
@@ -855,8 +1253,17 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(WarningCount));
         OnPropertyChanged(nameof(CriticalCount));
         OnPropertyChanged(nameof(DisconnectedCount));
+        OnPropertyChanged(nameof(CriticalDisplayCount));
         OnPropertyChanged(nameof(NewLogCount));
+        OnPropertyChanged(nameof(RecoveredCount));
         OnPropertyChanged(nameof(UnacknowledgedCount));
+        OnPropertyChanged(nameof(AuthoritativeUnacknowledgedCount));
+        OnPropertyChanged(nameof(VisibleEventCount));
+        OnPropertyChanged(nameof(EventCountText));
+        OnPropertyChanged(nameof(ApiVersionText));
+        OnPropertyChanged(nameof(MiniCurrentStatusText));
+        OnPropertyChanged(nameof(MiniIssueTitle));
+        OnPropertyChanged(nameof(MiniIssueDetail));
     }
 
     private void NotifyCommandStates()
@@ -913,6 +1320,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private static string SafeMessage(Exception exception) => exception switch
     {
+        AgentClientException typed => typed.ErrorCode,
         HttpRequestException => "AGENT_UNREACHABLE",
         TaskCanceledException => "AGENT_TIMEOUT",
         InvalidOperationException invalid when invalid.Message.Contains("PAIRING", StringComparison.OrdinalIgnoreCase) => "VIEWER_PAIRING_REQUIRED",

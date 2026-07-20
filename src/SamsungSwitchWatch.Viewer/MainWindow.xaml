@@ -8,13 +8,14 @@
         Title="Samsung Switch Watch"
         Width="1440" Height="900" MinWidth="1280" MinHeight="720"
         WindowStartupLocation="CenterScreen"
-        Closing="OnClosing"
-        Loaded="OnLoaded"
-        AutomationProperties.Name="삼성 스위치 모니터링 대시보드">
+        Closing="OnClosing" Loaded="OnLoaded"
+        KeyboardNavigation.TabNavigation="Continue"
+        AutomationProperties.Name="삼성 스위치 모니터링 운영 대시보드">
     <Window.Resources>
         <DataTemplate x:Key="HealthBadgeTemplate">
             <Border Padding="9,4" CornerRadius="12"
-                    Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                    Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}"
+                    AutomationProperties.Name="{Binding Health, Converter={StaticResource HealthText}}">
                 <StackPanel Orientation="Horizontal">
                     <Ellipse Width="7" Height="7" Margin="0,0,6,0"
                              Fill="{Binding Health, Converter={StaticResource HealthBrush}}" />
@@ -24,30 +25,70 @@
                 </StackPanel>
             </Border>
         </DataTemplate>
+
         <DataTemplate DataType="{x:Type models:DeviceMetricDto}">
             <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10">
                 <Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="145" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
                     <TextBlock Text="{Binding Label}" Foreground="{StaticResource MutedTextBrush}" />
                     <TextBlock Grid.Column="1" Text="{Binding Value}" FontWeight="SemiBold" />
-                    <Border Grid.Column="2" Padding="8,3" CornerRadius="12" Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                        <TextBlock FontSize="11" FontWeight="SemiBold" Foreground="{Binding Health, Converter={StaticResource HealthBrush}}"
+                    <Border Grid.Column="2" Padding="8,3" CornerRadius="12"
+                            Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                        <TextBlock FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{Binding Health, Converter={StaticResource HealthBrush}}"
                                    Text="{Binding Health, Converter={StaticResource HealthText}}" />
                     </Border>
                 </Grid>
             </Border>
         </DataTemplate>
+
+        <DataTemplate DataType="{x:Type models:OperationalStatusDto}">
+            <Border Margin="0,0,0,8" Padding="12" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="6"
+                    Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}"
+                    AutomationProperties.Name="{Binding Title}"
+                    AutomationProperties.ItemStatus="{Binding Code}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="5" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{Binding Health, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
+                    <StackPanel Grid.Column="2">
+                        <Grid>
+                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                            <TextBlock HorizontalAlignment="Right" Text="{Binding Code}" FontSize="10"
+                                       Foreground="{StaticResource MutedTextBrush}" />
+                        </Grid>
+                        <TextBlock Margin="0,4,0,0" Text="{Binding Detail}" FontSize="12"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <Style x:Key="SummaryValue" TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,5,0,0" />
+            <Setter Property="FontSize" Value="28" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
     </Window.Resources>
 
     <Grid Background="{StaticResource CanvasBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="72" />
-            <RowDefinition Height="112" />
+            <RowDefinition Height="138" />
             <RowDefinition Height="*" />
             <RowDefinition Height="36" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="24,0">
+        <Border Grid.Row="0" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="24,0">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -56,86 +97,160 @@
                 <StackPanel VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="Samsung Switch Watch" FontSize="20" FontWeight="SemiBold" />
-                        <Border Margin="12,0,0,0" Padding="9,4" CornerRadius="12" Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                        <TextBlock Margin="10,0,0,0" Text="원격 수집기" FontSize="12"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                        <Border Margin="8,0,0,0" Padding="9,4" CornerRadius="12"
+                                Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
                             <StackPanel Orientation="Horizontal">
-                                <Ellipse Width="7" Height="7" Margin="0,0,6,0" Fill="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
-                                <TextBlock Text="{Binding ConnectionText}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
+                                <Ellipse Width="7" Height="7" Margin="0,0,6,0"
+                                         Fill="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
+                                <TextBlock Text="{Binding ConnectionText}" FontSize="12" FontWeight="SemiBold"
+                                           Foreground="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
-                    <TextBlock Margin="0,4,0,0" Text="{Binding LastRefreshText}" Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
+                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" FontSize="12">
+                        <Run Text="{Binding LastSuccessfulReceiptText, Mode=OneWay}" /><Run Text=" · " />
+                        <Run Text="{Binding HttpConnectionText, Mode=OneWay}" /><Run Text=" · " />
+                        <Run Text="{Binding RealtimeConnectionText, Mode=OneWay}" />
+                    </TextBlock>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ComboBox Width="142" Margin="0,0,8,0" ItemsSource="{Binding RegisteredChecks}" SelectedItem="{Binding SelectedCheckId}"
-                              AutomationProperties.Name="등록 점검 선택" />
-                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="지금 점검" Command="{Binding ManualCheckCommand}"
-                            AutomationProperties.Name="선택한 스위치를 지금 점검" />
-                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="새로 고침" Command="{Binding RefreshCommand}"
-                            AutomationProperties.Name="대시보드 새로 고침" />
-                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="미니 창" Click="ShowMiniWindow_Click"
-                            AutomationProperties.Name="항상 위 미니 창 열기" />
-                    <Button Style="{StaticResource SecondaryButton}" Content="연결 설정" Click="OpenSettings_Click"
-                            AutomationProperties.Name="Agent 연결 설정 열기" />
+                    <ComboBox Width="132" Margin="0,0,8,0" ItemsSource="{Binding RegisteredChecks}"
+                              SelectedItem="{Binding SelectedCheckId}"
+                              AutomationProperties.Name="등록된 읽기 전용 점검 선택" />
+                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="_전체 점검"
+                            Command="{Binding ManualCheckCommand}"
+                            AutomationProperties.HelpText="선택한 장비에서 등록된 읽기 전용 점검만 실행합니다." />
+                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="_최신 결과"
+                            Command="{Binding RefreshCommand}" />
+                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="_미니 창"
+                            Click="ShowMiniWindow_Click" />
+                    <Button Style="{StaticResource SecondaryButton}" Content="연결 _설정"
+                            Click="OpenSettings_Click" />
                 </StackPanel>
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" Margin="24,16,24,8">
+        <Grid Grid.Row="1" Margin="24,16,24,18">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/>
-                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/>
-                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/>
-                <ColumnDefinition Width="*"/><ColumnDefinition Width="12"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="208" /><ColumnDefinition Width="18" />
+                <ColumnDefinition Width="208" /><ColumnDefinition Width="18" />
+                <ColumnDefinition Width="208" /><ColumnDefinition Width="18" />
+                <ColumnDefinition Width="208" /><ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="16,12">
-                <StackPanel><TextBlock Text="전체 장비" Foreground="{StaticResource MutedTextBrush}"/><TextBlock Margin="0,4,0,0" Text="{Binding TotalCount}" FontSize="26" FontWeight="SemiBold"/></StackPanel>
+            <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#BBF7D0">
+                <StackPanel>
+                    <TextBlock Text="정상" Foreground="#15803D" />
+                    <TextBlock Text="{Binding NormalCount}" Style="{StaticResource SummaryValue}" Foreground="#15803D" />
+                    <TextBlock Text="현재 정상 장비" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                </StackPanel>
             </Border>
-            <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#BBF7D0">
-                <StackPanel><TextBlock Text="정상" Foreground="#15803D"/><TextBlock Margin="0,4,0,0" Text="{Binding NormalCount}" FontSize="26" FontWeight="SemiBold" Foreground="#16A34A"/></StackPanel>
+            <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FDE68A">
+                <StackPanel>
+                    <TextBlock Text="경고" Foreground="#B45309" />
+                    <TextBlock Text="{Binding WarningCount}" Style="{StaticResource SummaryValue}" Foreground="#B45309" />
+                    <TextBlock Text="확인 필요 장비" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                </StackPanel>
             </Border>
-            <Border Grid.Column="4" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FDE68A">
-                <StackPanel><TextBlock Text="경고" Foreground="#B45309"/><TextBlock Margin="0,4,0,0" Text="{Binding WarningCount}" FontSize="26" FontWeight="SemiBold" Foreground="#D97706"/></StackPanel>
+            <Border Grid.Column="4" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FECACA">
+                <StackPanel>
+                    <TextBlock Text="장애" Foreground="#B91C1C" />
+                    <TextBlock Text="{Binding CriticalDisplayCount}" Style="{StaticResource SummaryValue}" Foreground="#B91C1C" />
+                    <TextBlock Text="장애·접속 실패" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                </StackPanel>
             </Border>
-            <Border Grid.Column="6" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FECACA">
-                <StackPanel><TextBlock Text="장애" Foreground="#B91C1C"/><TextBlock Margin="0,4,0,0" Text="{Binding CriticalCount}" FontSize="26" FontWeight="SemiBold" Foreground="#DC2626"/></StackPanel>
+            <Border Grid.Column="6" Style="{StaticResource CardStyle}" Padding="16,12">
+                <StackPanel>
+                    <TextBlock Text="미확인" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="{Binding UnacknowledgedCount}" Style="{StaticResource SummaryValue}" />
+                    <TextBlock Text="Agent authoritative 총계" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                </StackPanel>
             </Border>
-            <Border Grid.Column="8" Style="{StaticResource CardStyle}" Padding="16,12">
-                <StackPanel><TextBlock Text="새 로그 · 미확인" Foreground="{StaticResource MutedTextBrush}"/><TextBlock Margin="0,4,0,0" FontSize="26" FontWeight="SemiBold"><Run Text="{Binding NewLogCount, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding UnacknowledgedCount, Mode=OneWay}"/></TextBlock></StackPanel>
+            <Border Grid.Column="8" Style="{StaticResource CardStyle}" Padding="18,12">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <Grid>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="Agent · 채널 상태" FontWeight="SemiBold" />
+                            <TextBlock Margin="8,0,0,0" Text="{Binding ApiVersionText}" FontSize="11"
+                                       Foreground="{StaticResource MutedTextBrush}" />
+                        </StackPanel>
+                        <Border HorizontalAlignment="Right" Padding="8,3" CornerRadius="12"
+                                Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                            <TextBlock Text="{Binding ConnectionText}" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
+                        </Border>
+                    </Grid>
+                    <StackPanel Grid.Row="1" Margin="0,7,0,0">
+                        <TextBlock Text="{Binding CollectorSummary}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                        <TextBlock Margin="0,4,0,0" Text="{Binding LastSuccessfulReceiptText}" FontSize="11"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+                </Grid>
             </Border>
         </Grid>
 
-        <Grid Grid.Row="2" Margin="24,8,24,16">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="360"/></Grid.ColumnDefinitions>
+        <Grid Grid.Row="2" Margin="24,0,24,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300" />
+                <ColumnDefinition Width="20" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="20" />
+                <ColumnDefinition Width="394" />
+            </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="54"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="54" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,0">
-                        <Grid><TextBlock Text="스위치 목록" FontWeight="SemiBold"/><TextBlock HorizontalAlignment="Right" Text="{Binding TotalCount, StringFormat={}{0}대}" Foreground="{StaticResource MutedTextBrush}"/></Grid>
+                        <Grid>
+                            <TextBlock Text="장비 · 3모델" FontWeight="SemiBold" />
+                            <TextBlock HorizontalAlignment="Right" Text="{Binding TotalCount, StringFormat={}{0}대}"
+                                       Foreground="{StaticResource MutedTextBrush}" />
+                        </Grid>
                     </Border>
-                    <ListBox Grid.Row="1" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}" BorderThickness="0" Background="Transparent"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="등록된 스위치 목록">
+                    <ListBox Grid.Row="1" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}"
+                             BorderThickness="0" Background="Transparent"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             KeyboardNavigation.DirectionalNavigation="Contained"
+                             AutomationProperties.Name="IES4224GP IES4028XP IES4226XP 장비 목록">
                         <ListBox.ItemContainerStyle>
                             <Style TargetType="ListBoxItem">
-                                <Setter Property="Padding" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="BorderThickness" Value="0"/>
-                                <Style.Triggers><Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#EFF6FF"/></Trigger></Style.Triggers>
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="BorderThickness" Value="0" />
+                                <Style.Triggers>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter Property="Background" Value="#EFF6FF" />
+                                        <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+                                        <Setter Property="BorderThickness" Value="3,0,0,0" />
+                                    </Trigger>
+                                </Style.Triggers>
                             </Style>
                         </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="16,13" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                                <Border Padding="16,12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1"
+                                        AutomationProperties.Name="{Binding Name}" AutomationProperties.ItemStatus="{Binding Summary}">
                                     <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                         <StackPanel>
-                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                                            <TextBlock Margin="0,3,0,0" Text="{Binding Model, Mode=OneWay}" FontSize="12" Foreground="{StaticResource MutedTextBrush}"/>
-                                            <TextBlock Margin="0,6,0,0" Text="{Binding Summary}" FontSize="12" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                            <TextBlock Margin="0,3,0,0" Text="{Binding Model}" FontSize="12"
+                                                       Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBlock Margin="0,5,0,0" Text="{Binding CapabilityText}" FontSize="11"
+                                                       Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBlock Margin="0,3,0,0" Text="{Binding Summary}" FontSize="11"
+                                                       Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis"
+                                                       TextWrapping="NoWrap" />
                                         </StackPanel>
                                         <StackPanel Grid.Column="1" HorizontalAlignment="Right">
-                                            <ContentControl Content="{Binding}" ContentTemplate="{StaticResource HealthBadgeTemplate}"/>
-                                            <TextBlock Margin="0,7,0,0" Text="{Binding LastCheckedText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Right"/>
+                                            <ContentControl Content="{Binding}" ContentTemplate="{StaticResource HealthBadgeTemplate}" />
+                                            <TextBlock Margin="0,8,0,0" Text="{Binding LastCheckedText}" FontSize="11"
+                                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Right" />
                                         </StackPanel>
                                     </Grid>
                                 </Border>
@@ -147,45 +262,65 @@
 
             <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="82"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="82" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="20,12">
                         <Grid>
-                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                             <StackPanel>
-                                <TextBlock Text="{Binding SelectedDevice.Name, TargetNullValue=스위치를 선택하세요}" FontSize="18" FontWeight="SemiBold"/>
-                                <TextBlock Margin="0,5,0,0" Foreground="{StaticResource MutedTextBrush}"><Run Text="{Binding SelectedDevice.Model, Mode=OneWay}"/><Run Text=" · "/><Run Text="{Binding SelectedDevice.AddressLabel, Mode=OneWay}"/><Run Text=" · 가동 시간 "/><Run Text="{Binding SelectedDevice.Uptime, Mode=OneWay}"/></TextBlock>
+                                <TextBlock Text="{Binding SelectedDevice.Name, TargetNullValue=스위치를 선택하세요}"
+                                           FontSize="18" FontWeight="SemiBold" />
+                                <TextBlock Margin="0,5,0,0" Foreground="{StaticResource MutedTextBrush}">
+                                    <Run Text="{Binding SelectedDevice.Model, Mode=OneWay}" /><Run Text=" · " />
+                                    <Run Text="{Binding SelectedDevice.CapabilityText, Mode=OneWay}" /><Run Text=" · 가동 시간 " />
+                                    <Run Text="{Binding SelectedDevice.Uptime, Mode=OneWay}" />
+                                </TextBlock>
                             </StackPanel>
-                            <ContentControl Grid.Column="1" Content="{Binding SelectedDevice}" ContentTemplate="{StaticResource HealthBadgeTemplate}" VerticalAlignment="Top"/>
+                            <ContentControl Grid.Column="1" Content="{Binding SelectedDevice}"
+                                            ContentTemplate="{StaticResource HealthBadgeTemplate}" VerticalAlignment="Top" />
                         </Grid>
                     </Border>
-                    <TabControl Grid.Row="1" Margin="12,0,12,12">
-                        <TabItem Header="상태">
+                    <TabControl Grid.Row="1" Margin="12,0,12,12" KeyboardNavigation.TabNavigation="Local"
+                                AutomationProperties.Name="선택 장비 상세 정보">
+                        <TabItem Header="_상태">
                             <Grid Margin="8,12,8,8">
-                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                                 <Border Background="#F8FAFC" CornerRadius="4" Padding="12" Margin="0,0,0,12">
-                                    <TextBlock Text="{Binding SelectedDevice.Summary, TargetNullValue=왼쪽 목록에서 장비를 선택하면 상태가 표시됩니다.}"/>
+                                    <TextBlock Text="{Binding SelectedDevice.Summary, TargetNullValue=왼쪽 목록에서 장비를 선택하면 상태가 표시됩니다.}" />
                                 </Border>
-                                <ListBox Grid.Row="1" ItemsSource="{Binding SelectedDevice.Metrics}" BorderThickness="0" Background="Transparent" AutomationProperties.Name="선택 장비 상태 지표"/>
+                                <ListBox Grid.Row="1" ItemsSource="{Binding SelectedDevice.Metrics}" BorderThickness="0"
+                                         Background="Transparent" AutomationProperties.Name="선택 장비 구조화 상태 지표" />
                             </Grid>
                         </TabItem>
-                        <TabItem Header="새 로그">
-                            <Grid Margin="8,12,8,8">
-                                <TextBlock Text="새 로그가 없으면 이 목록은 비어 있습니다." Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Top"/>
-                                <ListBox Margin="0,30,0,0" ItemsSource="{Binding SelectedDeviceLogs}" BorderThickness="0" Background="Transparent">
-                                    <ListBox.ItemTemplate><DataTemplate><Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10"><StackPanel><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Margin="0,3,0,0" Text="{Binding Detail}" Foreground="{StaticResource MutedTextBrush}"/><TextBlock Margin="0,4,0,0" Text="{Binding TimeText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/></StackPanel></Border></DataTemplate></ListBox.ItemTemplate>
-                                </ListBox>
-                            </Grid>
-                        </TabItem>
-                        <TabItem Header="변경 이력">
-                            <ListBox Margin="8,12,8,8" ItemsSource="{Binding SelectedDeviceChanges}" BorderThickness="0" Background="Transparent">
-                                <ListBox.ItemTemplate><DataTemplate><Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10" Opacity="{Binding Acknowledged, Converter={StaticResource BoolOpacity}}"><StackPanel><TextBlock Text="{Binding Title}" FontWeight="SemiBold"/><TextBlock Margin="0,3,0,0" Text="{Binding Detail}" Foreground="{StaticResource MutedTextBrush}"/><TextBlock Margin="0,4,0,0" Text="{Binding TimeText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/></StackPanel></Border></DataTemplate></ListBox.ItemTemplate>
+                        <TabItem Header="새 _로그">
+                            <ListBox Margin="8,12,8,8" ItemsSource="{Binding SelectedDeviceLogs}" BorderThickness="0"
+                                     Background="Transparent" AutomationProperties.Name="선택 장비 신규 로그">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                                <TextBlock Margin="0,3,0,0" Text="{Binding Detail}" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBlock Margin="0,4,0,0" Text="{Binding TimeText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
                             </ListBox>
                         </TabItem>
-                        <TabItem Header="수집기 상태">
-                            <StackPanel Margin="8,12,8,8">
-                                <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12"><TextBlock Text="Viewer에는 구조화된 상태와 이벤트만 전달됩니다. Telnet 원문과 자격 증명은 Agent PC에 남습니다." Foreground="#1E40AF"/></Border>
-                                <ItemsControl ItemsSource="{Binding CollectorHealth}"/>
-                            </StackPanel>
+                        <TabItem Header="변경 _이력">
+                            <ListBox Margin="8,12,8,8" ItemsSource="{Binding SelectedDeviceChanges}" BorderThickness="0"
+                                     Background="Transparent" AutomationProperties.Name="선택 장비 변경 이력" />
+                        </TabItem>
+                        <TabItem Header="수집기 _건강">
+                            <Grid Margin="8,12,8,8">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                                <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12">
+                                    <TextBlock Text="구조화된 상태와 이벤트만 수신합니다. Telnet 원문·자격 증명은 Agent PC에만 남습니다."
+                                               Foreground="#1E40AF" />
+                                </Border>
+                                <ListBox Grid.Row="1" ItemsSource="{Binding OperationalStatuses}" BorderThickness="0"
+                                         Background="Transparent" AutomationProperties.Name="Agent API SignalR DB 인증서 수집기 상태" />
+                            </Grid>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -193,25 +328,68 @@
 
             <Border Grid.Column="4" Style="{StaticResource CardStyle}" Padding="0">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="54"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="54" />
+                        <RowDefinition Height="92" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="46" />
+                    </Grid.RowDefinitions>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,0">
-                        <Grid><TextBlock Text="최근 이벤트" FontWeight="SemiBold"/><TextBlock HorizontalAlignment="Right" Text="{Binding UnacknowledgedCount, StringFormat=미확인 {0}}" Foreground="{StaticResource MutedTextBrush}"/></Grid>
+                        <Grid>
+                            <TextBlock Text="이벤트 · 검색/필터" FontWeight="SemiBold" />
+                            <TextBlock HorizontalAlignment="Right" Text="{Binding EventCountText}"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       AutomationProperties.LiveSetting="Polite" />
+                        </Grid>
                     </Border>
-                    <ListBox Grid.Row="1" ItemsSource="{Binding RecentEvents}" SelectedItem="{Binding SelectedEvent}" BorderThickness="0" Background="Transparent" AutomationProperties.Name="최근 이벤트 목록">
-                        <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="Padding" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style></ListBox.ItemContainerStyle>
+                    <Grid Grid.Row="1" Margin="12,10">
+                        <Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="36" /></Grid.RowDefinitions>
+                        <TextBox Grid.Row="0" Padding="10,6" Text="{Binding EventSearchText, UpdateSourceTrigger=PropertyChanged}"
+                                 AutomationProperties.Name="이벤트 텍스트 검색"
+                                 AutomationProperties.HelpText="장비 별칭, 제목, 상세, 이벤트 유형에서 검색합니다." />
+                        <ComboBox Grid.Row="1" Margin="0,6,0,0" ItemsSource="{Binding EventFilters}"
+                                  DisplayMemberPath="Label" SelectedItem="{Binding SelectedEventFilter}"
+                                  AutomationProperties.Name="이벤트 필터 전체 미확인 새 로그 장애 복구" />
+                    </Grid>
+                    <ListBox x:Name="RecentEventsList" Grid.Row="2" ItemsSource="{Binding FilteredEvents}"
+                             SelectedItem="{Binding SelectedEvent}" BorderThickness="0" Background="Transparent"
+                             KeyboardNavigation.DirectionalNavigation="Contained"
+                             AutomationProperties.Name="필터된 최근 이벤트 목록">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14" Opacity="{Binding Acknowledged, Converter={StaticResource BoolOpacity}}">
+                                <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14"
+                                        Opacity="{Binding Acknowledged, Converter={StaticResource BoolOpacity}}"
+                                        AutomationProperties.Name="{Binding Title}" AutomationProperties.ItemStatus="{Binding StatusText}">
                                     <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="4"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                        <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="2"/>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="5" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
                                         <StackPanel Grid.Column="2">
-                                            <Grid><TextBlock Text="{Binding DeviceName}" FontSize="12" FontWeight="SemiBold"/><TextBlock HorizontalAlignment="Right" Text="{Binding TimeText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/></Grid>
-                                            <TextBlock Margin="0,6,0,0" Text="{Binding Title}" FontWeight="SemiBold"/>
-                                            <TextBlock Margin="0,3,0,0" Text="{Binding Detail}" FontSize="12" Foreground="{StaticResource MutedTextBrush}"/>
+                                            <Grid>
+                                                <TextBlock Text="{Binding DeviceName}" FontSize="12" FontWeight="SemiBold" />
+                                                <TextBlock HorizontalAlignment="Right" Text="{Binding TimeText}" FontSize="11"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                            </Grid>
+                                            <TextBlock Margin="0,6,0,0" Text="{Binding Title}" FontWeight="SemiBold" />
+                                            <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12"
+                                                       Foreground="{StaticResource MutedTextBrush}" />
                                             <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
-                                                <Border Padding="7,3" CornerRadius="12" Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}"><TextBlock Text="{Binding Severity, Converter={StaticResource HealthText}}" FontSize="11" Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}"/></Border>
-                                                <Button Margin="8,0,0,0" Padding="8,3" FontSize="11" Content="확인" Command="{Binding DataContext.AcknowledgeCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}" AutomationProperties.Name="이벤트 확인 처리"/>
+                                                <Border Padding="7,3" CornerRadius="12"
+                                                        Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                                                    <TextBlock Text="{Binding Severity, Converter={StaticResource HealthText}}" FontSize="11"
+                                                               Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}" />
+                                                </Border>
+                                                <Border Margin="6,0,0,0" Padding="7,3" CornerRadius="12" Background="#F1F5F9">
+                                                    <TextBlock Text="{Binding StatusText}" FontSize="11" />
+                                                </Border>
+                                                <Button Margin="8,0,0,0" Padding="8,3" FontSize="11" Content="_확인"
+                                                        Command="{Binding DataContext.AcknowledgeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}" AutomationProperties.Name="이벤트 확인 처리" />
                                             </StackPanel>
                                         </StackPanel>
                                     </Grid>
@@ -219,14 +397,31 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
+                    <Border Grid.Row="3" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="12,6">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Style="{StaticResource SecondaryButton}" Padding="10,5" Content="_CSV"
+                                    Click="ExportCsv_Click" AutomationProperties.Name="필터된 이벤트를 익명화 CSV로 내보내기" />
+                            <Button Margin="6,0,0,0" Style="{StaticResource SecondaryButton}" Padding="10,5" Content="_JSON"
+                                    Click="ExportJson_Click" AutomationProperties.Name="필터된 이벤트를 익명화 JSON으로 내보내기" />
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
         </Grid>
 
-        <Border Grid.Row="3" Background="#F1F5F9" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="24,0">
+        <Border Grid.Row="3" Background="#F1F5F9" BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="0,1,0,0" Padding="24,0">
             <Grid>
-                <StackPanel Orientation="Horizontal"><ProgressBar Width="90" Height="4" Margin="0,0,12,0" IsIndeterminate="True" Visibility="{Binding IsBusy, Converter={StaticResource BoolVisibility}}"/><TextBlock Text="{Binding OperationMessage}" FontSize="12" Foreground="{StaticResource MutedTextBrush}"/></StackPanel>
-                <TextBlock HorizontalAlignment="Right" Text="{Binding CollectorVersion, StringFormat=Collector {0}}" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/>
+                <StackPanel Orientation="Horizontal">
+                    <ProgressBar Width="90" Height="4" Margin="0,0,12,0" IsIndeterminate="True"
+                                 Visibility="{Binding IsBusy, Converter={StaticResource BoolVisibility}}" />
+                    <TextBlock Text="{Binding OperationMessage}" FontSize="12" Foreground="{StaticResource MutedTextBrush}"
+                               AutomationProperties.LiveSetting="Polite" />
+                </StackPanel>
+                <TextBlock HorizontalAlignment="Right" FontSize="11" Foreground="{StaticResource MutedTextBrush}">
+                    <Run Text="{Binding CollectorVersion, Mode=OneWay}" /><Run Text=" · " />
+                    <Run Text="원문 미수신" />
+                </TextBlock>
             </Grid>
         </Border>
     </Grid>

@@ -1,67 +1,206 @@
-name: Publish GitHub prerelease
+name: Build and publish immutable release
 
 on:
   push:
-    tags: ['v0.2.0-poc']
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing v-prefixed tag to publish
+      version:
+        description: Build-only semantic version (manual runs never publish)
         required: true
+        default: 0.4.0-poc
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: immutable-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  package-and-publish:
+  package:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    environment: release-signing
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      artifact-name: ${{ steps.version.outputs.artifact-name }}
     steps:
-      - name: Resolve tag
+      - name: Resolve build version
         id: version
         shell: powershell
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
-          if ($tag -ne 'v0.2.0-poc') { throw "This workflow only publishes v0.2.0-poc: $tag" }
+          if ('${{ github.event_name }}' -eq 'push') {
+            $tag = '${{ github.ref_name }}'
+            if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') { throw "Invalid release tag: $tag" }
+            $version = $Matches.version
+          }
+          else {
+            $tag = ''
+            $version = '${{ inputs.version }}'
+            if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw "Invalid build-only version: $version" }
+          }
           "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact-name=samsung-switch-watch-$version-${{ github.sha }}" >> $env:GITHUB_OUTPUT
 
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.version.outputs.tag }}
-
-      - name: Install .NET 10 SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Validate and package
-        shell: powershell
-        run: .\scripts\build-release.ps1 -Version '${{ steps.version.outputs.version }}'
-
-      - name: Create or update prerelease assets
+      - name: Abort existing immutable release before build
+        if: github.event_name == 'push'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = '${{ steps.version.outputs.tag }}'
-          $assets = @(
-            "artifacts/release/SamsungSwitchWatch-Agent-${{ steps.version.outputs.version }}-win-x64.zip",
-            "artifacts/release/SamsungSwitchWatch-Viewer-${{ steps.version.outputs.version }}-win-x64.zip",
-            'artifacts/release/SHA256SUMS.txt'
-          )
-          $releases = gh release list --repo '${{ github.repository }}' --limit 100 --json tagName | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub release lookup failed.' }
-          $releaseExists = @($releases | Where-Object { $_.tagName -eq $tag }).Count -gt 0
-          if ($releaseExists) {
-            gh release upload $tag @assets --clobber --repo '${{ github.repository }}'
+          gh release view '${{ steps.version.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Immutable release already exists; rebuilding or replacing its assets is forbidden.' }
+          if ($LASTEXITCODE -ne 1) { throw 'GitHub release preflight lookup failed.' }
+
+      - name: Checkout exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag target
+        if: github.event_name == 'push'
+        shell: powershell
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne '${{ github.sha }}') { throw 'Checked out commit does not match the tag event SHA.' }
+          if ((git cat-file -t 'refs/tags/${{ steps.version.outputs.tag }}').Trim() -ne 'tag') { throw 'Release tags must be annotated.' }
+
+      - name: Install exact .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Materialize optional signing certificate
+        id: signing
+        shell: powershell
+        env:
+          SSW_SIGNING_PFX_BASE64: ${{ secrets.SSW_SIGNING_PFX_BASE64 }}
+          SSW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SSW_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SSW_SIGNING_PFX_BASE64)) {
+            'certificate=' >> $env:GITHUB_OUTPUT
+            Write-Host 'No signing secret supplied; build is restricted to a -poc prerelease.'
+            exit 0
           }
-          else {
-            gh release create $tag @assets --verify-tag --prerelease `
-              --title "Samsung Switch Watch ${{ steps.version.outputs.version }}" `
-              --notes-file 'docs/RELEASE_NOTES_0.2.0_POC_KO.md' `
-              --repo '${{ github.repository }}'
+          if ([string]::IsNullOrWhiteSpace($env:SSW_SIGNING_CERTIFICATE_PASSWORD)) { throw 'Signing certificate password secret is missing.' }
+          $certificate = Join-Path $env:RUNNER_TEMP 'ssw-release-signing.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:SSW_SIGNING_PFX_BASE64))
+          "certificate=$certificate" >> $env:GITHUB_OUTPUT
+
+      - name: Validate and package
+        shell: powershell
+        env:
+          SSW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SSW_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $arguments = @('-Version', '${{ steps.version.outputs.version }}')
+          if (-not [string]::IsNullOrWhiteSpace('${{ steps.signing.outputs.certificate }}')) {
+            $arguments += @('-SigningCertificatePath', '${{ steps.signing.outputs.certificate }}')
           }
-          if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publish failed.' }
+          .\scripts\build-release.ps1 @arguments
+
+      - name: Remove temporary signing certificate
+        if: always() && steps.signing.outputs.certificate != ''
+        shell: powershell
+        run: Remove-Item -LiteralPath '${{ steps.signing.outputs.certificate }}' -Force -ErrorAction SilentlyContinue
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.version.outputs.artifact-name }}
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-download:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout verification scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download packaged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.package.outputs.artifact-name }}
+          path: artifacts/release
+      - name: Verify downloaded digest and contract
+        shell: powershell
+        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version '${{ needs.package.outputs.version }}'
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [package, verify-download]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.package.outputs.tag }}
+          persist-credentials: false
+      - name: Download verified artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.package.outputs.artifact-name }}
+          path: artifacts/release
+      - name: Abort if release already exists
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Immutable release already exists; assets will not be overwritten.' }
+          if ($LASTEXITCODE -ne 1) { throw 'GitHub release preflight lookup failed.' }
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: artifacts/release/*
+      - name: Create release exactly once
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ needs.package.outputs.version }}'
+          $tag = '${{ needs.package.outputs.tag }}'
+          $assets = @(Get-ChildItem -LiteralPath 'artifacts/release' -File | ForEach-Object { $_.FullName })
+          $expected = @(
+            "SamsungSwitchWatch-Agent-$version-win-x64.zip",
+            "SamsungSwitchWatch-Viewer-$version-win-x64.zip",
+            'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json', 'SHA256SUMS.txt'
+          ) | Sort-Object
+          if ((@($assets | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object) -join '|') -ne ($expected -join '|')) {
+            throw 'Release asset set differs from the immutable contract.'
+          }
+          $arguments = @($tag) + $assets + @('--verify-tag', '--title', "Samsung Switch Watch $version", '--repo', '${{ github.repository }}')
+          if ($version -match '-') { $arguments += '--prerelease' }
+          $releaseNotesToken = $version.Replace('-', '_').ToUpperInvariant()
+          $notes = @("docs/RELEASE_NOTES_${releaseNotesToken}_KO.md", 'docs/RELEASE_NOTES_0.4.0_POC_KO.md', 'docs/RELEASE_NOTES_0.2.0_POC_KO.md') |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ($notes) { $arguments += @('--notes-file', $notes) } else { $arguments += '--generate-notes' }
+          gh release create @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable GitHub release creation failed.' }
+      - name: Download release again and verify digests and attestations
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'published-release'
+          New-Item -ItemType Directory -Path $download | Out-Null
+          gh release download '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' --dir $download
+          if ($LASTEXITCODE -ne 0) { throw 'Post-publish release download failed.' }
+          .\scripts\test-package-contract.ps1 -ReleaseDirectory $download -Version '${{ needs.package.outputs.version }}'
+          foreach ($zip in Get-ChildItem -LiteralPath $download -Filter '*.zip') {
+            gh attestation verify $zip.FullName --repo '${{ github.repository }}'
+            if ($LASTEXITCODE -ne 0) { throw "Artifact attestation verification failed: $($zip.Name)" }
+          }

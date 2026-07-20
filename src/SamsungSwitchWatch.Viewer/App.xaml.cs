@@ -22,6 +22,7 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ApplyAccessibilityTheme();
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
         _singleInstance = new SingleInstanceCoordinator();
@@ -38,19 +39,24 @@ public partial class App : Application
         _viewModel = new DashboardViewModel(settings, _settingsStore, synchronizationContext: SynchronizationContext.Current);
         _mainWindow = new MainWindow(_viewModel);
         MainWindow = _mainWindow;
-        _alertService = new AlertPopupService();
-        _viewModel.AlertRaised += OnAlertRaised;
         _trayIcon = new TrayIconService(_viewModel, ShowDashboard, ShowMiniWindow, OpenConnectionSettings, ExitApplication);
+        _alertService = new AlertPopupService(OpenAlert, _trayIcon);
+        _viewModel.AlertRaised += OnAlertRaised;
 
-        if (!settings.StartMinimizedToTray)
+        var needsPairing = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.NeedsPairing or ViewerSettingsLoadStatus.Corrupt
+                           || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
+        if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing))
         {
             _mainWindow.Show();
         }
         _ = InitializeApplicationAsync();
-        if (_settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.NeedsPairing or ViewerSettingsLoadStatus.Corrupt
-            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _)))
+        if (needsPairing)
         {
-            Dispatcher.BeginInvoke(OpenConnectionSettings);
+            Dispatcher.BeginInvoke(() =>
+            {
+                ShowDashboard();
+                OpenConnectionSettings();
+            });
         }
     }
 
@@ -71,6 +77,24 @@ public partial class App : Application
         if (!_mainWindow.IsVisible) _mainWindow.Show();
         if (_mainWindow.WindowState == WindowState.Minimized) _mainWindow.WindowState = WindowState.Normal;
         _mainWindow.Activate();
+    }
+
+    private void ApplyAccessibilityTheme()
+    {
+        if (!SystemParameters.HighContrast) return;
+        Resources["CanvasBrush"] = System.Windows.SystemColors.WindowBrush;
+        Resources["SurfaceBrush"] = System.Windows.SystemColors.WindowBrush;
+        Resources["TextBrush"] = System.Windows.SystemColors.WindowTextBrush;
+        Resources["MutedTextBrush"] = System.Windows.SystemColors.GrayTextBrush;
+        Resources["BorderBrush"] = System.Windows.SystemColors.WindowTextBrush;
+        Resources["PrimaryBrush"] = System.Windows.SystemColors.HighlightBrush;
+        Resources["PrimaryHoverBrush"] = System.Windows.SystemColors.HotTrackBrush;
+    }
+
+    private void OpenAlert(EventViewModel item)
+    {
+        ShowDashboard();
+        if (_viewModel?.NavigateToEvent(item.NavigationEventId) == true) _mainWindow?.FocusSelectedEvent();
     }
 
     public void ShowMiniWindow()
@@ -229,4 +253,10 @@ public partial class App : Application
     }
 
     private void OnAlertRaised(object? sender, EventViewModel item) => _alertService?.Enqueue(item);
+}
+
+internal static class StartupWindowPolicy
+{
+    public static bool ShouldShowMainWindow(ViewerSettings settings, bool needsPairing) =>
+        needsPairing || !settings.StartMinimizedToTray;
 }

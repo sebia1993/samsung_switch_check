@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Collections.Concurrent;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
@@ -235,6 +236,58 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
+    public async Task Reconnected_RaisesOneSeverityRankedCatchupSummary()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []);
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+        await viewModel.InitializeAsync();
+        var alerts = new ConcurrentQueue<EventViewModel>();
+        viewModel.AlertRaised += (_, item) => alerts.Enqueue(item);
+
+        fixture.Client.EmitState(AgentConnectionState.Offline);
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Changes.AddRange([
+            Change(1, Event(1, now) with { Severity = DeviceHealth.Warning }),
+            Change(2, Event(2, now.AddSeconds(1)) with { Severity = DeviceHealth.Critical })
+        ]);
+        fixture.Client.Snapshot = Snapshot(now.AddSeconds(2), 2, []);
+        fixture.Client.EmitState(AgentConnectionState.Connected);
+        await WaitUntilAsync(() => viewModel.AppliedChangeCursor == 2 && alerts.Count == 1);
+
+        var summary = Assert.Single(alerts);
+        Assert.Equal(DeviceHealth.Critical, summary.Severity);
+        Assert.Contains("놓친 변경 2건", summary.Title, StringComparison.Ordinal);
+        Assert.Equal("event-2", summary.NavigationEventId);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task InitialBaselineAndRetentionReset_DoNotRaiseCatchupSummary()
+    {
+        using var baselineFixture = new ViewModelFixture();
+        baselineFixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 5, []);
+        baselineFixture.Client.Changes.Add(Change(5, Event(5, DateTimeOffset.UtcNow) with { Severity = DeviceHealth.Critical }));
+        var baseline = baselineFixture.CreateViewModel(new ViewerSettings { DemoMode = true });
+        var baselineAlerts = 0;
+        baseline.AlertRaised += (_, _) => baselineAlerts++;
+        await baseline.InitializeAsync();
+        Assert.Equal(0, baselineAlerts);
+        await baseline.DisposeAsync();
+
+        using var resetFixture = new ViewModelFixture();
+        resetFixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 250, []);
+        resetFixture.Client.Recent = [Event(42, DateTimeOffset.UtcNow) with { Severity = DeviceHealth.Critical }];
+        resetFixture.Client.ChangePages.Enqueue(new EventChangePageDto(250, 250, false, [], true, 250));
+        var reset = resetFixture.CreateViewModel(CursorSettings(10));
+        var resetAlerts = 0;
+        reset.AlertRaised += (_, _) => resetAlerts++;
+        await reset.InitializeAsync();
+        Assert.Equal(0, resetAlerts);
+        await reset.DisposeAsync();
+    }
+
+    [Fact]
     public async Task StartupHubFailure_PreservesSnapshotAndShowsStaleState()
     {
         using var fixture = new ViewModelFixture();
@@ -246,7 +299,51 @@ public sealed class DashboardViewModelTests
 
         Assert.Single(viewModel.Devices);
         Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+        Assert.Equal(AgentConnectionState.Connected, viewModel.HttpConnectionState);
+        Assert.Equal(AgentConnectionState.Offline, viewModel.RealtimeConnectionState);
         Assert.Contains("AGENT_UNREACHABLE", viewModel.OperationMessage, StringComparison.Ordinal);
+
+        viewModel.ApplySnapshot(Snapshot(DateTimeOffset.UtcNow.AddMinutes(1), 0,
+            [Device("a", DeviceHealth.Normal, DateTimeOffset.UtcNow)]));
+        Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RealtimeReconnect_IsSeparateFromHealthyHttpSnapshot()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0,
+            [Device("a", DeviceHealth.Normal, DateTimeOffset.UtcNow)]);
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+        await viewModel.InitializeAsync();
+
+        fixture.Client.EmitState(AgentConnectionState.Reconnecting);
+
+        Assert.Equal(AgentConnectionState.Connected, viewModel.HttpConnectionState);
+        Assert.Equal(AgentConnectionState.Reconnecting, viewModel.RealtimeConnectionState);
+        Assert.Equal(AgentConnectionState.Reconnecting, viewModel.ConnectionState);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PairingFailure_TransitionsToNeedsPairingWithStableSafeCode()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []);
+        fixture.Client.StartException = new AgentClientException(
+            "VIEWER_PAIRING_REQUIRED",
+            AgentConnectionState.NeedsPairing,
+            new HttpRequestException("sensitive endpoint"));
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.ConnectionState);
+        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.HttpConnectionState);
+        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.RealtimeConnectionState);
+        Assert.Contains("VIEWER_PAIRING_REQUIRED", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("sensitive", viewModel.OperationMessage, StringComparison.OrdinalIgnoreCase);
         await viewModel.DisposeAsync();
     }
 
@@ -289,6 +386,65 @@ public sealed class DashboardViewModelTests
 
         Assert.Single(viewModel.RecentEvents);
         Assert.Equal(1, alerts);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task LiveRecovery_RaisesOnceWithDurationAndDoesNotIncreaseUnacknowledgedCount()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []);
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+        await viewModel.InitializeAsync();
+        var alerts = new ConcurrentQueue<EventViewModel>();
+        viewModel.AlertRaised += (_, item) => alerts.Enqueue(item);
+        var occurred = DateTimeOffset.UtcNow;
+        var active = Event(1, occurred) with
+        {
+            Severity = DeviceHealth.Critical,
+            ConditionKey = "uplink:24",
+            IsActiveCondition = true
+        };
+
+        fixture.Client.Emit(Change(1, active));
+        await WaitUntilAsync(() => viewModel.AppliedChangeCursor == 1);
+        Assert.Equal(1, viewModel.UnacknowledgedCount);
+
+        var recovered = active with
+        {
+            Severity = DeviceHealth.Normal,
+            Recovered = true,
+            Acknowledged = false,
+            IsActiveCondition = false,
+            RecoveredAt = occurred.AddMinutes(2).AddSeconds(5),
+            Title = "업링크 복구"
+        };
+        fixture.Client.Emit(Change(2, recovered, "Recovered"));
+        fixture.Client.Emit(Change(3, recovered, "Recovered"));
+        await WaitUntilAsync(() => viewModel.AppliedChangeCursor == 3);
+
+        Assert.Equal(2, alerts.Count);
+        var recoveryAlert = alerts.Last();
+        Assert.True(recoveryAlert.Recovered);
+        Assert.Contains("2분 5초", recoveryAlert.AlertDetail, StringComparison.Ordinal);
+        Assert.Equal(0, viewModel.UnacknowledgedCount);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task NavigateToEvent_SelectsItsDeviceAndEvent()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        var viewModel = fixture.CreateViewModel();
+        viewModel.ApplySnapshot(Snapshot(now, 0,
+            [Device("a", DeviceHealth.Normal, now), Device("b", DeviceHealth.Warning, now)]));
+        viewModel.ApplyEvents([Event(7, now) with { DeviceId = "b", DeviceName = "SW-B" }], false);
+
+        Assert.True(viewModel.NavigateToEvent("event-7"));
+        Assert.Equal("b", viewModel.SelectedDevice?.Id);
+        Assert.Equal("event-7", viewModel.SelectedEvent?.AgentEventId);
+        Assert.False(viewModel.NavigateToEvent("missing"));
         await viewModel.DisposeAsync();
     }
 

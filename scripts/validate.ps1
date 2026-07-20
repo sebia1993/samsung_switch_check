@@ -12,7 +12,7 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_NOLOGO = '1'
 
 Write-SswStep '패키지 복원'
-& $dotnet restore $solution
+& $dotnet restore $solution --locked-mode
 if ($LASTEXITCODE -ne 0) { throw 'restore 실패' }
 
 Write-SswStep '솔루션 빌드'
@@ -38,6 +38,20 @@ Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Filter '*.ps1' | For
 if ($parseFailures.Count -gt 0) {
     $parseFailures | ForEach-Object { Write-Error ("{0}: {1}" -f $_.Extent.File, $_.Message) }
     throw 'PowerShell 구문 검사 실패'
+}
+
+Write-SswStep '배포 도우미 계약 검사'
+& (Join-Path $PSScriptRoot 'test-deployment-helpers.ps1')
+
+Write-SswStep 'NuGet 취약 패키지 검사'
+$vulnerabilityOutput = & $dotnet list $solution package --vulnerable --include-transitive 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $vulnerabilityOutput | ForEach-Object { Write-Host $_ }
+    throw 'NuGet 취약 패키지 검사 실패'
+}
+if ($vulnerabilityOutput -match '(?im)^\s*>\s+') {
+    $vulnerabilityOutput | ForEach-Object { Write-Host $_ }
+    throw '취약한 NuGet 패키지가 발견되었습니다.'
 }
 
 if (Get-Command git -ErrorAction SilentlyContinue) {

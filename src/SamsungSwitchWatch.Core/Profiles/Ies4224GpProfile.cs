@@ -5,9 +5,9 @@ public static class Ies4224GpProfile
     public static DeviceCommandProfile Create() => new(
         "IES4224GP",
         new TelnetPromptProfile(
-            LoginPromptPattern: @"(?im)(?:login|user(?:name)?)\s*:\s*$",
-            PasswordPromptPattern: @"(?im)password\s*:\s*$",
-            DevicePromptPattern: @"(?m)^[^\r\n]{1,80}[>#]\s*$",
+            LoginPromptPattern: @"(?im)(?:login|user(?:name)?)[ \t]*:[ \t]*\r?$",
+            PasswordPromptPattern: @"(?im)password[ \t]*:[ \t]*\r?$",
+            DevicePromptPattern: @"(?m)^[^\r\n]{1,80}[>#][ \t]*\r?$",
             AuthenticationFailurePatterns:
             [
                 @"(?i)authentication\s+failed",

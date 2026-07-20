@@ -103,6 +103,20 @@ public sealed class ParserTests
         Assert.Equal(ErrorCodes.ParserUnsupported, embeddedInterfaces.Error!.Code);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\r\n\t")]
+    public void LogParser_BlankResponseIsIncompleteRatherThanAnEmptyBuffer(string output)
+    {
+        var result = LogOutputParser.Parse(output);
+
+        Assert.False(result.IsSuccess);
+        Assert.Null(result.Value);
+        Assert.Equal(ErrorCodes.IncompleteOutput, result.Error!.Code);
+        Assert.True(result.Error.IsRetryable);
+    }
+
     [Fact]
     public void LogParser_TruncatedHeaderDoesNotInventAnEntry()
     {

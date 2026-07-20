@@ -6,5 +6,9 @@
     <Deterministic>true</Deterministic>
     <DebugType>portable</DebugType>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+    <RepositoryUrl>https://github.com/sebia1993/samsung_switch_check.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 </Project>

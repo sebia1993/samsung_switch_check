@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
@@ -25,7 +28,7 @@ public sealed class CollectorSafetyTests
             [new CommandOutput("interface_status", "show interfaces status", output, output, captured)],
             captured.AddSeconds(-1),
             captured));
-        var collector = new CoreTelnetDeviceCollector(telnet, Ies4224GpProfile.Create(), new StaticCredentialVault());
+        var collector = new CoreTelnetDeviceCollector(telnet, CreateProfileRegistry(), new StaticCredentialVault());
         var device = new SwitchOptions { UplinkPort = "24" };
 
         var exception = await Assert.ThrowsAsync<AgentOperationException>(() => collector.CollectAsync(
@@ -59,7 +62,7 @@ public sealed class CollectorSafetyTests
     public async Task CoreCollectorExecutesSeveralRegisteredCommandsInOneTelnetSession()
     {
         var telnet = new CapturingTelnetClient();
-        var collector = new CoreTelnetDeviceCollector(telnet, Ies4224GpProfile.Create(), new StaticCredentialVault());
+        var collector = new CoreTelnetDeviceCollector(telnet, CreateProfileRegistry(), new StaticCredentialVault());
         var commands = CommandCatalog.Registered.Values.ToArray();
 
         var outputs = await collector.CollectBatchAsync(new SwitchOptions { UplinkPort = "24" }, commands,
@@ -83,7 +86,7 @@ public sealed class CollectorSafetyTests
                 new CommandOutput("system", "show system", "unrecognized sanitized output",
                     "unrecognized sanitized output", captured)
             ], captured.AddSeconds(-1), captured));
-        var collector = new CoreTelnetDeviceCollector(telnet, Ies4224GpProfile.Create(), new StaticCredentialVault());
+        var collector = new CoreTelnetDeviceCollector(telnet, CreateProfileRegistry(), new StaticCredentialVault());
 
         var outputs = await collector.CollectBatchAsync(new SwitchOptions(),
             [CommandCatalog.Registered["version"], CommandCatalog.Registered["system"]], CancellationToken.None);
@@ -91,6 +94,43 @@ public sealed class CollectorSafetyTests
         Assert.Equal("OK", outputs.Single(output => output.CommandId == "version").CollectorStatus);
         Assert.Equal(AgentErrorCodes.ParserUnsupported,
             outputs.Single(output => output.CommandId == "system").CollectorStatus);
+    }
+
+    [Theory]
+    [InlineData("IES4224GP")]
+    [InlineData("IES4028XP")]
+    [InlineData("IES4226XP")]
+    public async Task CoreCollectorSelectsProfileFromConfiguredDeviceModel(string model)
+    {
+        var telnet = new CapturingTelnetClient();
+        var collector = new CoreTelnetDeviceCollector(telnet, CreateProfileRegistry(),
+            new StaticCredentialVault());
+
+        var output = await collector.CollectAsync(new SwitchOptions { Model = model },
+            CommandCatalog.Registered[CommandIds.Version], CancellationToken.None);
+
+        Assert.Equal("OK", output.CollectorStatus);
+        Assert.Equal(model, telnet.LastProfileModel, ignoreCase: true);
+    }
+
+    [Fact]
+    public async Task ProfileMissingCommandReportsOnlyThatCapabilityUnsupported()
+    {
+        var full = Ies4224GpProfile.Create();
+        var limited = new DeviceCommandProfile(full.Model, full.Telnet,
+            [full.GetRequiredCommand(CommandIds.Version)]);
+        var telnet = new CapturingTelnetClient();
+        var collector = new CoreTelnetDeviceCollector(telnet, new DeviceProfileRegistry([limited]),
+            new StaticCredentialVault());
+
+        var outputs = await collector.CollectBatchAsync(new SwitchOptions(),
+            [CommandCatalog.Registered[CommandIds.Version], CommandCatalog.Registered[CommandIds.System]],
+            CancellationToken.None);
+
+        Assert.Equal([CommandIds.Version], telnet.LastCommandIds);
+        Assert.Equal("OK", outputs.Single(output => output.CommandId == CommandIds.Version).CollectorStatus);
+        Assert.Equal(AgentErrorCodes.ParserUnsupported,
+            outputs.Single(output => output.CommandId == CommandIds.System).CollectorStatus);
     }
 
     [Fact]
@@ -124,6 +164,146 @@ public sealed class CollectorSafetyTests
         var restart = Assert.Single(events);
         Assert.Equal("device-restart", restart.Type);
         Assert.DoesNotContain(events, item => item.Type == "log-buffer-reset");
+    }
+
+    [Fact]
+    public async Task FirstStatusCreatesCriticalDownWhileFirstLogsRemainBaseline()
+    {
+        await using var host = await TestAgentHost.StartAsync(new InitialDownCollector());
+        var execution = host.Services.GetRequiredService<CommandExecutionService>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+
+        var results = await execution.ExecuteBatchAsync("TEST-SW-01",
+            [CommandIds.LogRam, CommandIds.InterfaceStatus], "test", CancellationToken.None);
+
+        Assert.All(results, result => Assert.True(result.Success));
+        var active = Assert.Single(await store.GetEventsAfterAsync(0));
+        Assert.Equal("uplink-down", active.Type);
+        Assert.Equal(EventSeverity.Critical, active.Severity);
+        Assert.True(active.IsActiveCondition);
+        Assert.Equal(1, (await store.GetEventSummaryAsync()).ActiveCritical);
+    }
+
+    [Fact]
+    public async Task RebootCorrelationSurvivesSeparateSystemAndLogCollections()
+    {
+        await using var host = await TestAgentHost.StartAsync(new SplitRebootCollector());
+        var execution = host.Services.GetRequiredService<CommandExecutionService>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+
+        await execution.ExecuteAsync("TEST-SW-01", CommandIds.System, "test", CancellationToken.None);
+        await execution.ExecuteAsync("TEST-SW-01", CommandIds.LogRam, "test", CancellationToken.None);
+        await execution.ExecuteAsync("TEST-SW-01", CommandIds.System, "test", CancellationToken.None);
+        await execution.ExecuteAsync("TEST-SW-01", CommandIds.LogRam, "test", CancellationToken.None);
+
+        var events = await store.GetEventsAfterAsync(0);
+        Assert.Single(events);
+        Assert.Equal("device-restart", events[0].Type);
+        Assert.DoesNotContain(events, item => item.Type == "log-buffer-reset");
+        var correlation = await store.GetSnapshotAsync("TEST-SW-01",
+            CommandCatalog.RebootCorrelationSnapshotId);
+        Assert.False(correlation!.Data["pendingLogBaseline"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task UnexpectedCollectorFailurePersistsOnlySanitizedFailureMetadata()
+    {
+        await using var host = await TestAgentHost.StartAsync(new ThrowingCollector());
+        var execution = host.Services.GetRequiredService<CommandExecutionService>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        var options = host.Services.GetRequiredService<AgentOptions>();
+
+        var error = await Assert.ThrowsAsync<AgentOperationException>(() => execution.ExecuteAsync(
+            "TEST-SW-01", CommandIds.Version, "test", CancellationToken.None));
+
+        Assert.Equal(AgentErrorCodes.PromptParseFailed, error.Code);
+        var health = await store.GetSnapshotAsync("TEST-SW-01",
+            CommandCatalog.CollectorHealthSnapshotIdFor(CommandIds.Version));
+        Assert.Equal(AgentErrorCodes.PromptParseFailed, health!.Data["errorCode"]!.GetValue<string>());
+        Assert.Equal("Degraded", health.Data["state"]!.GetValue<string>());
+
+        await using var connection = new SqliteConnection($"Data Source={options.DatabasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT detail FROM audit ORDER BY id DESC LIMIT 1;";
+        var detail = Assert.IsType<string>(await command.ExecuteScalarAsync());
+        Assert.Equal($"Error code: {AgentErrorCodes.PromptParseFailed}", detail);
+        Assert.DoesNotContain("SENSITIVE", detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DuplicateBatchOutputsBecomePersistedIncompleteFailures()
+    {
+        await using var host = await TestAgentHost.StartAsync(new DuplicateBatchCollector());
+        var execution = host.Services.GetRequiredService<CommandExecutionService>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+
+        var results = await execution.ExecuteBatchAsync("TEST-SW-01",
+            [CommandIds.Version, CommandIds.System], "test", CancellationToken.None);
+
+        Assert.All(results, result =>
+        {
+            Assert.False(result.Success);
+            Assert.Equal(AgentErrorCodes.IncompleteOutput, result.ErrorCode);
+        });
+        foreach (var commandId in new[] { CommandIds.Version, CommandIds.System })
+        {
+            var health = await store.GetSnapshotAsync("TEST-SW-01",
+                CommandCatalog.CollectorHealthSnapshotIdFor(commandId));
+            Assert.Equal(AgentErrorCodes.IncompleteOutput, health!.Data["errorCode"]!.GetValue<string>());
+        }
+    }
+
+    [Fact]
+    public async Task IntegrityFailureBlocksCollectionBeforeDeviceAccess()
+    {
+        var collector = new CountingCollector();
+        await using var host = await TestAgentHost.StartAsync(collector);
+        var execution = host.Services.GetRequiredService<CommandExecutionService>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        var options = host.Services.GetRequiredService<AgentOptions>();
+        await using (var connection = new SqliteConnection($"Data Source={options.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+        Assert.False(await store.RefreshIntegrityStatusAsync());
+
+        var error = await Assert.ThrowsAsync<AgentOperationException>(() => execution.ExecuteAsync(
+            "TEST-SW-01", CommandIds.Version, "test", CancellationToken.None));
+
+        Assert.Equal(AgentErrorCodes.StorageWriteFailed, error.Code);
+        Assert.Equal(0, collector.Calls);
+    }
+
+    [Fact]
+    public async Task PollSchedulerBoundsParallelDevicesAndKeepsOneSessionPerDevice()
+    {
+        var collector = new ConcurrentBatchCollector(expectedDevices: 3);
+        await using var host = await TestAgentHost.StartAsync(collector, MultiDeviceOverrides());
+        var options = host.Services.GetRequiredService<AgentOptions>();
+        options.EnablePolling = true;
+        options.MaxConcurrentDevices = 2;
+        var scheduler = new PollSchedulerService(options,
+            host.Services.GetRequiredService<CommandExecutionService>(),
+            host.Services.GetRequiredService<AgentRuntimeState>(),
+            host.Services.GetRequiredService<SqliteAgentStore>(),
+            NullLogger<PollSchedulerService>.Instance);
+
+        await scheduler.StartAsync(CancellationToken.None);
+        try
+        {
+            await collector.AllDevicesCompleted.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await scheduler.StopAsync(CancellationToken.None);
+        }
+
+        Assert.Equal(2, collector.MaximumConcurrentDevices);
+        Assert.All(collector.MaximumSessionsByDevice.Values, maximum => Assert.Equal(1, maximum));
     }
 
     [Fact]
@@ -240,6 +420,7 @@ public sealed class CollectorSafetyTests
     {
         public int Calls { get; private set; }
         public IReadOnlyList<string> LastCommandIds { get; private set; } = [];
+        public string? LastProfileModel { get; private set; }
 
         public Task<TelnetSessionResult> ExecuteRegisteredAsync(
             TelnetEndpoint endpoint,
@@ -250,6 +431,7 @@ public sealed class CollectorSafetyTests
         {
             Calls++;
             LastCommandIds = commandIds.ToArray();
+            LastProfileModel = profile.Model;
             var captured = DateTimeOffset.UtcNow;
             var outputs = commandIds.Select(id =>
             {
@@ -339,6 +521,229 @@ public sealed class CollectorSafetyTests
         }
     }
 
+    private sealed class InitialDownCollector : IDeviceCollector
+    {
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(Create(device, command));
+
+        public Task<IReadOnlyList<CollectedOutput>> CollectBatchAsync(
+            SwitchOptions device,
+            IReadOnlyList<CommandDefinition> commands,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CollectedOutput>>(commands.Select(command =>
+                Create(device, command)).ToArray());
+
+        private static CollectedOutput Create(SwitchOptions device, CommandDefinition command)
+        {
+            var captured = DateTimeOffset.UtcNow;
+            return command.Id switch
+            {
+                CommandIds.LogRam => new CollectedOutput(device.Id, command.Id, captured,
+                    new JsonObject
+                    {
+                        ["entries"] = new JsonArray(new JsonObject
+                        {
+                            ["id"] = "baseline-log",
+                            ["message"] = "Sanitized baseline",
+                            ["severity"] = "info"
+                        })
+                    }, "Sanitized log fixture"),
+                CommandIds.InterfaceStatus => new CollectedOutput(device.Id, command.Id, captured,
+                    new JsonObject
+                    {
+                        ["uplinkPort"] = device.UplinkPort,
+                        ["uplinkAdminUp"] = true,
+                        ["uplinkOperationalUp"] = false,
+                        ["portsUp"] = 23,
+                        ["portsDown"] = 1
+                    }, "Sanitized interface fixture"),
+                _ => throw new InvalidOperationException("Unexpected fixture command.")
+            };
+        }
+    }
+
+    private sealed class SplitRebootCollector : IDeviceCollector
+    {
+        private int _systemCalls;
+        private int _logCalls;
+
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken)
+        {
+            var captured = DateTimeOffset.UtcNow;
+            CollectedOutput output;
+            if (command.Id == CommandIds.System)
+            {
+                var call = Interlocked.Increment(ref _systemCalls);
+                output = new CollectedOutput(device.Id, command.Id, captured,
+                    new JsonObject { ["uptimeSeconds"] = call == 1 ? 3600L : 30L },
+                    "Sanitized system fixture");
+            }
+            else if (command.Id == CommandIds.LogRam)
+            {
+                var call = Interlocked.Increment(ref _logCalls);
+                output = new CollectedOutput(device.Id, command.Id, captured,
+                    new JsonObject
+                    {
+                        ["entries"] = new JsonArray(new JsonObject
+                        {
+                            ["id"] = call == 1 ? "before-reboot" : "after-reboot",
+                            ["message"] = "Sanitized reboot fixture",
+                            ["severity"] = "info"
+                        })
+                    }, "Sanitized log fixture");
+            }
+            else
+            {
+                throw new InvalidOperationException("Unexpected fixture command.");
+            }
+            return Task.FromResult(output);
+        }
+    }
+
+    private sealed class ThrowingCollector : IDeviceCollector
+    {
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("SENSITIVE fixture detail must never be persisted.");
+    }
+
+    private sealed class DuplicateBatchCollector : IDeviceCollector
+    {
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Batch fixture only.");
+
+        public Task<IReadOnlyList<CollectedOutput>> CollectBatchAsync(
+            SwitchOptions device,
+            IReadOnlyList<CommandDefinition> commands,
+            CancellationToken cancellationToken)
+        {
+            var captured = DateTimeOffset.UtcNow;
+            IReadOnlyList<CollectedOutput> outputs =
+            [
+                new(device.Id, commands[0].Id, captured, new JsonObject(), "Sanitized duplicate fixture"),
+                new(device.Id, commands[0].Id, captured, new JsonObject(), "Sanitized duplicate fixture")
+            ];
+            return Task.FromResult(outputs);
+        }
+    }
+
+    private sealed class CountingCollector : IDeviceCollector
+    {
+        public int Calls { get; private set; }
+
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(new CollectedOutput(device.Id, command.Id, DateTimeOffset.UtcNow,
+                new JsonObject(), "Sanitized counting fixture"));
+        }
+    }
+
+    private sealed class ConcurrentBatchCollector(int expectedDevices) : IDeviceCollector
+    {
+        private readonly ConcurrentDictionary<string, int> _activeByDevice =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, int> _maximumSessionsByDevice =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly TaskCompletionSource _allDevicesCompleted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _activeDevices;
+        private int _completedDevices;
+        private int _maximumConcurrentDevices;
+
+        public Task AllDevicesCompleted => _allDevicesCompleted.Task;
+
+        public int MaximumConcurrentDevices => Volatile.Read(ref _maximumConcurrentDevices);
+
+        public IReadOnlyDictionary<string, int> MaximumSessionsByDevice => _maximumSessionsByDevice;
+
+        public Task<CollectedOutput> CollectAsync(
+            SwitchOptions device,
+            CommandDefinition command,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The scheduler must use one batch per device.");
+
+        public async Task<IReadOnlyList<CollectedOutput>> CollectBatchAsync(
+            SwitchOptions device,
+            IReadOnlyList<CommandDefinition> commands,
+            CancellationToken cancellationToken)
+        {
+            var deviceSessions = _activeByDevice.AddOrUpdate(device.Id, 1, (_, current) => current + 1);
+            _maximumSessionsByDevice.AddOrUpdate(device.Id,
+                deviceSessions, (_, current) => Math.Max(current, deviceSessions));
+            var active = Interlocked.Increment(ref _activeDevices);
+            UpdateMaximum(ref _maximumConcurrentDevices, active);
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cancellationToken);
+                var captured = DateTimeOffset.UtcNow;
+                return commands.Select(command => new CollectedOutput(device.Id, command.Id, captured,
+                    command.Id switch
+                    {
+                        CommandIds.Version => new JsonObject
+                        {
+                            ["model"] = device.Model,
+                            ["softwareVersion"] = "TEST"
+                        },
+                        CommandIds.System => new JsonObject { ["uptimeSeconds"] = 3600L, ["post"] = "PASS" },
+                        CommandIds.LogRam => new JsonObject
+                        {
+                            ["entries"] = new JsonArray(new JsonObject
+                            {
+                                ["id"] = $"baseline-{device.Id}",
+                                ["message"] = "Sanitized baseline",
+                                ["severity"] = "info"
+                            })
+                        },
+                        CommandIds.InterfaceStatus => new JsonObject
+                        {
+                            ["uplinkPort"] = device.UplinkPort,
+                            ["uplinkAdminUp"] = true,
+                            ["uplinkOperationalUp"] = true,
+                            ["portsUp"] = 24,
+                            ["portsDown"] = 0
+                        },
+                        _ => throw new InvalidOperationException("Unexpected command id.")
+                    }, "Sanitized concurrency fixture")).ToArray();
+            }
+            finally
+            {
+                _activeByDevice.AddOrUpdate(device.Id, 0, (_, current) => Math.Max(0, current - 1));
+                Interlocked.Decrement(ref _activeDevices);
+                if (Interlocked.Increment(ref _completedDevices) == expectedDevices)
+                {
+                    _allDevicesCompleted.TrySetResult();
+                }
+            }
+        }
+
+        private static void UpdateMaximum(ref int target, int candidate)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref target);
+                if (candidate <= current || Interlocked.CompareExchange(ref target, candidate, current) == current)
+                {
+                    return;
+                }
+            }
+        }
+    }
+
     private sealed class UnsupportedStatusCollector : IDeviceCollector
     {
         public Task<CollectedOutput> CollectAsync(
@@ -366,4 +771,25 @@ public sealed class CollectorSafetyTests
                 new JsonObject(), "Sanitized test fixture", AgentErrorCodes.IncompleteOutput));
         }
     }
+
+    private static DeviceProfileRegistry CreateProfileRegistry() => new(
+    [
+        Ies4224GpProfile.Create(),
+        Ies4028XpProfile.Create(),
+        Ies4226XpProfile.Create()
+    ]);
+
+    private static IReadOnlyDictionary<string, string?> MultiDeviceOverrides() =>
+        new Dictionary<string, string?>
+        {
+            ["Agent:Switches:0:Id"] = "SW-01",
+            ["Agent:Switches:0:Model"] = "IES4224GP",
+            ["Agent:Switches:0:Host"] = "192.0.2.10",
+            ["Agent:Switches:1:Id"] = "SW-02",
+            ["Agent:Switches:1:Model"] = "IES4028XP",
+            ["Agent:Switches:1:Host"] = "192.0.2.11",
+            ["Agent:Switches:2:Id"] = "SW-03",
+            ["Agent:Switches:2:Model"] = "IES4226XP",
+            ["Agent:Switches:2:Host"] = "192.0.2.12"
+        };
 }
