@@ -33,7 +33,7 @@
 [현장 POC 체크리스트](FIELD_POC_CHECKLIST_KO.md)를 따르십시오. ZIP, 매니페스트,
 SBOM과 `SHA256SUMS.txt`는 같은 GitHub Release에서 내려받아 검증해야 합니다.
 
-로컬 Release 검증에서는 Core 45개, Agent 104개, Viewer 68개로 총 217개 자동
+로컬 Release 검증에서는 Core 45개, Agent 104개, Viewer 69개로 총 218개 자동
 테스트와 WPF 창 표시 스모크 테스트가 통과했으며 빌드 경고와 오류는 없었습니다. 이
 결과는 합성 Telnet 출력과 mock Agent를 사용한 것이므로 아래의 실장비 검증을 대체하지
 않습니다.
