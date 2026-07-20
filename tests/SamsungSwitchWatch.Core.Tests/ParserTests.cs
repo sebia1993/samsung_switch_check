@@ -66,6 +66,39 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void InterfaceParser_MissingRequiredUplinkReturnsIncompleteOutput()
+    {
+        var result = InterfaceStatusOutputParser.Parse(
+            "Port Admin Link Speed Duplex\n1 Enabled Up 1000M Full",
+            "24");
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ErrorCodes.IncompleteOutput, result.Error!.Code);
+    }
+
+    [Fact]
+    public void EmptyMarkers_MustDescribeTheWholeOutput()
+    {
+        var emptyLog = LogOutputParser.Parse("  No log entries.  ");
+        var embeddedLog = LogOutputParser.Parse("warning: log is empty flag changed unexpectedly");
+        var embeddedInterfaces = InterfaceStatusOutputParser.Parse("warning: no interfaces flag changed");
+
+        Assert.True(emptyLog.IsSuccess);
+        Assert.Empty(emptyLog.Value!.Entries);
+        Assert.Equal(ErrorCodes.ParserUnsupported, embeddedLog.Error!.Code);
+        Assert.Equal(ErrorCodes.ParserUnsupported, embeddedInterfaces.Error!.Code);
+    }
+
+    [Fact]
+    public void LogParser_TruncatedHeaderDoesNotInventAnEntry()
+    {
+        var result = LogOutputParser.Parse("[12] 14:01:00 2026-07-20");
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ErrorCodes.IncompleteOutput, result.Error!.Code);
+    }
+
+    [Fact]
     public void Redactor_RemovesSecretsNetworkAddressesAndMacs()
     {
         var value = "username: operator password=letmein peer=10.10.4.5 ipv6=2001:db8::10 mac=00:11:22:33:44:55 explicit-secret";

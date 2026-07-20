@@ -37,4 +37,6 @@ public sealed class AsyncRelayCommand(Func<Task> execute, Func<bool>? canExecute
             CanExecuteChanged?.Invoke(this, EventArgs.Empty);
         }
     }
+
+    public void NotifyCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }

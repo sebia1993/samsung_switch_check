@@ -15,7 +15,7 @@ public static partial class LogOutputParser
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n');
 
-        if (string.IsNullOrWhiteSpace(normalized) || EmptyLogRegex().IsMatch(normalized))
+        if (string.IsNullOrWhiteSpace(normalized) || EmptyLogRegex().IsMatch(normalized.Trim()))
         {
             return ParseResult<LogSnapshot>.Success(new LogSnapshot([]));
         }
@@ -23,6 +23,8 @@ public static partial class LogOutputParser
         var lines = normalized.Split('\n');
         var entries = new List<SwitchLogEntry>();
         LogBuilder? current = null;
+        var sawHeader = false;
+        var incompleteEntry = false;
 
         foreach (var rawLine in lines)
         {
@@ -30,9 +32,10 @@ public static partial class LogOutputParser
             var header = BracketHeaderRegex().Match(line);
             if (header.Success)
             {
+                sawHeader = true;
                 if (current is not null)
                 {
-                    AddEntry(entries, current);
+                    incompleteEntry |= !TryAddEntry(entries, current);
                 }
 
                 current = new LogBuilder
@@ -46,9 +49,10 @@ public static partial class LogOutputParser
             var singleLine = SingleLineRegex().Match(line);
             if (singleLine.Success)
             {
+                sawHeader = true;
                 if (current is not null)
                 {
-                    AddEntry(entries, current);
+                    incompleteEntry |= !TryAddEntry(entries, current);
                     current = null;
                 }
 
@@ -58,7 +62,7 @@ public static partial class LogOutputParser
                     Timestamp = ParseTimestamp(singleLine.Groups["date"].Value, singleLine.Groups["time"].Value)
                 };
                 builder.MessageLines.Add(singleLine.Groups["message"].Value.Trim());
-                AddEntry(entries, builder);
+                incompleteEntry |= !TryAddEntry(entries, builder);
                 continue;
             }
 
@@ -83,20 +87,35 @@ public static partial class LogOutputParser
 
         if (current is not null)
         {
-            AddEntry(entries, current);
+            incompleteEntry |= !TryAddEntry(entries, current);
+        }
+
+        if (incompleteEntry)
+        {
+            return ParseResult<LogSnapshot>.Failure(
+                ErrorCodes.IncompleteOutput,
+                "parse-log-ram",
+                "The RAM log ended with an incomplete entry.",
+                true);
         }
 
         if (entries.Count == 0)
         {
-            return ParseResult<LogSnapshot>.Unsupported(
-                "parse-log-ram",
-                "The RAM log format is not recognized for this firmware.");
+            return sawHeader
+                ? ParseResult<LogSnapshot>.Failure(
+                    ErrorCodes.IncompleteOutput,
+                    "parse-log-ram",
+                    "The RAM log contained headers but no complete entries.",
+                    true)
+                : ParseResult<LogSnapshot>.Unsupported(
+                    "parse-log-ram",
+                    "The RAM log format is not recognized for this firmware.");
         }
 
         return ParseResult<LogSnapshot>.Success(new LogSnapshot(entries));
     }
 
-    private static void AddEntry(ICollection<SwitchLogEntry> entries, LogBuilder builder)
+    private static bool TryAddEntry(ICollection<SwitchLogEntry> entries, LogBuilder builder)
     {
         var message = string.Join(" ", builder.MessageLines)
             .Trim()
@@ -104,7 +123,7 @@ public static partial class LogOutputParser
             .Trim();
         if (string.IsNullOrWhiteSpace(message))
         {
-            message = "Switch log entry";
+            return false;
         }
 
         var canonical = string.Join('|',
@@ -125,6 +144,7 @@ public static partial class LogOutputParser
             builder.Module,
             builder.Function,
             builder.EventNumber));
+        return true;
     }
 
     private static DateTime? ParseTimestamp(string date, string time)
@@ -169,6 +189,6 @@ public static partial class LogOutputParser
     [GeneratedRegex(@"(?i)level\s*:\s*(?<level>\d+).*?module\s*:\s*(?<module>\d+).*?function\s*:\s*(?<function>\d+).*?event\s*(?:no\.?|number)?\s*:\s*(?<event>\d+)", RegexOptions.CultureInvariant)]
     private static partial Regex MetadataRegex();
 
-    [GeneratedRegex(@"(?i)\b(?:no\s+(?:log|entries|messages)|log\s+(?:is\s+)?empty)\b", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?is)^\s*(?:no\s+(?:log(?:\s+(?:entries|messages))?|entries|messages)|log\s+(?:is\s+)?empty)\s*[.!]?\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex EmptyLogRegex();
 }

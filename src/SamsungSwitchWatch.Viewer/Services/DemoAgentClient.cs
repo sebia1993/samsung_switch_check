@@ -6,8 +6,10 @@ public sealed class DemoAgentClient : IAgentClient
 {
     private readonly CancellationTokenSource _lifetime = new();
     private readonly List<SwitchEventDto> _events;
+    private readonly List<AgentEventChangeDto> _changes;
     private Task? _simulation;
     private long _sequence;
+    private long _changeSequence;
     private int _step;
 
     public DemoAgentClient()
@@ -21,10 +23,11 @@ public sealed class DemoAgentClient : IAgentClient
             new(1004, "demo-event-1004", "sw-01", "ACCESS-SW-01", now.AddMinutes(-2), DeviceHealth.Normal, "복구", "포트 17 복구", "동작 상태: DOWN → UP", true, true, "port-17-link")
         ];
         _sequence = _events.Max(item => item.Sequence);
+        _changeSequence = _sequence;
+        _changes = _events.Select(item => new AgentEventChangeDto(item.Sequence, "Created", item)).ToList();
     }
 
-    public event EventHandler<SwitchEventDto>? EventReceived;
-    public event EventHandler<SwitchEventDto>? EventUpdated;
+    public event EventHandler<AgentEventChangeDto>? EventChanged;
     public event EventHandler<AgentConnectionState>? ConnectionStateChanged;
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -49,11 +52,33 @@ public sealed class DemoAgentClient : IAgentClient
                 ("Telnet", "연결 실패", DeviceHealth.Disconnected), ("마지막 정상", "5분 전", DeviceHealth.Warning), ("오류 코드", "TCP_TIMEOUT", DeviceHealth.Disconnected), ("다음 재시도", "42초 후", DeviceHealth.Loading)))
         ];
 
-        return Task.FromResult(new AgentSnapshotDto(now, AgentConnectionState.Demo, devices, _sequence, "POC 데모 1.0", "재현 가능한 오프라인 시뮬레이션"));
+        return Task.FromResult(new AgentSnapshotDto(now, AgentConnectionState.Demo, devices, _changeSequence, "POC 데모 1.0", "재현 가능한 오프라인 시뮬레이션", "demo-agent"));
     }
 
-    public Task<IReadOnlyList<SwitchEventDto>> GetEventsAfterAsync(long sequence, CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<SwitchEventDto>>(_events.Where(item => item.Sequence > sequence).OrderBy(item => item.Sequence).ToArray());
+    public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken)
+    {
+        lock (_events)
+        {
+            return Task.FromResult<IReadOnlyList<SwitchEventDto>>(_events
+                .OrderByDescending(item => item.Sequence)
+                .Take(Math.Clamp(limit, 1, 500))
+                .ToArray());
+        }
+    }
+
+    public Task<EventChangePageDto> GetEventChangesAsync(long cursor, int limit, CancellationToken cancellationToken)
+    {
+        lock (_events)
+        {
+            var changes = _changes
+                .Where(item => item.ChangeSequence > cursor)
+                .OrderBy(item => item.ChangeSequence)
+                .Take(Math.Clamp(limit, 1, 500))
+                .ToArray();
+            var next = changes.Length == 0 ? cursor : changes[^1].ChangeSequence;
+            return Task.FromResult(new EventChangePageDto(_changeSequence, next, next < _changeSequence, changes));
+        }
+    }
 
     public async Task<CommandResultDto> ExecuteRegisteredCheckAsync(string deviceId, string commandId, CancellationToken cancellationToken)
     {
@@ -62,7 +87,10 @@ public sealed class DemoAgentClient : IAgentClient
         var item = new SwitchEventDto(sequence, $"demo-event-{sequence}", deviceId, DeviceName(deviceId), DateTimeOffset.Now,
             DeviceHealth.Normal, "수동 점검", "등록된 점검 완료", $"{commandId} 명령 프로파일 실행이 정상적으로 완료되었습니다.", true, false, $"manual-{commandId}");
         lock (_events) _events.Add(item);
-        EventReceived?.Invoke(this, item);
+        var change = Interlocked.Increment(ref _changeSequence);
+        var created = new AgentEventChangeDto(change, "Created", item);
+        lock (_events) _changes.Add(created);
+        EventChanged?.Invoke(this, created);
         return new CommandResultDto(true, "수동 점검이 완료되었습니다.");
     }
 
@@ -76,7 +104,10 @@ public sealed class DemoAgentClient : IAgentClient
             updated = _events[index] with { Acknowledged = true };
             _events[index] = updated;
         }
-        EventUpdated?.Invoke(this, updated);
+        var change = Interlocked.Increment(ref _changeSequence);
+        var acknowledged = new AgentEventChangeDto(change, "Acknowledged", updated);
+        lock (_events) _changes.Add(acknowledged);
+        EventChanged?.Invoke(this, acknowledged);
         return Task.FromResult(true);
     }
 
@@ -99,7 +130,10 @@ public sealed class DemoAgentClient : IAgentClient
                 var item = new SwitchEventDto(sequence, $"demo-event-{sequence}", template.Item1, DeviceName(template.Item1), DateTimeOffset.Now,
                     template.Item2, template.Item3, template.Item4, template.Item5, false, template.Item3 == "복구", template.Item1 + "-demo-condition");
                 lock (_events) _events.Add(item);
-                EventReceived?.Invoke(this, item);
+                var change = Interlocked.Increment(ref _changeSequence);
+                var created = new AgentEventChangeDto(change, "Created", item);
+                lock (_events) _changes.Add(created);
+                EventChanged?.Invoke(this, created);
             }
         }
         catch (OperationCanceledException) { }

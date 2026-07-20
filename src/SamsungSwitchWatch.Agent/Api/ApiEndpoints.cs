@@ -20,36 +20,69 @@ public static class ApiEndpoints
             utc = DateTimeOffset.UtcNow
         }));
 
+        app.MapGet("/health/live", () => Results.Ok(new
+        {
+            status = "live",
+            agentId = options.AgentId,
+            utc = DateTimeOffset.UtcNow
+        }));
+
+        app.MapGet("/health/ready", async (AgentReadinessService readiness, CancellationToken token) =>
+        {
+            var result = await readiness.CheckAsync(token);
+            return Results.Json(result, statusCode: result.Ready
+                ? StatusCodes.Status200OK
+                : StatusCodes.Status503ServiceUnavailable);
+        });
+
         app.MapGet("/api/v1/certificate/fingerprint", (CertificateStatusService certificates) =>
             Results.Ok(certificates.Status));
 
-        app.MapPost("/api/v1/pairing/bootstrap", async (
-            HttpContext context,
-            PairingService pairing,
-            SqliteAgentStore store,
-            CancellationToken token) =>
+        if (ShouldMapPairingBootstrap(options, app.Environment.EnvironmentName))
         {
-            if (!options.AllowRemotePairingBootstrap &&
-                context.Connection.RemoteIpAddress is { } remote &&
-                !System.Net.IPAddress.IsLoopback(remote))
+            app.MapPost("/api/v1/pairing/bootstrap", async (
+                HttpContext context,
+                PairingService pairing,
+                SqliteAgentStore store,
+                CancellationToken token) =>
             {
-                return Results.Json(new
+                if (context.Connection.RemoteIpAddress is { } remote &&
+                    !System.Net.IPAddress.IsLoopback(remote))
                 {
-                    error = new { code = AgentErrorCodes.AuthFailed, message = "Pairing bootstrap is local-only." }
-                }, statusCode: StatusCodes.Status403Forbidden);
-            }
-            var created = await pairing.CreateCodeAsync(token);
-            await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "pairing-bootstrap", "local", null,
-                "success", "One-time pairing code created."), token);
-            return Results.Ok(new { code = created.Code, expiresUtc = created.ExpiresUtc });
-        });
+                    return Results.Json(new
+                    {
+                        error = new { code = AgentErrorCodes.AuthFailed, message = "Pairing bootstrap is local-only." }
+                    }, statusCode: StatusCodes.Status403Forbidden);
+                }
+                var created = await pairing.CreateCodeAsync(token);
+                await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "pairing-bootstrap", "local", null,
+                    "success", "One-time pairing code created."), token);
+                return Results.Ok(new { code = created.Code, expiresUtc = created.ExpiresUtc });
+            });
+        }
 
         app.MapPost("/api/v1/pairing/exchange", async (
             PairingExchangeRequest request,
+            HttpContext context,
             PairingService pairing,
+            PairingAttemptLimiter limiter,
             SqliteAgentStore store,
             CancellationToken token) =>
         {
+            var clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            if (!limiter.TryAcquire(clientKey, DateTimeOffset.UtcNow, out var retryAfter))
+            {
+                context.Response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds))
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return Results.Json(new
+                {
+                    error = new
+                    {
+                        code = AgentErrorCodes.PairingRateLimited,
+                        message = "Too many pairing attempts. Try again later."
+                    }
+                }, statusCode: StatusCodes.Status429TooManyRequests);
+            }
             var bearer = await pairing.ExchangeAsync(request.Code, token);
             await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "pairing-exchange", "viewer", null,
                 "success", "One-time pairing completed."), token);
@@ -96,6 +129,58 @@ public static class ApiEndpoints
         app.MapGet("/api/v1/events", async (long? after, int? limit, SqliteAgentStore store, CancellationToken token) =>
             Results.Ok(await store.GetEventsAfterAsync(after ?? 0, limit ?? 500, token)));
 
+        app.MapGet("/api/v2/events/changes", async (
+            long? after,
+            int? limit,
+            SqliteAgentStore store,
+            CancellationToken token) =>
+            Results.Ok(await store.GetEventChangesAsync(after ?? 0, limit ?? 500, token)));
+
+        app.MapGet("/api/v2/events/recent", async (
+            int? limit,
+            SqliteAgentStore store,
+            CancellationToken token) =>
+            Results.Ok(await store.GetRecentEventsAsync(limit ?? 500, token)));
+
+        app.MapGet("/api/v2/snapshot", async (
+            SqliteAgentStore store,
+            AgentReadinessService readiness,
+            CancellationToken token) =>
+        {
+            var ready = await readiness.CheckAsync(token);
+            var eventSummary = await store.GetEventSummaryAsync(token);
+            var highWatermark = await store.GetChangeHighWatermarkAsync(token);
+            var snapshots = await store.GetAllSnapshotsAsync(token);
+            var devices = options.Switches.Select(device => new
+            {
+                id = device.Id,
+                displayName = device.DisplayName,
+                model = device.Model,
+                uplinkPort = device.UplinkPort,
+                collection = snapshots.Where(snapshot => snapshot.DeviceId == device.Id).Select(snapshot => new
+                {
+                    commandId = snapshot.CommandId,
+                    capturedUtc = snapshot.CapturedUtc,
+                    data = snapshot.Data
+                }).ToArray()
+            }).ToArray();
+            return Results.Ok(new
+            {
+                agentId = options.AgentId,
+                connected = true,
+                ready = ready.Ready,
+                readinessCode = ready.Code,
+                mockMode = options.MockMode,
+                deviceCount = options.Switches.Count,
+                activeCritical = eventSummary.ActiveCritical,
+                unacknowledged = eventSummary.Unacknowledged,
+                highWatermark,
+                lastCollectionUtc = snapshots.OrderByDescending(item => item.CapturedUtc).FirstOrDefault()?.CapturedUtc,
+                utc = DateTimeOffset.UtcNow,
+                devices
+            });
+        });
+
         app.MapPost("/api/v1/events/{id}/ack", async (
             string id,
             HttpContext context,
@@ -103,14 +188,13 @@ public static class ApiEndpoints
             EventPublisher publisher,
             CancellationToken token) =>
         {
-            var updated = await store.AcknowledgeEventAsync(id, DateTimeOffset.UtcNow, token);
+            var updated = await publisher.AcknowledgeAsync(id, DateTimeOffset.UtcNow, token);
             if (updated is null)
             {
                 return Results.NotFound(new { error = new { code = "EVENT_NOT_FOUND", message = "Event was not found." } });
             }
             await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "event-ack",
                 Actor(context), updated.DeviceId, "success", "Event acknowledged."), token);
-            await publisher.PublishUpdateAsync(updated, token);
             return Results.Ok(updated);
         });
 
@@ -133,6 +217,9 @@ public static class ApiEndpoints
                 CancellationToken token) => Results.Ok(await simulator.SimulateAsync(deviceId, transition, token)));
         }
     }
+
+    public static bool ShouldMapPairingBootstrap(AgentOptions options, string environmentName) =>
+        options.MockMode || string.Equals(environmentName, Environments.Development, StringComparison.OrdinalIgnoreCase);
 
     private static string Actor(HttpContext context) => context.Items["actor"] as string ?? "unknown";
 }

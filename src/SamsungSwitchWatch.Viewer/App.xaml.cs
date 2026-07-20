@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Threading;
+using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
 using SamsungSwitchWatch.Viewer.Views;
@@ -14,6 +15,8 @@ public partial class App : Application
     private MiniWindow? _miniWindow;
     private TrayIconService? _trayIcon;
     private AlertPopupService? _alertService;
+    private SingleInstanceCoordinator? _singleInstance;
+    private readonly CancellationTokenSource _lifetime = new();
     private bool _exiting;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -21,20 +24,45 @@ public partial class App : Application
         base.OnStartup(e);
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
+        _singleInstance = new SingleInstanceCoordinator();
+        if (!_singleInstance.TryAcquire())
+        {
+            try { SingleInstanceCoordinator.NotifyExistingAsync().GetAwaiter().GetResult(); } catch { }
+            Shutdown();
+            return;
+        }
+        _singleInstance.ActivationRequested += (_, _) => Dispatcher.BeginInvoke(ShowDashboard);
+
         _settingsStore = new ViewerSettingsStore();
         var settings = _settingsStore.Load();
         _viewModel = new DashboardViewModel(settings, _settingsStore, synchronizationContext: SynchronizationContext.Current);
         _mainWindow = new MainWindow(_viewModel);
         MainWindow = _mainWindow;
         _alertService = new AlertPopupService();
-        _viewModel.AlertRaised += (_, item) => _alertService.Enqueue(item);
+        _viewModel.AlertRaised += OnAlertRaised;
         _trayIcon = new TrayIconService(_viewModel, ShowDashboard, ShowMiniWindow, OpenConnectionSettings, ExitApplication);
 
         if (!settings.StartMinimizedToTray)
         {
             _mainWindow.Show();
         }
-        _ = _viewModel.InitializeAsync();
+        _ = InitializeApplicationAsync();
+        if (_settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.NeedsPairing or ViewerSettingsLoadStatus.Corrupt
+            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _)))
+        {
+            Dispatcher.BeginInvoke(OpenConnectionSettings);
+        }
+    }
+
+    private async Task InitializeApplicationAsync()
+    {
+        if (_viewModel is null) return;
+        try { await _viewModel.InitializeAsync(_lifetime.Token); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch
+        {
+            // Initialization failures are represented by the ViewModel's Offline/Stale state.
+        }
     }
 
     public void ShowDashboard()
@@ -62,7 +90,7 @@ public partial class App : Application
         if (dialog.ShowDialog() != true || dialog.Result is null) return;
         try
         {
-            await _viewModel.SwitchClientAsync(dialog.Result);
+            await _viewModel.SwitchClientAsync(dialog.Result, _lifetime.Token);
         }
         catch
         {
@@ -103,37 +131,60 @@ public partial class App : Application
 
     public void ShowTrayHint() => _trayIcon?.ShowCloseToTrayHint();
 
-    public async void ExitApplication()
+    public async void ExitApplication() => await ExitApplicationAsync();
+
+    private async Task ExitApplicationAsync()
     {
         if (_exiting) return;
         _exiting = true;
-        if (_viewModel is not null && _settingsStore is not null)
+        _lifetime.Cancel();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try
         {
-            var settings = _viewModel.CurrentSettings;
-            if (_mainWindow is not null && _mainWindow.WindowState == WindowState.Normal)
+            if (_viewModel is not null && _settingsStore is not null)
             {
-                settings.MainLeft = _mainWindow.Left;
-                settings.MainTop = _mainWindow.Top;
-                settings.MainWidth = _mainWindow.Width;
-                settings.MainHeight = _mainWindow.Height;
+                var settings = _viewModel.CurrentSettings;
+                if (_mainWindow is not null && _mainWindow.WindowState == WindowState.Normal)
+                {
+                    settings.MainLeft = _mainWindow.Left;
+                    settings.MainTop = _mainWindow.Top;
+                    settings.MainWidth = _mainWindow.Width;
+                    settings.MainHeight = _mainWindow.Height;
+                }
+                if (_miniWindow is not null)
+                {
+                    settings.MiniLeft = _miniWindow.Left;
+                    settings.MiniTop = _miniWindow.Top;
+                    settings.MiniTopmost = _miniWindow.Topmost;
+                }
+                TrySaveSettings(settings);
             }
-            if (_miniWindow is not null)
-            {
-                settings.MiniLeft = _miniWindow.Left;
-                settings.MiniTop = _miniWindow.Top;
-                settings.MiniTopmost = _miniWindow.Topmost;
-            }
-            TrySaveSettings(settings);
-        }
 
-        _trayIcon?.Dispose();
-        _trayIcon = null;
-        _miniWindow?.AllowClose();
-        _miniWindow?.Close();
-        _mainWindow?.AllowClose();
-        _mainWindow?.Close();
-        if (_viewModel is not null) await _viewModel.DisposeAsync();
-        Shutdown();
+            if (_viewModel is not null) _viewModel.AlertRaised -= OnAlertRaised;
+            _alertService?.Dispose();
+            _alertService = null;
+            _trayIcon?.Dispose();
+            _trayIcon = null;
+            _miniWindow?.AllowClose();
+            _miniWindow?.Close();
+            _mainWindow?.AllowClose();
+            _mainWindow?.Close();
+            if (_viewModel is not null)
+            {
+                try { await _viewModel.DisposeAsync().AsTask().WaitAsync(deadline.Token); }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+            }
+            if (_singleInstance is not null)
+            {
+                try { await _singleInstance.DisposeAsync().AsTask().WaitAsync(deadline.Token); }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+            }
+        }
+        finally
+        {
+            _lifetime.Dispose();
+            Shutdown();
+        }
     }
 
     private void RestoreMiniWindowBounds(MiniWindow window, ViewerSettings settings)
@@ -167,7 +218,15 @@ public partial class App : Application
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
+        if (e.Exception is OperationCanceledException && _lifetime.IsCancellationRequested)
+        {
+            e.Handled = true;
+            return;
+        }
         e.Handled = true;
-        MessageBox.Show("화면 처리 중 오류가 발생했습니다. 모니터링 상태를 새로 고침해 주세요.", "Samsung Switch Watch", MessageBoxButton.OK, MessageBoxImage.Warning);
+        MessageBox.Show("복구할 수 없는 화면 오류가 발생해 프로그램을 안전하게 종료합니다.", "Samsung Switch Watch", MessageBoxButton.OK, MessageBoxImage.Error);
+        Dispatcher.BeginInvoke(ExitApplication);
     }
+
+    private void OnAlertRaised(object? sender, EventViewModel item) => _alertService?.Enqueue(item);
 }

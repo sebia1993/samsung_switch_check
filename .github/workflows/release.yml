@@ -1,0 +1,65 @@
+name: Publish GitHub prerelease
+
+on:
+  push:
+    tags: ['v0.2.0-poc']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-publish:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Resolve tag
+        id: version
+        shell: powershell
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          if ($tag -ne 'v0.2.0-poc') { throw "This workflow only publishes v0.2.0-poc: $tag" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate and package
+        shell: powershell
+        run: .\scripts\build-release.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Create or update prerelease assets
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $assets = @(
+            "artifacts/release/SamsungSwitchWatch-Agent-${{ steps.version.outputs.version }}-win-x64.zip",
+            "artifacts/release/SamsungSwitchWatch-Viewer-${{ steps.version.outputs.version }}-win-x64.zip",
+            'artifacts/release/SHA256SUMS.txt'
+          )
+          gh release view $tag --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber --repo '${{ github.repository }}'
+          }
+          else {
+            gh release create $tag @assets --verify-tag --prerelease `
+              --title "Samsung Switch Watch ${{ steps.version.outputs.version }}" `
+              --notes-file 'docs/RELEASE_NOTES_0.2.0_POC_KO.md' `
+              --repo '${{ github.repository }}'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub prerelease publish failed.' }

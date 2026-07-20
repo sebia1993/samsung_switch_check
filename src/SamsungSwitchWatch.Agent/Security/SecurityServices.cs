@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -5,6 +6,7 @@ using System.Text.Json;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
+using SamsungSwitchWatch.Core.Telnet;
 
 namespace SamsungSwitchWatch.Agent.Security;
 
@@ -82,16 +84,51 @@ public sealed class FileCredentialVault(AgentOptions options, ICredentialProtect
     public async Task StoreAsync(string credentialId, SwitchCredential credential, CancellationToken cancellationToken = default)
     {
         ValidateId(credentialId);
+        _ = new TelnetCredentials(credential.Username, credential.Password);
+
         Directory.CreateDirectory(_folder);
         var plaintext = JsonSerializer.SerializeToUtf8Bytes(credential, JsonDefaults.Serializer);
+        byte[]? encrypted = null;
+        var path = Path.Combine(_folder, $"{credentialId}.bin");
+        var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            var encrypted = protector.Protect(plaintext);
-            await File.WriteAllBytesAsync(Path.Combine(_folder, $"{credentialId}.bin"), encrypted, cancellationToken);
-            CryptographicOperations.ZeroMemory(encrypted);
+            encrypted = protector.Protect(plaintext);
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(encrypted, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, path, overwrite: true);
         }
         finally
         {
+            try
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+            catch (IOException)
+            {
+                // A stale uniquely named temp file is safer than hiding the
+                // original credential write failure.
+            }
+
+            if (encrypted is not null)
+            {
+                CryptographicOperations.ZeroMemory(encrypted);
+            }
+
             CryptographicOperations.ZeroMemory(plaintext);
         }
     }
@@ -106,14 +143,27 @@ public sealed class FileCredentialVault(AgentOptions options, ICredentialProtect
         }
 
         var encrypted = await File.ReadAllBytesAsync(path, cancellationToken);
-        var plaintext = protector.Unprotect(encrypted);
+        byte[]? plaintext = null;
         try
         {
-            return JsonSerializer.Deserialize<SwitchCredential>(plaintext, JsonDefaults.Serializer);
+            plaintext = protector.Unprotect(encrypted);
+            return JsonSerializer.Deserialize<SwitchCredential>(plaintext, JsonDefaults.Serializer)
+                ?? throw new JsonException("Credential payload was empty.");
+        }
+        catch (Exception exception) when (exception is CryptographicException or JsonException)
+        {
+            throw new AgentOperationException(
+                "CREDENTIAL_CORRUPT",
+                "The stored switch credential cannot be read safely.",
+                StatusCodes.Status500InternalServerError);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(encrypted);
+            if (plaintext is not null)
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+            }
         }
     }
 
@@ -128,6 +178,9 @@ public sealed class FileCredentialVault(AgentOptions options, ICredentialProtect
 
 public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
 {
+    private static readonly TimeSpan TokenValidationCacheDuration = TimeSpan.FromSeconds(30);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _validatedTokens = new(StringComparer.Ordinal);
+
     public async Task<(string Code, DateTimeOffset ExpiresUtc)> CreateCodeAsync(CancellationToken cancellationToken = default)
     {
         const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -153,7 +206,8 @@ public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
 
     public async Task<string> ExchangeAsync(string code, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(code) || !await store.ConsumePairingCodeAsync(Hash(code.Trim()), DateTimeOffset.UtcNow, cancellationToken))
+        if (string.IsNullOrWhiteSpace(code) || code.Length > 64 ||
+            !await store.ConsumePairingCodeAsync(Hash(code.Trim()), DateTimeOffset.UtcNow, cancellationToken))
         {
             throw new AgentOperationException(AgentErrorCodes.PairingInvalid, "Pairing code is invalid, expired, or already used.", 400);
         }
@@ -163,10 +217,28 @@ public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
         return token;
     }
 
-    public Task<bool> ValidateTokenAsync(string token, CancellationToken cancellationToken = default) =>
-        string.IsNullOrWhiteSpace(token)
-            ? Task.FromResult(false)
-            : store.ValidateAndTouchTokenAsync(Hash(token), DateTimeOffset.UtcNow, cancellationToken);
+    public async Task<bool> ValidateTokenAsync(string token, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(token) || token.Length > 4096)
+        {
+            return false;
+        }
+
+        var tokenHash = Hash(token);
+        var now = DateTimeOffset.UtcNow;
+        if (_validatedTokens.TryGetValue(tokenHash, out var lastValidated) &&
+            now - lastValidated < TokenValidationCacheDuration)
+        {
+            return true;
+        }
+
+        var valid = await store.ValidateAndTouchTokenAsync(tokenHash, now, cancellationToken);
+        if (valid)
+        {
+            _validatedTokens[tokenHash] = now;
+        }
+        return valid;
+    }
 
     private string Hash(string value)
     {
@@ -182,6 +254,43 @@ public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
     }
 
     private static string Base64Url(byte[] value) => Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+}
+
+public sealed class PairingAttemptLimiter
+{
+    private static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+    private const int MaximumAttemptsPerWindow = 5;
+    private readonly ConcurrentDictionary<string, AttemptBucket> _buckets = new(StringComparer.Ordinal);
+
+    public bool TryAcquire(string clientKey, DateTimeOffset now, out TimeSpan retryAfter)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientKey);
+        var bucket = _buckets.GetOrAdd(clientKey, static _ => new AttemptBucket());
+        lock (bucket.SyncRoot)
+        {
+            while (bucket.Attempts.TryPeek(out var oldest) && now - oldest >= Window)
+            {
+                bucket.Attempts.Dequeue();
+            }
+
+            if (bucket.Attempts.Count >= MaximumAttemptsPerWindow)
+            {
+                retryAfter = Window - (now - bucket.Attempts.Peek());
+                return false;
+            }
+
+            bucket.Attempts.Enqueue(now);
+            retryAfter = TimeSpan.Zero;
+            return true;
+        }
+    }
+
+    private sealed class AttemptBucket
+    {
+        public object SyncRoot { get; } = new();
+
+        public Queue<DateTimeOffset> Attempts { get; } = new();
+    }
 }
 
 public sealed class CertificateStatusService(AgentOptions options, IWebHostEnvironment environment, ILogger<CertificateStatusService> logger) : IHostedService
@@ -225,6 +334,8 @@ public sealed class BearerTokenMiddleware(RequestDelegate next)
     private static readonly string[] AnonymousPaths =
     [
         "/health",
+        "/health/live",
+        "/health/ready",
         "/api/v1/pairing/bootstrap",
         "/api/v1/pairing/exchange",
         "/api/v1/certificate/fingerprint"

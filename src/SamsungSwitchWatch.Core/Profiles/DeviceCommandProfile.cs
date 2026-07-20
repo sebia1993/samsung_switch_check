@@ -37,9 +37,16 @@ public sealed class DeviceCommandProfile
         if (materialized.Length == 0 || materialized.Any(static command =>
                 string.IsNullOrWhiteSpace(command.Id) ||
                 string.IsNullOrWhiteSpace(command.Command) ||
-                !command.Command.TrimStart().StartsWith("show ", StringComparison.OrdinalIgnoreCase)))
+                !IsSafeReadOnlyCommand(command.Command) ||
+                command.Timeout <= TimeSpan.Zero ||
+                command.DefaultIntervalSeconds <= 0))
         {
             throw new ArgumentException("Profiles may contain only registered show commands.", nameof(commands));
+        }
+
+        if (materialized.Select(static command => command.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() != materialized.Length)
+        {
+            throw new ArgumentException("Command IDs must be unique.", nameof(commands));
         }
 
         _commands = new ReadOnlyDictionary<string, ReadOnlyCommandDefinition>(
@@ -64,5 +71,17 @@ public sealed class DeviceCommandProfile
         }
 
         return command;
+    }
+
+    private static bool IsSafeReadOnlyCommand(string command)
+    {
+        if (!string.Equals(command, command.Trim(), StringComparison.Ordinal) ||
+            !command.StartsWith("show ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return command.All(static character =>
+            !char.IsControl(character) && character is not ';' and not '|' and not '&' and not '`' and not '$' and not '<' and not '>');
     }
 }

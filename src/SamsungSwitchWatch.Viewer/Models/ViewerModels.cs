@@ -16,7 +16,9 @@ public enum AgentConnectionState
 {
     Connecting,
     Connected,
-    Disconnected,
+    Offline,
+    Stale,
+    NeedsPairing,
     Demo
 }
 
@@ -45,7 +47,21 @@ public sealed record SwitchEventDto(
     string Detail,
     bool Acknowledged = false,
     bool Recovered = false,
-    string? ConditionKey = null);
+    string? ConditionKey = null,
+    bool IsActiveCondition = false);
+
+public sealed record AgentEventChangeDto(
+    long ChangeSequence,
+    string ChangeKind,
+    SwitchEventDto Event);
+
+public sealed record EventChangePageDto(
+    long HighWatermark,
+    long NextCursor,
+    bool HasMore,
+    IReadOnlyList<AgentEventChangeDto> Changes,
+    bool ResetRequired = false,
+    long ResetCursor = 0);
 
 public sealed record AgentSnapshotDto(
     DateTimeOffset GeneratedAt,
@@ -53,7 +69,13 @@ public sealed record AgentSnapshotDto(
     IReadOnlyList<DeviceSnapshotDto> Devices,
     long LastEventSequence,
     string CollectorVersion,
-    string CollectorSummary);
+    string CollectorSummary,
+    string AgentId = "agent",
+    bool Ready = true,
+    string ReadinessCode = "READY")
+{
+    public long HighWatermark => LastEventSequence;
+}
 
 public sealed record CommandResultDto(bool Accepted, string Message, string? ErrorCode = null);
 

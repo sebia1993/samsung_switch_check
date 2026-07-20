@@ -82,6 +82,28 @@ public sealed class AgentContractMapperTests
     ]
     """;
 
+    private const string SnapshotV2Json = """
+    {
+      "agentId": "agent-poc-01",
+      "connected": true,
+      "ready": true,
+      "readinessCode": "READY",
+      "mockMode": false,
+      "activeCritical": 1,
+      "highWatermark": 77,
+      "utc": "2026-07-20T08:31:00+00:00",
+      "devices": [
+        {
+          "id": "TEST-SW-01", "displayName": "ACCESS-SW-01", "model": "IES4224GP", "uplinkPort": "24",
+          "collection": [{
+            "commandId": "interface_status", "capturedUtc": "2026-07-20T08:30:00+00:00",
+            "data": { "uplinkOperationalUp": true, "portsUp": 24, "portsDown": 0 }
+          }]
+        }
+      ]
+    }
+    """;
+
     [Fact]
     public void MapSnapshot_ComposesStatusAndDevicesContracts()
     {
@@ -126,8 +148,69 @@ public sealed class AgentContractMapperTests
         Assert.Equal("/api/v1/status", AgentApiRoutes.Status);
         Assert.Equal("/api/v1/devices", AgentApiRoutes.Devices);
         Assert.Equal("/api/v1/events?after=0", AgentApiRoutes.EventsAfter(-10));
+        Assert.Equal("/api/v2/snapshot", AgentApiRoutes.SnapshotV2);
+        Assert.Equal("/api/v2/events/recent?limit=500", AgentApiRoutes.RecentEventsV2(900));
+        Assert.Equal("/api/v2/events/changes?after=0&limit=1", AgentApiRoutes.EventChangesV2(-5, 0));
         Assert.Equal("/api/v1/commands/SW%2001/log_ram", AgentApiRoutes.Command("SW 01", "log_ram"));
         Assert.Equal("/api/v1/events/event%2F42/ack", AgentApiRoutes.Acknowledge("event/42"));
+    }
+
+    [Fact]
+    public void MapSnapshotV2_MapsReadinessIdentityAndHighWatermark()
+    {
+        var snapshot = AgentContractMapper.MapSnapshotV2(SnapshotV2Json);
+
+        Assert.Equal("agent-poc-01", snapshot.AgentId);
+        Assert.True(snapshot.Ready);
+        Assert.Equal("READY", snapshot.ReadinessCode);
+        Assert.Equal(77, snapshot.HighWatermark);
+        Assert.Equal(AgentConnectionState.Connected, snapshot.ConnectionState);
+        var device = Assert.Single(snapshot.Devices);
+        Assert.Equal("ACCESS-SW-01", device.Name);
+        Assert.Equal(DeviceHealth.Critical, device.Health);
+        Assert.Equal("활성 장애 이벤트 1건", device.Summary);
+        Assert.Contains(device.Metrics!, metric =>
+            metric.Label == "활성 장애" && metric.Value == "1건" && metric.Health == DeviceHealth.Critical);
+    }
+
+    [Fact]
+    public void MapEventChangePage_MapsAckAndRecoveryOfSameLogicalEvent()
+    {
+        const string json = """
+        {
+          "highWatermark": 12,
+          "nextCursor": 12,
+          "hasMore": false,
+          "changes": [
+            {"changeSequence":11,"changeKind":"Acknowledged","event":{"sequence":7,"id":"evt-7","deviceId":"sw","severity":"Critical","state":"Acknowledged","occurredUtc":"2026-07-20T08:30:00Z","acknowledgedUtc":"2026-07-20T08:31:00Z","isActiveCondition":true}},
+            {"changeSequence":12,"changeKind":"Recovered","event":{"sequence":7,"id":"evt-7","deviceId":"sw","severity":"Critical","state":"Recovered","occurredUtc":"2026-07-20T08:30:00Z","recoveredUtc":"2026-07-20T08:32:00Z","isActiveCondition":false}}
+          ]
+        }
+        """;
+
+        var page = AgentContractMapper.MapEventChangePage(json);
+
+        Assert.Equal(12, page.HighWatermark);
+        Assert.False(page.HasMore);
+        Assert.Equal([11L, 12L], page.Changes.Select(item => item.ChangeSequence));
+        Assert.Equal("evt-7", page.Changes[0].Event.AgentEventId);
+        Assert.True(page.Changes[0].Event.Acknowledged);
+        Assert.True(page.Changes[1].Event.Recovered);
+        Assert.False(page.Changes[1].Event.IsActiveCondition);
+    }
+
+    [Fact]
+    public void MapEventChangePage_MapsRetentionResetContract()
+    {
+        const string json = """
+        {"highWatermark":250,"nextCursor":250,"hasMore":false,"changes":[],"resetRequired":true,"resetCursor":250}
+        """;
+
+        var page = AgentContractMapper.MapEventChangePage(json);
+
+        Assert.True(page.ResetRequired);
+        Assert.Equal(250, page.ResetCursor);
+        Assert.Empty(page.Changes);
     }
 
     [Fact]
@@ -161,5 +244,79 @@ public sealed class AgentContractMapperTests
         Assert.Equal("스위치 수집 실패 · TCP_TIMEOUT", device.Summary);
         Assert.Contains(device.Metrics!, metric => metric.Label == "수집기" && metric.Value == "TCP_TIMEOUT");
         Assert.DoesNotContain("192.", device.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MapSnapshot_CollectorHealthDegradedIsWarningUntilFailureThreshold()
+    {
+        const string status = """
+        { "agentId":"agent", "connected":true, "activeCritical":0, "utc":"2026-07-20T08:31:00+00:00" }
+        """;
+        const string devices = """
+        [{
+          "id":"SW-01", "displayName":"Switch", "model":"IES4224GP", "uplinkPort":"24",
+          "collection":[
+            {
+              "commandId":"interface_status", "capturedUtc":"2026-07-20T08:30:00+00:00",
+              "data":{"uplinkOperationalUp":true,"portsUp":24,"portsDown":0}
+            },
+            {
+              "commandId":"collector_health", "capturedUtc":"2026-07-20T08:30:30+00:00",
+              "data":{"state":"Degraded","errorCode":"TCP_TIMEOUT","consecutiveFailures":2}
+            }
+          ]
+        }]
+        """;
+
+        var device = Assert.Single(AgentContractMapper.MapSnapshot(status, devices).Devices);
+
+        Assert.Equal(DeviceHealth.Warning, device.Health);
+        Assert.Contains("TCP_TIMEOUT", device.Summary, StringComparison.Ordinal);
+        Assert.Contains(device.Metrics!, metric =>
+            metric.Label == "수집기" && metric.Value == "TCP_TIMEOUT" && metric.Health == DeviceHealth.Warning);
+    }
+
+    [Fact]
+    public void MapSnapshot_UnsupportedOptionalCollectorIsWarningNotDisconnected()
+    {
+        const string status = """
+        { "agentId":"agent", "connected":true, "activeCritical":0, "utc":"2026-07-20T08:31:00+00:00" }
+        """;
+        const string devices = """
+        [{
+          "id":"SW-01", "displayName":"Switch", "model":"IES4224GP", "uplinkPort":"24",
+          "collection":[
+            {"commandId":"interface_status","capturedUtc":"2026-07-20T08:30:00+00:00","data":{"uplinkOperationalUp":true}},
+            {"commandId":"collector_health","capturedUtc":"2026-07-20T08:30:30+00:00","data":{"state":"Unsupported","errorCode":"PARSER_UNSUPPORTED","commandId":"system"}}
+          ]
+        }]
+        """;
+
+        var device = Assert.Single(AgentContractMapper.MapSnapshot(status, devices).Devices);
+
+        Assert.Equal(DeviceHealth.Warning, device.Health);
+        Assert.Contains("PARSER_UNSUPPORTED", device.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MapSnapshot_EmptyPostChecksAreUnknownInsteadOfPass()
+    {
+        const string status = """
+        { "agentId":"agent", "connected":true, "activeCritical":0, "utc":"2026-07-20T08:31:00+00:00" }
+        """;
+        const string devices = """
+        [{
+          "id":"SW-01", "displayName":"Switch", "model":"IES4224GP", "uplinkPort":"24",
+          "collection":[
+            {"commandId":"system","capturedUtc":"2026-07-20T08:30:00+00:00","data":{"postChecks":{}}},
+            {"commandId":"interface_status","capturedUtc":"2026-07-20T08:30:00+00:00","data":{"uplinkOperationalUp":true}}
+          ]
+        }]
+        """;
+
+        var device = Assert.Single(AgentContractMapper.MapSnapshot(status, devices).Devices);
+
+        Assert.Contains(device.Metrics!, metric => metric.Label == "POST" && metric.Value == "데이터 없음");
+        Assert.DoesNotContain(device.Metrics!, metric => metric.Label == "POST" && metric.Value == "PASS");
     }
 }

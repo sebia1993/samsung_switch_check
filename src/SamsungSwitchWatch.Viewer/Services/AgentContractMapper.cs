@@ -8,6 +8,10 @@ public static class AgentApiRoutes
     public const string Status = "/api/v1/status";
     public const string Devices = "/api/v1/devices";
     public static string EventsAfter(long sequence) => $"/api/v1/events?after={Math.Max(0, sequence)}";
+    public const string SnapshotV2 = "/api/v2/snapshot";
+    public static string RecentEventsV2(int limit) => $"/api/v2/events/recent?limit={Math.Clamp(limit, 1, 500)}";
+    public static string EventChangesV2(long cursor, int limit) =>
+        $"/api/v2/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
     public static string Command(string deviceId, string commandId) =>
         $"/api/v1/commands/{Uri.EscapeDataString(deviceId)}/{Uri.EscapeDataString(commandId)}";
     public static string Acknowledge(string eventId) => $"/api/v1/events/{Uri.EscapeDataString(eventId)}/ack";
@@ -15,6 +19,14 @@ public static class AgentApiRoutes
 
 public static class AgentContractMapper
 {
+    public static AgentSnapshotDto MapSnapshotV2(string snapshotJson)
+    {
+        using var document = JsonDocument.Parse(snapshotJson);
+        var root = document.RootElement;
+        var devices = root.TryGetProperty("devices", out var value) ? value : default;
+        return MapSnapshotV2(root, devices);
+    }
+
     public static AgentSnapshotDto MapSnapshot(string statusJson, string devicesJson)
     {
         using var status = JsonDocument.Parse(statusJson);
@@ -27,13 +39,95 @@ public static class AgentContractMapper
         IReadOnlyDictionary<string, string>? deviceNames = null)
     {
         using var events = JsonDocument.Parse(eventsJson);
-        if (events.RootElement.ValueKind != JsonValueKind.Array) return [];
-        return events.RootElement.EnumerateArray()
+        var items = events.RootElement.ValueKind == JsonValueKind.Array
+            ? events.RootElement
+            : events.RootElement.TryGetProperty("events", out var nested) ? nested : default;
+        if (items.ValueKind != JsonValueKind.Array) return [];
+        return items.EnumerateArray()
             .Select(item => MapEvent(item, deviceNames))
             .Where(item => item is not null)
             .Cast<SwitchEventDto>()
             .OrderBy(item => item.Sequence)
             .ToArray();
+    }
+
+    public static EventChangePageDto MapEventChangePage(
+        string changesJson,
+        IReadOnlyDictionary<string, string>? deviceNames = null)
+    {
+        using var document = JsonDocument.Parse(changesJson);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return new EventChangePageDto(0, 0, false, []);
+        }
+
+        var mapped = new List<AgentEventChangeDto>();
+        if (root.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in changes.EnumerateArray())
+            {
+                var change = MapEventChange(item, deviceNames);
+                if (change is not null) mapped.Add(change);
+            }
+        }
+
+        mapped.Sort((left, right) => left.ChangeSequence.CompareTo(right.ChangeSequence));
+        var maximum = mapped.Count == 0 ? 0 : mapped[^1].ChangeSequence;
+        var highWatermark = Math.Max(maximum, LongValue(root, "highWatermark") ?? 0);
+        var nextCursor = Math.Max(maximum, LongValue(root, "nextCursor") ?? 0);
+        var hasMore = BoolValue(root, "hasMore") ?? nextCursor < highWatermark;
+        var resetRequired = BoolValue(root, "resetRequired") ?? false;
+        var resetCursor = Math.Max(0, LongValue(root, "resetCursor") ?? highWatermark);
+        return new EventChangePageDto(highWatermark, nextCursor, hasMore, mapped, resetRequired, resetCursor);
+    }
+
+    internal static AgentEventChangeDto? MapEventChange(
+        JsonElement item,
+        IReadOnlyDictionary<string, string>? deviceNames = null)
+    {
+        if (item.ValueKind != JsonValueKind.Object) return null;
+        var sequence = LongValue(item, "changeSequence") ?? 0;
+        if (sequence <= 0 || !item.TryGetProperty("event", out var eventElement)) return null;
+        var mappedEvent = MapEvent(eventElement, deviceNames);
+        return mappedEvent is null
+            ? null
+            : new AgentEventChangeDto(sequence, StringValue(item, "changeKind") ?? "Changed", mappedEvent);
+    }
+
+    internal static AgentSnapshotDto MapSnapshotV2(JsonElement root, JsonElement devices)
+    {
+        var generatedAt = DateTimeValue(root, "utc") ?? DateTimeOffset.UtcNow;
+        var connected = BoolValue(root, "connected") ?? false;
+        var ready = BoolValue(root, "ready") ?? false;
+        var mockMode = BoolValue(root, "mockMode") ?? false;
+        var activeCritical = IntValue(root, "activeCritical") ?? 0;
+        var highWatermark = LongValue(root, "highWatermark") ?? 0;
+        var agentId = StringValue(root, "agentId") ?? "agent";
+        var readinessCode = StringValue(root, "readinessCode") ?? (ready ? "READY" : "AGENT_NOT_READY");
+        var mappedDevices = new List<DeviceSnapshotDto>();
+
+        if (devices.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var device in devices.EnumerateArray())
+            {
+                mappedDevices.Add(MapDevice(device, generatedAt, activeCritical, mappedDevices.Count == 0));
+            }
+        }
+
+        var state = !connected ? AgentConnectionState.Offline
+            : !ready ? AgentConnectionState.Stale
+            : AgentConnectionState.Connected;
+        return new AgentSnapshotDto(
+            generatedAt,
+            state,
+            mappedDevices,
+            Math.Max(0, highWatermark),
+            $"Agent {agentId}",
+            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · {readinessCode}",
+            agentId,
+            ready,
+            readinessCode);
     }
 
     internal static AgentSnapshotDto MapSnapshot(JsonElement status, JsonElement devices)
@@ -56,7 +150,7 @@ public static class AgentContractMapper
 
         return new AgentSnapshotDto(
             generatedAt,
-            connected ? AgentConnectionState.Connected : AgentConnectionState.Disconnected,
+            connected ? AgentConnectionState.Connected : AgentConnectionState.Offline,
             mappedDevices,
             Math.Max(0, lastSequence),
             $"Agent {agentId}",
@@ -100,7 +194,8 @@ public static class AgentContractMapper
             StringValue(item, "message") ?? string.Empty,
             acknowledged,
             recovered,
-            StringValue(item, "conditionKey"));
+            StringValue(item, "conditionKey"),
+            BoolValue(item, "isActiveCondition") ?? (!recovered && severity == DeviceHealth.Critical));
     }
 
     private static DeviceSnapshotDto MapDevice(JsonElement device, DateTimeOffset generatedAt, int activeCritical, bool firstDevice)
@@ -126,22 +221,43 @@ public static class AgentContractMapper
         var uptimeSeconds = DataLong(system, "uptimeSeconds");
         var softwareVersion = DataString(version, "softwareVersion") ?? "-";
         var post = DataString(system, "post") ?? PostSummary(system);
+        var collectorState = DataString(collectorHealth, "state");
         var collectorCode = DataString(collectorHealth, "errorCode") ?? collections.Select(item => DataString(item, "collectorStatus"))
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !value.Equals("OK", StringComparison.OrdinalIgnoreCase));
+        var collectorDegraded = string.Equals(collectorState, "Degraded", StringComparison.OrdinalIgnoreCase);
+        var collectorUnsupported = string.Equals(collectorState, "Unsupported", StringComparison.OrdinalIgnoreCase);
+        // v0.2 is explicitly a single-device POC. Until the Agent exposes a
+        // per-device active count, apply its aggregate count only to that one
+        // device so the dashboard/tray cannot appear healthy during an active
+        // critical event.
+        var hasActiveCriticalEvent = firstDevice && activeCritical > 0;
+        var collectorFailed = string.Equals(collectorState, "Failed", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(collectorState, "AuthBlocked", StringComparison.OrdinalIgnoreCase)
+                              || (collectorState is null && collectorCode is not null);
 
-        var health = !hasCapture ? DeviceHealth.Loading
-            : collectorCode is not null ? DeviceHealth.Disconnected
-            : (firstDevice && activeCritical > 0) || uplinkUp == false ? DeviceHealth.Critical
+        var health = !hasCapture ? hasActiveCriticalEvent ? DeviceHealth.Critical : DeviceHealth.Loading
+            : collectorFailed ? DeviceHealth.Disconnected
+            : uplinkUp == false ? DeviceHealth.Critical
+            : hasActiveCriticalEvent ? DeviceHealth.Critical
+            : collectorDegraded || collectorUnsupported ? DeviceHealth.Warning
             : generatedAt - latestCapture > TimeSpan.FromMinutes(10) ? DeviceHealth.Warning
             : DeviceHealth.Normal;
-        var summary = health switch
-        {
-            DeviceHealth.Loading => "첫 수집 결과를 기다리는 중",
-            DeviceHealth.Disconnected => $"스위치 수집 실패 · {collectorCode}",
-            DeviceHealth.Critical => $"중요 업링크 포트 {uplinkPort} 장애",
-            DeviceHealth.Warning => "마지막 수집 결과가 오래되었습니다.",
-            _ => "등록된 모든 점검 정상"
-        };
+        var summary = collectorFailed
+            ? $"스위치 수집 실패 · {collectorCode}"
+            : uplinkUp == false
+                ? $"중요 업링크 포트 {uplinkPort} 장애"
+            : hasActiveCriticalEvent
+                ? $"활성 장애 이벤트 {activeCritical}건"
+            : collectorUnsupported
+                ? $"일부 명령을 지원하지 않음 · {collectorCode}"
+            : collectorDegraded
+                ? $"일시적 수집 불안정 · {collectorCode}"
+            : health switch
+            {
+                DeviceHealth.Loading => "첫 수집 결과를 기다리는 중",
+                DeviceHealth.Warning => "마지막 수집 결과가 오래되었습니다.",
+                _ => "등록된 모든 점검 정상"
+            };
 
         var metrics = new List<DeviceMetricDto>
         {
@@ -149,8 +265,12 @@ public static class AgentContractMapper
             new("포트 요약", portsUp.HasValue ? $"UP {portsUp} · DOWN {portsDown ?? 0}" : "데이터 없음", portsDown > 0 ? DeviceHealth.Warning : DeviceHealth.Normal),
             new("소프트웨어", softwareVersion),
             new("POST", post ?? "데이터 없음", post is not null && !post.Equals("PASS", StringComparison.OrdinalIgnoreCase) ? DeviceHealth.Warning : DeviceHealth.Normal),
-            new("수집기", collectorCode ?? "OK", collectorCode is null ? DeviceHealth.Normal : DeviceHealth.Disconnected)
+            new("수집기", collectorCode ?? "OK", collectorFailed ? DeviceHealth.Disconnected : collectorDegraded || collectorUnsupported ? DeviceHealth.Warning : DeviceHealth.Normal)
         };
+        if (hasActiveCriticalEvent)
+        {
+            metrics.Add(new DeviceMetricDto("활성 장애", $"{activeCritical}건", DeviceHealth.Critical));
+        }
 
         return new DeviceSnapshotDto(
             id,
@@ -183,7 +303,10 @@ public static class AgentContractMapper
     private static string? PostSummary(JsonElement? system)
     {
         if (Data(system) is not { } data || !data.TryGetProperty("postChecks", out var checks) || checks.ValueKind != JsonValueKind.Object) return null;
-        return checks.EnumerateObject().All(item => item.Value.GetString()?.Equals("PASS", StringComparison.OrdinalIgnoreCase) == true) ? "PASS" : "CHECK";
+        var values = checks.EnumerateObject().Select(item => item.Value.GetString()).ToArray();
+        return values.Length == 0
+            ? null
+            : values.All(value => value?.Equals("PASS", StringComparison.OrdinalIgnoreCase) == true) ? "PASS" : "CHECK";
     }
 
     private static string FormatUptime(long? seconds)

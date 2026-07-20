@@ -8,6 +8,25 @@ namespace SamsungSwitchWatch.Core.Tests;
 
 public sealed class TelnetClientTests
 {
+    [Theory]
+    [InlineData("operator\rshow system", "secret")]
+    [InlineData("operator\nshow system", "secret")]
+    [InlineData("operator\0suffix", "secret")]
+    [InlineData("operator", "secret\rnext")]
+    [InlineData("operator", "secret\nnext")]
+    [InlineData("operator", "secret\0suffix")]
+    public void TelnetCredentials_RejectLineAndNulInjection(string username, string password)
+    {
+        Assert.Throws<ArgumentException>(() => new TelnetCredentials(username, password));
+    }
+
+    [Fact]
+    public void TelnetCredentials_RejectOversizedFields()
+    {
+        Assert.Throws<ArgumentException>(() => new TelnetCredentials(new string('u', 129), "secret"));
+        Assert.Throws<ArgumentException>(() => new TelnetCredentials("operator", new string('p', 513)));
+    }
+
     [Fact]
     public async Task ExecuteRegisteredAsync_HandlesIacPagingAndNormalizesOutput()
     {
@@ -147,20 +166,99 @@ public sealed class TelnetClientTests
         Assert.Equal(ErrorCodes.TelnetNegotiationFailed, exception.Error.Code);
     }
 
+    [Fact]
+    public async Task ExecuteRegisteredAsync_TimesOutAStuckCommandWrite()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"))
+        {
+            WaitOnWriteNumber = 3
+        };
+        var client = CreateClient(transport, write: TimeSpan.FromMilliseconds(30));
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]));
+
+        Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
+        Assert.Equal("command-write", exception.Error.Stage);
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_LimitsWireBytesAsWellAsVisibleText()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\n" + new string('x', 1100)));
+        var client = CreateClient(transport, maximumWireBytes: 1024);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]));
+
+        Assert.Equal(ErrorCodes.OutputLimitExceeded, exception.Error.Code);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_RejectsIpv6BeforeConnecting()
+    {
+        var transport = new ScriptedTransport();
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("2001:db8::10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]));
+
+        Assert.Equal(ErrorCodes.Ipv6Unsupported, exception.Error.Code);
+        Assert.False(transport.ConnectWasCalled);
+    }
+
+    [Fact]
+    public void DeviceCommandProfile_RejectsControlCharactersAndSeparators()
+    {
+        var baseProfile = Ies4224GpProfile.Create();
+
+        Assert.Throws<ArgumentException>(() => new DeviceCommandProfile(
+            baseProfile.Model,
+            baseProfile.Telnet,
+            [new ReadOnlyCommandDefinition("unsafe", "Unsafe", "show system\nreload", TimeSpan.FromSeconds(1), 60)]));
+        Assert.Throws<ArgumentException>(() => new DeviceCommandProfile(
+            baseProfile.Model,
+            baseProfile.Telnet,
+            [new ReadOnlyCommandDefinition("unsafe", "Unsafe", "show system; reload", TimeSpan.FromSeconds(1), 60)]));
+    }
+
     private static TelnetClient CreateClient(
         ScriptedTransport transport,
         TimeSpan? connect = null,
         TimeSpan? login = null,
-        int maximumNegotiationBytes = 16 * 1024)
+        int maximumNegotiationBytes = 16 * 1024,
+        TimeSpan? write = null,
+        int maximumWireBytes = 2 * 1024 * 1024)
     {
         var timeouts = new TelnetTimeouts(
             connect ?? TimeSpan.FromSeconds(1),
             login ?? TimeSpan.FromSeconds(1),
             TimeSpan.FromSeconds(1),
-            TimeSpan.FromMilliseconds(50));
+            TimeSpan.FromMilliseconds(50))
+        {
+            Write = write ?? TimeSpan.FromSeconds(1),
+            Session = TimeSpan.FromSeconds(5)
+        };
         return new TelnetClient(
             new FixedTransportFactory(transport),
-            new TelnetClientOptions(timeouts, 2 * 1024 * 1024, 512, maximumNegotiationBytes));
+            new TelnetClientOptions(timeouts, 2 * 1024 * 1024, 512, maximumNegotiationBytes, maximumWireBytes));
     }
 
     private static byte[] Bytes(string value) => Encoding.ASCII.GetBytes(value);
@@ -188,6 +286,8 @@ public sealed class TelnetClientTests
 
         public bool WaitWhenExhausted { get; init; }
 
+        public int? WaitOnWriteNumber { get; init; }
+
         public bool ConnectWasCalled { get; private set; }
 
         public bool IsConnected { get; private set; }
@@ -195,6 +295,8 @@ public sealed class TelnetClientTests
         public bool WasClosed { get; private set; }
 
         public List<byte[]> Writes { get; } = [];
+
+        private int WriteCount { get; set; }
 
         public async ValueTask ConnectAsync(string host, int port, CancellationToken cancellationToken)
         {
@@ -231,11 +333,16 @@ public sealed class TelnetClientTests
             return count;
         }
 
-        public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+        public async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            WriteCount++;
+            if (WriteCount == WaitOnWriteNumber)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
             Writes.Add(buffer.ToArray());
-            return ValueTask.CompletedTask;
         }
 
         public ValueTask CloseAsync()

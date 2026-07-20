@@ -14,6 +14,11 @@ public static class ErrorCodes
     public const string PromptParseFailed = "PROMPT_PARSE_FAILED";
     public const string OutputLimitExceeded = "OUTPUT_LIMIT_EXCEEDED";
     public const string ParserUnsupported = "PARSER_UNSUPPORTED";
+    public const string IncompleteOutput = "INCOMPLETE_OUTPUT";
+    public const string Ipv6Unsupported = "IPV6_UNSUPPORTED";
+    public const string CredentialCorrupt = "CREDENTIAL_CORRUPT";
+    public const string StorageCorrupt = "STORAGE_CORRUPT";
     public const string TlsPinMismatch = "TLS_PIN_MISMATCH";
     public const string StorageWriteFailed = "STORAGE_WRITE_FAILED";
+    public const string CollectorUnusable = "COLLECTOR_UNUSABLE";
 }

@@ -1,9 +1,13 @@
 ﻿param(
-    [string]$Version = '0.1.0-poc',
+    [string]$Version = '0.2.0-poc',
     [switch]$SkipTests
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+    throw "릴리스 버전 형식이 올바르지 않습니다: $Version"
+}
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifacts = Join-Path $repoRoot 'artifacts'
@@ -54,6 +58,8 @@ foreach ($script in $viewerScripts) {
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $agentOut
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $viewerOut
+Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\RELEASE_NOTES_0.2.0_POC_KO.md') -Destination $agentOut
+Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\RELEASE_NOTES_0.2.0_POC_KO.md') -Destination $viewerOut
 
 $agentZip = Join-Path $releaseRoot "SamsungSwitchWatch-Agent-$Version-win-x64.zip"
 $viewerZip = Join-Path $releaseRoot "SamsungSwitchWatch-Viewer-$Version-win-x64.zip"
@@ -64,6 +70,9 @@ $hashFile = Join-Path $releaseRoot 'SHA256SUMS.txt'
 $hashes = Get-FileHash -Algorithm SHA256 -LiteralPath $agentZip, $viewerZip
 $lines = $hashes | ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) }
 [IO.File]::WriteAllLines($hashFile, $lines, (New-Object Text.UTF8Encoding($false)))
+
+& (Join-Path $PSScriptRoot 'test-package-contract.ps1') -ReleaseDirectory $releaseRoot -Version $Version
+if ($LASTEXITCODE -ne 0) { throw '릴리스 패키지 계약 검사 실패' }
 
 Write-SswStep "릴리스 완료: $releaseRoot"
 Get-ChildItem -LiteralPath $releaseRoot | Select-Object Name, Length, LastWriteTime

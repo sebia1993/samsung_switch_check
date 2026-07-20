@@ -1,4 +1,5 @@
 using System.Net;
+using SamsungSwitchWatch.Agent.Domain;
 
 namespace SamsungSwitchWatch.Agent.Configuration;
 
@@ -12,7 +13,6 @@ public sealed class AgentOptions
     public bool MockMode { get; set; } = true;
     public bool EnablePolling { get; set; } = true;
     public bool EnableSimulator { get; set; } = true;
-    public bool AllowRemotePairingBootstrap { get; set; }
     public int SchedulerTickSeconds { get; set; } = 1;
     public int PairingCodeLifetimeMinutes { get; set; } = 10;
     public string TokenPepper { get; set; } = "change-this-local-secret-before-production";
@@ -61,6 +61,12 @@ public static class AgentOptionsValidator
             throw new AgentConfigurationException("CONFIG_INVALID", "The POC requires exactly one configured switch.");
         }
 
+        if (!IsIdentifier(options.AgentId, 64))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "Agent id must contain only letters, digits, hyphen, or underscore.");
+        }
+
         var device = options.Switches[0];
         if (!string.Equals(device.Model, "IES4224GP", StringComparison.OrdinalIgnoreCase))
         {
@@ -73,10 +79,35 @@ public static class AgentOptionsValidator
             throw new AgentConfigurationException("CONFIG_INVALID", "Device id must contain only letters, digits, hyphen, or underscore.");
         }
 
-        if ((!IPAddress.TryParse(device.Host, out _) && Uri.CheckHostName(device.Host) == UriHostNameType.Unknown) ||
+
+        if (!IsIdentifier(device.CredentialId, 64))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "Credential id must contain only letters, digits, hyphen, or underscore.");
+        }
+
+        if (string.IsNullOrWhiteSpace(device.DisplayName) || device.DisplayName.Length > 128 ||
+            device.DisplayName.Any(char.IsControl))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", "Switch display name is invalid.");
+        }
+
+        if (string.IsNullOrWhiteSpace(device.UplinkPort) || device.UplinkPort.Length > 32 ||
+            device.UplinkPort.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '-' and not '_' and not '/' and not '.'))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", "Uplink port identifier is invalid.");
+        }
+
+        if (IPAddress.TryParse(device.Host, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            throw new AgentConfigurationException(AgentErrorCodes.Ipv6Unsupported,
+                "The POC supports only IPv4 switch addresses.");
+        }
+
+        if (address is null || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
             device.Port is < 1 or > 65535)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "The configured switch endpoint is invalid.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "A valid IPv4 switch endpoint is required.");
         }
 
         if (!Uri.TryCreate(options.ListenUrl, UriKind.Absolute, out var listenUri) ||
@@ -120,6 +151,10 @@ public static class AgentOptionsValidator
             : Path.GetFullPath(Path.Combine(contentRoot, options.DataDirectory));
         Directory.CreateDirectory(options.DataDirectory);
     }
+
+    private static bool IsIdentifier(string value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength &&
+        value.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_');
 }
 
 public sealed class AgentConfigurationException(string code, string message) : Exception(message)

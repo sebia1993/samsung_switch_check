@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
+using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
 using SamsungSwitchWatch.Agent.Security;
@@ -16,7 +17,11 @@ public static class AgentApplication
         IReadOnlyDictionary<string, string?>? overrides = null,
         Action<IServiceCollection>? configureServices = null)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ContentRootPath = AppContext.BaseDirectory
+        });
         builder.Host.UseWindowsService(options => options.ServiceName = "SamsungSwitchWatchAgent");
         if (overrides is not null)
         {
@@ -48,9 +53,12 @@ public static class AgentApplication
             json.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<SqliteAgentStore>();
+        builder.Services.AddSingleton<AgentRuntimeState>();
+        builder.Services.AddSingleton<AgentReadinessService>();
         builder.Services.AddSingleton<ICredentialProtector, DpapiCredentialProtector>();
         builder.Services.AddSingleton<ICredentialVault, FileCredentialVault>();
         builder.Services.AddSingleton<PairingService>();
+        builder.Services.AddSingleton<PairingAttemptLimiter>();
         builder.Services.AddSingleton<CertificateStatusService>();
         builder.Services.AddHostedService(service => service.GetRequiredService<CertificateStatusService>());
         builder.Services.AddSingleton(Ies4224GpProfile.Create());
@@ -62,6 +70,7 @@ public static class AgentApplication
         builder.Services.AddSingleton<CommandExecutionService>();
         builder.Services.AddSingleton<SimulationService>();
         builder.Services.AddHostedService<StoreInitializationService>();
+        builder.Services.AddHostedService<StorageIntegrityService>();
         builder.Services.AddHostedService<PollSchedulerService>();
         builder.Services.AddHostedService<RetentionService>();
         configureServices?.Invoke(builder.Services);
@@ -74,9 +83,21 @@ public static class AgentApplication
     }
 }
 
-public sealed class StoreInitializationService(SqliteAgentStore store) : IHostedService
+public sealed class StoreInitializationService(
+    SqliteAgentStore store,
+    ILogger<StoreInitializationService> logger) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) => store.InitializeAsync(cancellationToken);
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await store.InitializeAsync(cancellationToken);
+        }
+        catch (AgentOperationException ex)
+        {
+            logger.LogError("Agent storage is not ready with {ErrorCode}; liveness remains available.", ex.Code);
+        }
+    }
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
@@ -154,6 +175,10 @@ internal static class AgentMaintenanceCommands
             }
             else if (!char.IsControl(key.KeyChar))
             {
+                if (value.Length >= 512)
+                {
+                    throw new InvalidOperationException("Switch password cannot exceed 512 characters.");
+                }
                 value.Append(key.KeyChar);
             }
         }

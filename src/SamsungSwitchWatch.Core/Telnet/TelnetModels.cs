@@ -8,6 +8,14 @@ public sealed class TelnetCredentials
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(username);
         ArgumentNullException.ThrowIfNull(password);
+        if (username.Length > 128 || username.IndexOfAny(['\r', '\n', '\0']) >= 0)
+        {
+            throw new ArgumentException("Telnet username must be at most 128 characters and contain no line or NUL characters.", nameof(username));
+        }
+        if (password.Length is 0 or > 512 || password.IndexOfAny(['\r', '\n', '\0']) >= 0)
+        {
+            throw new ArgumentException("Telnet password must be 1 to 512 characters and contain no line or NUL characters.", nameof(password));
+        }
         Username = username;
         Password = password;
     }
@@ -25,18 +33,28 @@ public sealed record TelnetTimeouts(
     TimeSpan Authentication,
     TimeSpan Logout)
 {
+    public TimeSpan Write { get; init; } = TimeSpan.FromSeconds(5);
+
+    public TimeSpan Session { get; init; } = TimeSpan.FromMinutes(3);
+
     public static TelnetTimeouts Default { get; } = new(
         TimeSpan.FromSeconds(5),
         TimeSpan.FromSeconds(10),
         TimeSpan.FromSeconds(10),
-        TimeSpan.FromSeconds(2));
+        TimeSpan.FromSeconds(2))
+    {
+        Write = TimeSpan.FromSeconds(5),
+        Session = TimeSpan.FromMinutes(3)
+    };
 }
 
 public sealed record TelnetClientOptions(
     TelnetTimeouts Timeouts,
     int MaximumOutputBytes = 2 * 1024 * 1024,
     int ReadBufferBytes = 4096,
-    int MaximumNegotiationBytesWithoutText = 16 * 1024)
+    int MaximumNegotiationBytesWithoutText = 16 * 1024,
+    int MaximumWireBytes = 2 * 1024 * 1024,
+    int DetectionWindowCharacters = 16 * 1024)
 {
     public static TelnetClientOptions Default { get; } = new(TelnetTimeouts.Default);
 }

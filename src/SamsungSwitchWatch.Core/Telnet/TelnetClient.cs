@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -27,6 +28,22 @@ public sealed class TelnetClient : ITelnetClient
         {
             throw new ArgumentOutOfRangeException(nameof(options), "The output limit must be between 1 KiB and 2 MiB.");
         }
+
+        if (_options.MaximumWireBytes is < 1024 or > 4 * 1024 * 1024 ||
+            _options.ReadBufferBytes is < 256 or > 64 * 1024 ||
+            _options.MaximumNegotiationBytesWithoutText is < 3 or > 64 * 1024 ||
+            _options.DetectionWindowCharacters is < 512 or > 64 * 1024)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Telnet stream limits are outside the supported safety range.");
+        }
+
+        var timeouts = _options.Timeouts;
+        if (timeouts.Connect <= TimeSpan.Zero || timeouts.LoginPrompt <= TimeSpan.Zero ||
+            timeouts.Authentication <= TimeSpan.Zero || timeouts.Logout <= TimeSpan.Zero ||
+            timeouts.Write <= TimeSpan.Zero || timeouts.Session <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Telnet timeouts must be positive.");
+        }
     }
 
     public async Task<TelnetSessionResult> ExecuteRegisteredAsync(
@@ -45,23 +62,40 @@ public sealed class TelnetClient : ITelnetClient
             throw new ArgumentException("At least one registered command ID is required.", nameof(commandIds));
         }
 
+        if (IPAddress.TryParse(endpoint.Host, out var endpointAddress) &&
+            endpointAddress.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            throw Failure(
+                ErrorCodes.Ipv6Unsupported,
+                "endpoint-validation",
+                "This POC supports IPv4 switch endpoints only.");
+        }
+
         var commands = commandIds.Select(profile.GetRequiredCommand).DistinctBy(static item => item.Id).ToArray();
         var startedAt = _timeProvider.GetUtcNow();
         await using var transport = _transportFactory.Create();
         var negotiator = new TelnetNegotiator();
         var authenticated = false;
+        using var sessionCancellation = CreateStageCancellation(cancellationToken, _options.Timeouts.Session);
+        var sessionToken = sessionCancellation.Token;
 
         try
         {
-            await ConnectAsync(transport, endpoint, cancellationToken).ConfigureAwait(false);
-            await AuthenticateAsync(transport, negotiator, credentials, profile.Telnet, cancellationToken).ConfigureAwait(false);
+            await ConnectAsync(transport, endpoint, sessionToken).ConfigureAwait(false);
+            await AuthenticateAsync(transport, negotiator, credentials, profile.Telnet, sessionToken).ConfigureAwait(false);
             authenticated = true;
 
             var outputs = new List<CommandOutput>(commands.Length);
             foreach (var command in commands)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                await WriteLineAsync(transport, command.Command, cancellationToken).ConfigureAwait(false);
+                sessionToken.ThrowIfCancellationRequested();
+                await WriteLineWithTimeoutAsync(
+                        transport,
+                        command.Command,
+                        ErrorCodes.CommandTimeout,
+                        "command-write",
+                        sessionToken)
+                    .ConfigureAwait(false);
                 var raw = await ReadUntilAsync(
                         transport,
                         negotiator,
@@ -72,7 +106,7 @@ public sealed class TelnetClient : ITelnetClient
                         command.Timeout,
                         ErrorCodes.CommandTimeout,
                         "command",
-                        cancellationToken)
+                        sessionToken)
                     .ConfigureAwait(false);
 
                 outputs.Add(new CommandOutput(
@@ -105,6 +139,15 @@ public sealed class TelnetClient : ITelnetClient
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException exception) when (sessionCancellation.IsCancellationRequested)
+        {
+            throw Failure(
+                ErrorCodes.CommandTimeout,
+                "telnet-session",
+                "The Telnet session exceeded its total time limit.",
+                true,
+                exception);
         }
         catch (Exception exception) when (exception is IOException or SocketException or InvalidOperationException)
         {
@@ -180,7 +223,13 @@ public sealed class TelnetClient : ITelnetClient
 
         if (initial.PatternIndex == 0)
         {
-            await WriteLineAsync(transport, credentials.Username, cancellationToken).ConfigureAwait(false);
+            await WriteLineWithTimeoutAsync(
+                    transport,
+                    credentials.Username,
+                    ErrorCodes.PromptParseFailed,
+                    "authentication-write",
+                    cancellationToken)
+                .ConfigureAwait(false);
             var passwordPrompt = await ReadUntilAsync(
                     transport,
                     negotiator,
@@ -205,7 +254,13 @@ public sealed class TelnetClient : ITelnetClient
             }
         }
 
-        await WriteLineAsync(transport, credentials.Password, cancellationToken).ConfigureAwait(false);
+        await WriteLineWithTimeoutAsync(
+                transport,
+                credentials.Password,
+                ErrorCodes.PromptParseFailed,
+                "authentication-write",
+                cancellationToken)
+            .ConfigureAwait(false);
         var authenticated = await ReadUntilAsync(
                 transport,
                 negotiator,
@@ -241,7 +296,8 @@ public sealed class TelnetClient : ITelnetClient
         var failures = failurePatterns.Select(CreateRegex).ToArray();
         var rawOutput = new StringBuilder();
         var visibleOutput = new StringBuilder();
-        var receivedBytes = 0;
+        var receivedTextBytes = 0;
+        var receivedWireBytes = 0;
         var buffer = new byte[_options.ReadBufferBytes];
         using var stageCancellation = CreateStageCancellation(cancellationToken, timeout);
 
@@ -259,14 +315,23 @@ public sealed class TelnetClient : ITelnetClient
                         true);
                 }
 
+                receivedWireBytes += read;
+                if (receivedWireBytes > _options.MaximumWireBytes)
+                {
+                    throw Failure(
+                        ErrorCodes.OutputLimitExceeded,
+                        stage,
+                        "The switch response exceeded the configured wire-byte safety limit.");
+                }
+
                 var frame = negotiator.Process(buffer.AsSpan(0, read), _options.MaximumNegotiationBytesWithoutText);
                 if (frame.Responses.Length > 0)
                 {
                     await transport.WriteAsync(frame.Responses, stageCancellation.Token).ConfigureAwait(false);
                 }
 
-                receivedBytes += frame.Text.Length;
-                if (receivedBytes > _options.MaximumOutputBytes)
+                receivedTextBytes += frame.Text.Length;
+                if (receivedTextBytes > _options.MaximumOutputBytes)
                 {
                     throw Failure(
                         ErrorCodes.OutputLimitExceeded,
@@ -281,18 +346,15 @@ public sealed class TelnetClient : ITelnetClient
                     visibleOutput.Append(text);
                 }
 
-                foreach (var marker in pagingMarkers)
-                {
-                    var markerIndex = IndexOf(visibleOutput, marker);
-                    while (markerIndex >= 0)
-                    {
-                        visibleOutput.Remove(markerIndex, marker.Length);
-                        await transport.WriteAsync(new byte[] { pagingContinueByte }, stageCancellation.Token).ConfigureAwait(false);
-                        markerIndex = IndexOf(visibleOutput, marker);
-                    }
-                }
+                await RemovePagingMarkersAsync(
+                        transport,
+                        visibleOutput,
+                        pagingMarkers,
+                        pagingContinueByte,
+                        stageCancellation.Token)
+                    .ConfigureAwait(false);
 
-                var visibleText = OutputNormalizer.CleanControlCharacters(visibleOutput.ToString());
+                var visibleText = OutputNormalizer.CleanControlCharacters(GetDetectionTail(visibleOutput));
                 for (var index = 0; index < failures.Length; index++)
                 {
                     if (failures[index].IsMatch(visibleText))
@@ -319,7 +381,13 @@ public sealed class TelnetClient : ITelnetClient
         using var logoutCancellation = new CancellationTokenSource(_options.Timeouts.Logout);
         try
         {
-            await WriteLineAsync(transport, logoutCommand, logoutCancellation.Token).ConfigureAwait(false);
+            await WriteLineWithTimeoutAsync(
+                    transport,
+                    logoutCommand,
+                    ErrorCodes.PromptParseFailed,
+                    "logout",
+                    logoutCancellation.Token)
+                .ConfigureAwait(false);
         }
         catch
         {
@@ -328,10 +396,68 @@ public sealed class TelnetClient : ITelnetClient
         }
     }
 
-    private static async Task WriteLineAsync(IByteTransport transport, string value, CancellationToken cancellationToken)
+    private async Task WriteLineWithTimeoutAsync(
+        IByteTransport transport,
+        string value,
+        string timeoutCode,
+        string stage,
+        CancellationToken cancellationToken)
     {
         var bytes = WireEncoding.GetBytes(value + "\r\n");
-        await transport.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        using var writeCancellation = CreateStageCancellation(cancellationToken, _options.Timeouts.Write);
+        try
+        {
+            await transport.WriteAsync(bytes, writeCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw Failure(timeoutCode, stage, $"The {stage} stage timed out.", true, exception);
+        }
+    }
+
+    private async Task RemovePagingMarkersAsync(
+        IByteTransport transport,
+        StringBuilder visibleOutput,
+        IReadOnlyList<string> pagingMarkers,
+        byte pagingContinueByte,
+        CancellationToken cancellationToken)
+    {
+        if (pagingMarkers.Count == 0 || visibleOutput.Length == 0)
+        {
+            return;
+        }
+
+        var longestMarker = pagingMarkers.Max(static marker => marker.Length);
+        while (true)
+        {
+            var start = Math.Max(0, visibleOutput.Length - _options.DetectionWindowCharacters - longestMarker);
+            var tail = visibleOutput.ToString(start, visibleOutput.Length - start);
+            var selectedIndex = -1;
+            var selectedLength = 0;
+            foreach (var marker in pagingMarkers)
+            {
+                var index = tail.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (index >= 0 && (selectedIndex < 0 || index < selectedIndex))
+                {
+                    selectedIndex = index;
+                    selectedLength = marker.Length;
+                }
+            }
+
+            if (selectedIndex < 0)
+            {
+                return;
+            }
+
+            visibleOutput.Remove(start + selectedIndex, selectedLength);
+            await transport.WriteAsync(new byte[] { pagingContinueByte }, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private string GetDetectionTail(StringBuilder builder)
+    {
+        var start = Math.Max(0, builder.Length - _options.DetectionWindowCharacters);
+        return builder.ToString(start, builder.Length - start);
     }
 
     private static Regex CreateRegex(string pattern) =>
@@ -342,16 +468,6 @@ public sealed class TelnetClient : ITelnetClient
         var source = CancellationTokenSource.CreateLinkedTokenSource(outer);
         source.CancelAfter(timeout);
         return source;
-    }
-
-    private static int IndexOf(StringBuilder builder, string value)
-    {
-        if (builder.Length < value.Length)
-        {
-            return -1;
-        }
-
-        return builder.ToString().IndexOf(value, StringComparison.OrdinalIgnoreCase);
     }
 
     private static int FindTerminalAtEnd(IReadOnlyList<Regex> patterns, string text)

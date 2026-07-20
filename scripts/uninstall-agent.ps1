@@ -1,26 +1,29 @@
 ﻿param(
     [string]$InstallDirectory = "$env:ProgramFiles\SamsungSwitchWatch\Agent",
     [string]$DataDirectory = "$env:ProgramData\SamsungSwitchWatch",
-    [string]$ServiceName = 'SamsungSwitchWatchAgent',
     [switch]$RemoveData
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 Assert-SswAdministrator
 
+$serviceName = Get-SswAgentServiceName
 $install = [IO.Path]::GetFullPath($InstallDirectory)
 $data = [IO.Path]::GetFullPath($DataDirectory)
-if (-not $install.StartsWith(([IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
-    throw '기본 안전 범위 밖의 설치 폴더는 자동 제거하지 않습니다.'
-}
-if ($RemoveData -and -not $data.StartsWith(([IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {
-    throw '기본 안전 범위 밖의 데이터 폴더는 자동 제거하지 않습니다.'
+Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
+if ($RemoveData) {
+    Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
 }
 
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {
-    if ($service.Status -ne 'Stopped') { Stop-Service -Name $ServiceName -Force }
-    & sc.exe delete $ServiceName | Out-Null
+    if ($service.Status -ne 'Stopped') {
+        Stop-Service -Name $serviceName -Force
+        $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+    }
+    & sc.exe delete $serviceName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "서비스 제거 요청에 실패했습니다: $serviceName" }
+    Wait-SswServiceDeleted -Name $serviceName -TimeoutSeconds 20
 }
 Get-NetFirewallRule -DisplayName 'Samsung Switch Watch Agent HTTPS' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 

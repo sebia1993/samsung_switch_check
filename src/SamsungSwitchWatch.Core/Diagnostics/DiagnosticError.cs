@@ -25,4 +25,7 @@ public sealed record ParseResult<T>(T? Value, DiagnosticError? Error)
 
     public static ParseResult<T> Unsupported(string stage, string message) =>
         new(default, new DiagnosticError(ErrorCodes.ParserUnsupported, stage, message));
+
+    public static ParseResult<T> Failure(string code, string stage, string message, bool retryable = false) =>
+        new(default, new DiagnosticError(code, stage, message, retryable));
 }

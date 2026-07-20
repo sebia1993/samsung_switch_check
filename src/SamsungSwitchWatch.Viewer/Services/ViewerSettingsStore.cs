@@ -13,6 +13,7 @@ public sealed class ViewerSettings
     public string ProtectedBearerToken { get; set; } = string.Empty;
     [JsonIgnore] public string BearerToken { get; set; } = string.Empty;
     public long LastEventSequence { get; set; }
+    public Dictionary<string, long> EventCursors { get; set; } = new(StringComparer.Ordinal);
     public bool MiniTopmost { get; set; } = true;
     public double MiniLeft { get; set; } = double.NaN;
     public double MiniTop { get; set; } = double.NaN;
@@ -21,6 +22,26 @@ public sealed class ViewerSettings
     public double MainWidth { get; set; } = 1440;
     public double MainHeight { get; set; } = 900;
     public bool StartMinimizedToTray { get; set; }
+
+    public string BuildAgentIdentity(string agentId)
+    {
+        var material = $"{agentId.Trim()}\n{AgentUri.Trim().ToUpperInvariant()}\n{CertificateFingerprint}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
+    }
+
+    public bool TryGetEventCursor(string agentId, out long cursor) =>
+        EventCursors.TryGetValue(BuildAgentIdentity(agentId), out cursor);
+
+    public void SetEventCursor(string agentId, long cursor)
+    {
+        var identity = BuildAgentIdentity(agentId);
+        if (!EventCursors.ContainsKey(identity) && EventCursors.Count >= 32)
+        {
+            EventCursors.Remove(EventCursors.Keys.First());
+        }
+        EventCursors[identity] = Math.Max(0, cursor);
+        LastEventSequence = Math.Max(0, cursor);
+    }
 }
 
 public static class ViewerSettingsSanitizer
@@ -37,6 +58,10 @@ public static class ViewerSettingsSanitizer
             ProtectedBearerToken = Limit(input.ProtectedBearerToken, 8192),
             BearerToken = Limit(input.BearerToken, 4096),
             LastEventSequence = Math.Max(0, input.LastEventSequence),
+            EventCursors = (input.EventCursors ?? new Dictionary<string, long>())
+                .Where(item => item.Key.Length is > 0 and <= 128)
+                .Take(32)
+                .ToDictionary(item => item.Key, item => Math.Max(0, item.Value), StringComparer.Ordinal),
             MiniTopmost = input.MiniTopmost,
             MiniLeft = NormalizeCoordinate(input.MiniLeft),
             MiniTop = NormalizeCoordinate(input.MiniTop),
@@ -81,7 +106,7 @@ public static class ViewerSettingsSanitizer
     {
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
         {
-            return "https://localhost:18443";
+            return string.Empty;
         }
         var builder = new UriBuilder(uri)
         {
@@ -106,6 +131,8 @@ public sealed class ViewerSettingsStore
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _settingsPath;
 
+    public ViewerSettingsLoadStatus LastLoadStatus { get; private set; } = ViewerSettingsLoadStatus.Ok;
+
     public ViewerSettingsStore(string? settingsPath = null)
     {
         _settingsPath = settingsPath ?? Path.Combine(
@@ -120,14 +147,27 @@ public sealed class ViewerSettingsStore
     {
         try
         {
-            if (!File.Exists(_settingsPath)) return new ViewerSettings();
+            if (!File.Exists(_settingsPath))
+            {
+                LastLoadStatus = ViewerSettingsLoadStatus.Missing;
+                return new ViewerSettings();
+            }
             var settings = JsonSerializer.Deserialize<ViewerSettings>(File.ReadAllText(_settingsPath), JsonOptions);
             settings = ViewerSettingsSanitizer.Sanitize(settings);
-            settings.BearerToken = Unprotect(settings.ProtectedBearerToken);
+            if (!TryUnprotect(settings.ProtectedBearerToken, out var token))
+            {
+                LastLoadStatus = ViewerSettingsLoadStatus.NeedsPairing;
+                settings.BearerToken = string.Empty;
+                return settings;
+            }
+            settings.BearerToken = token;
+            LastLoadStatus = ViewerSettingsLoadStatus.Ok;
             return settings;
         }
         catch
         {
+            QuarantineCorruptSettings();
+            LastLoadStatus = ViewerSettingsLoadStatus.Corrupt;
             return new ViewerSettings();
         }
     }
@@ -135,11 +175,25 @@ public sealed class ViewerSettingsStore
     public void Save(ViewerSettings settings)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(settings);
-        clean.ProtectedBearerToken = Protect(clean.BearerToken);
+        if (!string.IsNullOrEmpty(clean.BearerToken))
+        {
+            clean.ProtectedBearerToken = Protect(clean.BearerToken);
+        }
+        else
+        {
+            clean.ProtectedBearerToken = settings.ProtectedBearerToken;
+        }
         Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
-        var temporaryPath = _settingsPath + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(clean, JsonOptions), new UTF8Encoding(false));
-        File.Move(temporaryPath, _settingsPath, true);
+        var temporaryPath = _settingsPath + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(clean, JsonOptions), new UTF8Encoding(false));
+            File.Move(temporaryPath, _settingsPath, true);
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); } catch { }
+        }
     }
 
     private static string Protect(string value)
@@ -152,19 +206,36 @@ public sealed class ViewerSettingsStore
         }
         catch
         {
-            // A token must never fall back to clear text. Live mode will ask for pairing again.
-            return string.Empty;
+            throw new InvalidOperationException("VIEWER_TOKEN_PROTECT_FAILED");
         }
     }
 
-    private static string Unprotect(string value)
+    private static bool TryUnprotect(string value, out string token)
     {
-        if (!value.StartsWith("dpapi:", StringComparison.Ordinal)) return string.Empty;
+        token = string.Empty;
+        if (string.IsNullOrEmpty(value)) return true;
+        if (!value.StartsWith("dpapi:", StringComparison.Ordinal)) return false;
         try
         {
             var bytes = Convert.FromBase64String(value[6..]);
-            return Encoding.UTF8.GetString(ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser));
+            token = Encoding.UTF8.GetString(ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser));
+            return true;
         }
-        catch { return string.Empty; }
+        catch { return false; }
     }
+
+    private void QuarantineCorruptSettings()
+    {
+        if (!File.Exists(_settingsPath)) return;
+        var quarantine = _settingsPath + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}";
+        try { File.Move(_settingsPath, quarantine, false); } catch { }
+    }
+}
+
+public enum ViewerSettingsLoadStatus
+{
+    Ok,
+    Missing,
+    NeedsPairing,
+    Corrupt
 }

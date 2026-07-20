@@ -6,8 +6,13 @@ namespace SamsungSwitchWatch.Core.Parsing;
 
 public static partial class InterfaceStatusOutputParser
 {
-    public static ParseResult<InterfaceStatusSnapshot> Parse(string output)
+    public static ParseResult<InterfaceStatusSnapshot> Parse(string output, string? requiredInterfaceId = null)
     {
+        if (requiredInterfaceId is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(requiredInterfaceId);
+        }
+
         var normalized = Telnet.OutputNormalizer.CleanControlCharacters(output ?? string.Empty)
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n');
@@ -55,9 +60,24 @@ public static partial class InterfaceStatusOutputParser
 
         if (interfaces.Count == 0)
         {
-            return ParseResult<InterfaceStatusSnapshot>.Unsupported(
+            return headerFound
+                ? ParseResult<InterfaceStatusSnapshot>.Failure(
+                    ErrorCodes.IncompleteOutput,
+                    "parse-interface-status",
+                    "The interface table header was present but no complete rows were found.",
+                    true)
+                : ParseResult<InterfaceStatusSnapshot>.Unsupported(
+                    "parse-interface-status",
+                    "The interface status table is not recognized for this firmware.");
+        }
+
+        if (requiredInterfaceId is not null && !interfaces.ContainsKey(requiredInterfaceId))
+        {
+            return ParseResult<InterfaceStatusSnapshot>.Failure(
+                ErrorCodes.IncompleteOutput,
                 "parse-interface-status",
-                "The interface status table is not recognized for this firmware.");
+                "The required monitored interface was missing from the collected table.",
+                true);
         }
 
         return ParseResult<InterfaceStatusSnapshot>.Success(new InterfaceStatusSnapshot(interfaces));
@@ -165,6 +185,6 @@ public static partial class InterfaceStatusOutputParser
     [GeneratedRegex(@"^\s*(?<port>(?:[A-Za-z]{1,12})?\d+(?:[/.:]\d+){0,3})\s+(?<admin>enable(?:d)?|disable(?:d)?|up|down|on|off)\s+(?<oper>up|down|connected|notconnect(?:ed)?|link[ -]?(?:up|down)|disconnected)\s+(?<speed>\S+)\s+(?<duplex>\S+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex FallbackRowRegex();
 
-    [GeneratedRegex(@"(?i)\bno\s+interfaces?\b", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?is)^\s*no\s+interfaces?(?:\s+(?:found|available|configured))?\s*[.!]?\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex NoInterfacesRegex();
 }
