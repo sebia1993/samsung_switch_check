@@ -101,6 +101,7 @@ public sealed class AlertPopupService : IDisposable
     private readonly BoundedAlertQueue _pending = new(20);
     private readonly Action<EventViewModel>? _openAlert;
     private readonly IWindowsToastBackend? _nativeToast;
+    private readonly Action<Action>? _uiDispatch;
     private AlertPopup? _active;
     private EventViewModel? _activeItem;
     private string? _activeKey;
@@ -108,15 +109,22 @@ public sealed class AlertPopupService : IDisposable
 
     public AlertPopupService(
         Action<EventViewModel>? openAlert = null,
-        IWindowsToastBackend? nativeToast = null)
+        IWindowsToastBackend? nativeToast = null,
+        Action<Action>? uiDispatch = null)
     {
         _openAlert = openAlert;
         _nativeToast = nativeToast;
+        _uiDispatch = uiDispatch;
     }
 
     public void Enqueue(EventViewModel item)
     {
         if (_disposed) return;
+        if (_uiDispatch is not null)
+        {
+            _uiDispatch(() => EnqueueCore(item));
+            return;
+        }
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is null || dispatcher.CheckAccess()) EnqueueCore(item);
         else dispatcher.BeginInvoke(() => EnqueueCore(item));

@@ -162,17 +162,34 @@ public sealed class ViewerV04Tests
     [Fact]
     public void NativeToastBoundary_UsesWindowsBackendAndActivationCallback()
     {
-        using var backend = new FakeToastBackend();
+        var backend = new FakeToastBackend();
         EventViewModel? opened = null;
-        using var service = new AlertPopupService(item => opened = item, backend);
+        using var service = new AlertPopupService(item => opened = item, backend, action => action());
         var expected = new EventViewModel(Event(9, "상태 변경", DeviceHealth.Critical, "업링크 Down", "UP → DOWN"));
 
         service.Enqueue(expected);
 
-        Assert.True(backend.WaitUntilShown(TimeSpan.FromSeconds(5)), "Native toast was not dispatched in time.");
         Assert.Same(expected, backend.Item);
+        Assert.Equal(1, backend.ShowCount);
         backend.Activate();
         Assert.Same(expected, opened);
+    }
+
+    [Fact]
+    public void QueuedUiDispatch_AfterDispose_DoesNotShowNotification()
+    {
+        var backend = new FakeToastBackend();
+        Action? scheduled = null;
+        using var service = new AlertPopupService(_ => { }, backend, action => scheduled = action);
+
+        service.Enqueue(new EventViewModel(Event(10, "state", DeviceHealth.Critical, "uplink down", "up to down")));
+        Assert.NotNull(scheduled);
+
+        service.Dispose();
+        scheduled!();
+
+        Assert.Equal(0, backend.ShowCount);
+        Assert.Null(backend.Item);
     }
 
     [Theory]
@@ -186,27 +203,23 @@ public sealed class ViewerV04Tests
         new(sequence, $"event-{sequence}", "SW-REAL-01", "ACCESS-SW-REAL-01", DateTimeOffset.UtcNow,
             health, kind, title, detail);
 
-    private sealed class FakeToastBackend : IWindowsToastBackend, IDisposable
+    private sealed class FakeToastBackend : IWindowsToastBackend
     {
-        private readonly ManualResetEventSlim _shown = new(false);
         private Action<EventViewModel>? _activated;
         public EventViewModel? Item { get; private set; }
+        public int ShowCount { get; private set; }
 
         public bool TryShow(EventViewModel item, Action<EventViewModel> activated)
         {
+            ShowCount++;
             _activated = activated;
             Item = item;
-            _shown.Set();
             return true;
         }
-
-        public bool WaitUntilShown(TimeSpan timeout) => _shown.Wait(timeout);
 
         public void Activate()
         {
             if (Item is not null) _activated?.Invoke(Item);
         }
-
-        public void Dispose() => _shown.Dispose();
     }
 }
