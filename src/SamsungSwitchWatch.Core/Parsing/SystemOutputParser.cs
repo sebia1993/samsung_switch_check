@@ -9,7 +9,8 @@ public static partial class SystemOutputParser
 {
     public static ParseResult<SystemSnapshot> Parse(string output)
     {
-        var normalized = Telnet.OutputNormalizer.CleanControlCharacters(output ?? string.Empty);
+        var normalized = NormalizeLineEndings(
+            Telnet.OutputNormalizer.CleanControlCharacters(output ?? string.Empty));
         if (string.IsNullOrWhiteSpace(normalized))
         {
             return ParseResult<SystemSnapshot>.Unsupported("parse-system", "System output was empty.");
@@ -83,6 +84,9 @@ public static partial class SystemOutputParser
 
     private static int? ParseInt(string value) =>
         int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+
+    private static string NormalizeLineEndings(string value) =>
+        value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n');
 
     [GeneratedRegex(@"(?im)^\s*(?:system\s+)?(?:up\s*time|uptime)\s*[:=]\s*(?<value>[^\r\n]+)$", RegexOptions.CultureInvariant)]
     private static partial Regex UptimeLineRegex();

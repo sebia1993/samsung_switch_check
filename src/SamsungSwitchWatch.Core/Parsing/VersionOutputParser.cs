@@ -36,7 +36,9 @@ public static partial class VersionOutputParser
     }
 
     private static string Normalize(string output) =>
-        Telnet.OutputNormalizer.CleanControlCharacters(output ?? string.Empty);
+        Telnet.OutputNormalizer.CleanControlCharacters(output ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n');
 
     private static string? MatchValue(string input, Regex regex)
     {

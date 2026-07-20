@@ -29,6 +29,20 @@ public sealed class ParserTests
         Assert.Equal("PASS", result.Value.PostChecks["Memory Test"]);
     }
 
+    [Theory]
+    [InlineData("\r\n")]
+    [InlineData("\r")]
+    public void SystemAndVersionParsers_AcceptDeviceLineEndings(string lineEnding)
+    {
+        var system = SystemOutputParser.Parse(SyntheticOutputs.SystemTenHours.Replace("\n", lineEnding, StringComparison.Ordinal));
+        var version = VersionOutputParser.Parse(SyntheticOutputs.Version.Replace("\n", lineEnding, StringComparison.Ordinal));
+
+        Assert.True(system.IsSuccess);
+        Assert.Equal(TimeSpan.FromHours(10), system.Value!.Uptime);
+        Assert.True(version.IsSuccess);
+        Assert.Equal("2.7.1-test", version.Value!.SoftwareVersion);
+    }
+
     [Fact]
     public void UnknownSystemFormat_ReturnsParserUnsupportedWithoutInventingState()
     {
