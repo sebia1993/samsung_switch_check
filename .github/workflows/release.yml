@@ -52,8 +52,10 @@ jobs:
             "artifacts/release/SamsungSwitchWatch-Viewer-${{ steps.version.outputs.version }}-win-x64.zip",
             'artifacts/release/SHA256SUMS.txt'
           )
-          gh release view $tag --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releases = gh release list --repo '${{ github.repository }}' --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release lookup failed.' }
+          $releaseExists = @($releases | Where-Object { $_.tagName -eq $tag }).Count -gt 0
+          if ($releaseExists) {
             gh release upload $tag @assets --clobber --repo '${{ github.repository }}'
           }
           else {
