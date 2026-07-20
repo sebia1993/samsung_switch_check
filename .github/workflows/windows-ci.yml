@@ -1,0 +1,39 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main, 'agent/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Validate solution and scripts
+        shell: powershell
+        run: .\scripts\validate.ps1 -Configuration Release
+
+      - name: Build v0.2.0 POC packages
+        shell: powershell
+        run: .\scripts\build-release.ps1 -Version 0.2.0-poc -SkipTests
+
+      - name: Upload unsigned POC packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: samsung-switch-watch-0.2.0-poc-win-x64
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 14

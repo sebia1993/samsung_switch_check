@@ -1,0 +1,35 @@
+{
+  "fileKey": "JueYiLj18xFE7enHvGlU2s",
+  "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
+  "runId": "ssw-20260720-v1",
+  "pages": {
+    "cover": "0:1",
+    "foundations": "3:26",
+    "components": "3:122",
+    "screens": "3:123"
+  },
+  "frames": {
+    "cover": "3:2",
+    "foundations": "3:27",
+    "dashboard": "7:2",
+    "mini": "7:174",
+    "popup": "7:189",
+    "stateGallery": "7:195"
+  },
+  "componentSets": {
+    "StatusBadge": "5:17",
+    "ToolbarButton": "5:26",
+    "TabItem": "5:31",
+    "SummaryCard": "5:48",
+    "DeviceRow": "5:97",
+    "EventRow": "5:116"
+  },
+  "variables": {
+    "collections": 3,
+    "total": 46,
+    "primitiveColors": 16,
+    "semanticColors": 18,
+    "dimensions": 12,
+    "brokenAliases": 0
+  }
+}
