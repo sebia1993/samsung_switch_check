@@ -162,13 +162,14 @@ public sealed class ViewerV04Tests
     [Fact]
     public void NativeToastBoundary_UsesWindowsBackendAndActivationCallback()
     {
-        var backend = new FakeToastBackend();
+        using var backend = new FakeToastBackend();
         EventViewModel? opened = null;
         using var service = new AlertPopupService(item => opened = item, backend);
         var expected = new EventViewModel(Event(9, "상태 변경", DeviceHealth.Critical, "업링크 Down", "UP → DOWN"));
 
         service.Enqueue(expected);
 
+        Assert.True(backend.WaitUntilShown(TimeSpan.FromSeconds(5)), "Native toast was not dispatched in time.");
         Assert.Same(expected, backend.Item);
         backend.Activate();
         Assert.Same(expected, opened);
@@ -185,21 +186,27 @@ public sealed class ViewerV04Tests
         new(sequence, $"event-{sequence}", "SW-REAL-01", "ACCESS-SW-REAL-01", DateTimeOffset.UtcNow,
             health, kind, title, detail);
 
-    private sealed class FakeToastBackend : IWindowsToastBackend
+    private sealed class FakeToastBackend : IWindowsToastBackend, IDisposable
     {
+        private readonly ManualResetEventSlim _shown = new(false);
         private Action<EventViewModel>? _activated;
         public EventViewModel? Item { get; private set; }
 
         public bool TryShow(EventViewModel item, Action<EventViewModel> activated)
         {
-            Item = item;
             _activated = activated;
+            Item = item;
+            _shown.Set();
             return true;
         }
+
+        public bool WaitUntilShown(TimeSpan timeout) => _shown.Wait(timeout);
 
         public void Activate()
         {
             if (Item is not null) _activated?.Invoke(Item);
         }
+
+        public void Dispose() => _shown.Dispose();
     }
 }
