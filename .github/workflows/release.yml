@@ -61,6 +61,9 @@ jobs:
           finally { $ErrorActionPreference = $oldPreference }
           if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; rebuilding or replacing its assets is forbidden.' }
           if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
+          # actions/runner appends `exit $LASTEXITCODE` for Windows PowerShell.
+          # A handled not-found lookup must therefore clear the native exit code.
+          $global:LASTEXITCODE = 0
 
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,6 +179,7 @@ jobs:
           finally { $ErrorActionPreference = $oldPreference }
           if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; assets will not be overwritten.' }
           if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
+          $global:LASTEXITCODE = 0
       - name: Attest release assets
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
