@@ -16,7 +16,7 @@ Windows-only Samsung iES switch monitoring proof of concept.
 dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
-.\scripts\build-release.ps1 -Version 0.4.0-poc
+.\scripts\build-release.ps1 -Version 0.4.1-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, and must keep trimming disabled.

@@ -43,6 +43,9 @@ if ($parseFailures.Count -gt 0) {
 Write-SswStep '배포 도우미 계약 검사'
 & (Join-Path $PSScriptRoot 'test-deployment-helpers.ps1')
 
+Write-SswStep 'GitHub 릴리스 워크플로 계약 검사'
+& (Join-Path $PSScriptRoot 'test-release-workflow-contract.ps1')
+
 Write-SswStep 'NuGet 취약 패키지 검사'
 $vulnerabilityOutput = & $dotnet list $solution package --vulnerable --include-transitive 2>&1
 if ($LASTEXITCODE -ne 0) {

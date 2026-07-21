@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.4.0-poc',
+    [string]$Version = '0.4.1-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -81,15 +81,12 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md') -Desti
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\examples\switches.example.json') `
     -Destination (Join-Path $agentOut 'switches.example.json')
 $releaseNotesToken = $Version.Replace('-', '_').ToUpperInvariant()
-$releaseNotes = @(
-    (Join-Path $repoRoot "docs\RELEASE_NOTES_${releaseNotesToken}_KO.md"),
-    (Join-Path $repoRoot 'docs\RELEASE_NOTES_0.4.0_POC_KO.md'),
-    (Join-Path $repoRoot 'docs\RELEASE_NOTES_0.2.0_POC_KO.md')
-) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-if ($releaseNotes) {
-    Copy-Item -LiteralPath $releaseNotes -Destination $agentOut
-    Copy-Item -LiteralPath $releaseNotes -Destination $viewerOut
+$releaseNotes = Join-Path $repoRoot "docs\RELEASE_NOTES_${releaseNotesToken}_KO.md"
+if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {
+    throw "현재 버전의 릴리스 노트가 없습니다: $releaseNotes"
 }
+Copy-Item -LiteralPath $releaseNotes -Destination $agentOut
+Copy-Item -LiteralPath $releaseNotes -Destination $viewerOut
 
 Write-SswStep 'SPDX 및 CycloneDX SBOM 생성'
 & (Join-Path $PSScriptRoot 'new-release-sbom.ps1') -SolutionPath $solution -Version $Version `
@@ -194,7 +191,8 @@ $hashLines = Get-FileHash -Algorithm SHA256 -LiteralPath $hashInputs | ForEach-O
 }
 [IO.File]::WriteAllLines((Join-Path $releaseRoot 'SHA256SUMS.txt'), $hashLines, (New-Object Text.UTF8Encoding($false)))
 
-& (Join-Path $PSScriptRoot 'test-package-contract.ps1') -ReleaseDirectory $releaseRoot -Version $Version
+& (Join-Path $PSScriptRoot 'test-package-contract.ps1') -ReleaseDirectory $releaseRoot -Version $Version `
+    -ExpectedSourceCommit $sourceCommit
 if ($LASTEXITCODE -ne 0) { throw '릴리스 패키지 계약 검사 실패' }
 
 Write-SswStep "릴리스 완료: $releaseRoot"
