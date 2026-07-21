@@ -6,7 +6,7 @@ public sealed record DiagnosticError(
     string Message,
     bool IsRetryable = false);
 
-public sealed class SwitchWatchException : Exception
+public class SwitchWatchException : Exception
 {
     public SwitchWatchException(DiagnosticError error, Exception? innerException = null)
         : base(error.Message, innerException)

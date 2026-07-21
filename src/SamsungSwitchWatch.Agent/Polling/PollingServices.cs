@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.SignalR;
 using SamsungSwitchWatch.Agent.Configuration;
@@ -47,8 +49,8 @@ public static class CommandCatalog
         {
             ["version"] = new("version", "show version", TimeSpan.FromHours(1)),
             ["system"] = new("system", "show system", TimeSpan.FromMinutes(1)),
-            ["log_ram"] = new("log_ram", "show log ram", TimeSpan.FromMinutes(1)),
-            [CommandIds.InterfaceStatus] = new(CommandIds.InterfaceStatus, "show interfaces status", TimeSpan.FromMinutes(1))
+            ["log_ram"] = new("log_ram", "show syslog tail num 100", TimeSpan.FromMinutes(1)),
+            [CommandIds.InterfaceStatus] = new(CommandIds.InterfaceStatus, "show port status", TimeSpan.FromMinutes(1))
         };
 
     public static bool TryGet(string id, out CommandDefinition definition) => Registered.TryGetValue(id, out definition!);
@@ -157,8 +159,13 @@ public sealed class LiveCollectorNotConfigured : IDeviceCollector
 public sealed class CoreTelnetDeviceCollector(
     ITelnetClient telnet,
     DeviceProfileRegistry profiles,
-    ICredentialVault credentials) : IDeviceCollector
+    ICredentialVault credentials,
+    SqliteAgentStore? store = null,
+    ILogger<CoreTelnetDeviceCollector>? logger = null) : IDeviceCollector
 {
+    private readonly ConcurrentDictionary<string, CapabilitySelection> _capabilitySelections =
+        new(StringComparer.OrdinalIgnoreCase);
+
     public async Task<CollectedOutput> CollectAsync(SwitchOptions device, CommandDefinition command, CancellationToken cancellationToken)
     {
         var outputs = await CollectBatchAsync(device, [command], cancellationToken);
@@ -182,6 +189,7 @@ public sealed class CoreTelnetDeviceCollector(
             return commands.Select(command => new CollectedOutput(device.Id, command.Id, captured, [], string.Empty,
                 AgentErrorCodes.ParserUnsupported)).ToArray();
         }
+        var registeredProfile = profile;
 
         var supported = commands.Where(command => profile.TryGetCommand(command.Id, out _)).ToArray();
         var unsupported = commands.Where(command => !profile.TryGetCommand(command.Id, out _))
@@ -194,17 +202,46 @@ public sealed class CoreTelnetDeviceCollector(
                 AgentErrorCodes.ParserUnsupported)).ToArray();
         }
 
+        var firmwareVersion = await GetStoredFirmwareVersionAsync(device.Id, cancellationToken);
+        profile = await ApplyStoredCapabilitySelectionsAsync(
+            device.Id, profile, supported, firmwareVersion, cancellationToken);
+
         var credential = await credentials.GetAsync(device.CredentialId, cancellationToken)
             ?? throw new AgentOperationException(AgentErrorCodes.AuthFailed,
                 "Switch credential is not configured on the Agent.", 503);
         try
         {
-            var session = await telnet.ExecuteRegisteredAsync(
-                new TelnetEndpoint(device.Host, device.Port),
-                new TelnetCredentials(credential.Username, credential.Password),
-                profile,
-                supported.Select(command => command.Id).ToArray(),
-                cancellationToken);
+            TelnetSessionResult session;
+            string? sessionErrorCode = null;
+            try
+            {
+                session = await telnet.ExecuteRegisteredAsync(
+                    new TelnetEndpoint(device.Host, device.Port),
+                    new TelnetCredentials(credential.Username, credential.Password),
+                    profile,
+                    supported.Select(command => command.Id).ToArray(),
+                    cancellationToken);
+                logger?.LogInformation(
+                    "Telnet collection completed for {DeviceId}: commands {CompletedCommands}/{RequestedCommands}, sessions {SessionCount}, reconnects {ReconnectCount}.",
+                    device.Id, session.Outputs.Count, supported.Length, session.SessionCount, session.ReconnectCount);
+            }
+            catch (TelnetExecutionException exception)
+            {
+                sessionErrorCode = NormalizeCode(exception.Error.Code);
+                session = new TelnetSessionResult(
+                    profile.Model,
+                    exception.CompletedOutputs,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow)
+                {
+                    SessionCount = exception.SessionCount,
+                    ReconnectCount = exception.ReconnectCount
+                };
+                logger?.LogWarning(
+                    "Telnet collection ended for {DeviceId} with {ErrorCode}: commands {CompletedCommands}/{RequestedCommands}, sessions {SessionCount}, reconnects {ReconnectCount}.",
+                    device.Id, sessionErrorCode, session.Outputs.Count, supported.Length,
+                    session.SessionCount, session.ReconnectCount);
+            }
             var parsed = SamsungSnapshotParser.Parse(device.Id, session.Outputs, session.CompletedAt);
             var results = new List<CollectedOutput>(commands.Count);
             foreach (var command in commands)
@@ -215,17 +252,70 @@ public sealed class CoreTelnetDeviceCollector(
                         AgentErrorCodes.ParserUnsupported));
                     continue;
                 }
-                var output = session.Outputs.Single(item =>
+                var output = session.Outputs.SingleOrDefault(item =>
                     string.Equals(item.CommandId, command.Id, StringComparison.OrdinalIgnoreCase));
+                if (output is null)
+                {
+                    results.Add(new CollectedOutput(
+                        device.Id,
+                        command.Id,
+                        session.CompletedAt,
+                        [],
+                        string.Empty,
+                        sessionErrorCode ?? AgentErrorCodes.IncompleteOutput));
+                    continue;
+                }
                 try
                 {
                     ValidateComplete(command.Id, device.UplinkPort, parsed);
                     var structured = ConvertSnapshot(command.Id, device.UplinkPort, parsed);
+                    var selectedDefinition = profile.GetRequiredCommand(command.Id);
+                    var registeredDefinition = registeredProfile.GetRequiredCommand(command.Id);
+                    AddCapabilityMetadata(structured, selectedDefinition, registeredDefinition, firmwareVersion);
+                    RecordCapabilitySelection(device.Id, selectedDefinition, registeredDefinition, firmwareVersion);
                     results.Add(new CollectedOutput(device.Id, command.Id, output.CollectedAt, structured, output.RawOutput));
                 }
                 catch (AgentOperationException ex)
                 {
                     results.Add(new CollectedOutput(device.Id, command.Id, output.CollectedAt, [], output.RawOutput, ex.Code));
+                }
+            }
+
+            for (var index = 0; index < results.Count; index++)
+            {
+                var current = results[index];
+                if (!string.Equals(current.CollectorStatus, AgentErrorCodes.ParserUnsupported,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    unsupported.Contains(current.CommandId) ||
+                    !profile.TryGetCommand(current.CommandId, out var selectedDefinition) ||
+                    selectedDefinition.CandidateCommands.Count < 2)
+                {
+                    continue;
+                }
+
+                foreach (var candidate in selectedDefinition.CandidateCommands.Skip(1))
+                {
+                    var candidateProfile = profile.WithCommand(current.CommandId, candidate);
+                    var fallback = await CollectCandidateAsync(
+                        device,
+                        credential,
+                        candidateProfile,
+                        registeredProfile.GetRequiredCommand(current.CommandId),
+                        commands.Single(command => string.Equals(
+                            command.Id, current.CommandId, StringComparison.OrdinalIgnoreCase)),
+                        firmwareVersion,
+                        cancellationToken);
+                    results[index] = fallback;
+                    if (string.Equals(fallback.CollectorStatus, "OK", StringComparison.OrdinalIgnoreCase))
+                    {
+                        profile = candidateProfile;
+                        break;
+                    }
+                    if (!string.Equals(fallback.CollectorStatus, AgentErrorCodes.ParserUnsupported,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
                 }
             }
             return results;
@@ -235,6 +325,160 @@ public sealed class CoreTelnetDeviceCollector(
             throw new AgentOperationException(NormalizeCode(ex.Error.Code), ex.Error.Message, ex.Error.IsRetryable ? 503 : 400);
         }
     }
+
+    private async Task<CollectedOutput> CollectCandidateAsync(
+        SwitchOptions device,
+        SwitchCredential credential,
+        DeviceCommandProfile candidateProfile,
+        ReadOnlyCommandDefinition registeredDefinition,
+        CommandDefinition command,
+        string? firmwareVersion,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var session = await telnet.ExecuteRegisteredAsync(
+                new TelnetEndpoint(device.Host, device.Port),
+                new TelnetCredentials(credential.Username, credential.Password),
+                candidateProfile,
+                [command.Id],
+                cancellationToken);
+            var output = session.Outputs.Single();
+            var parsed = SamsungSnapshotParser.Parse(device.Id, session.Outputs, session.CompletedAt);
+            ValidateComplete(command.Id, device.UplinkPort, parsed);
+            var structured = ConvertSnapshot(command.Id, device.UplinkPort, parsed);
+            var selected = candidateProfile.GetRequiredCommand(command.Id);
+            AddCapabilityMetadata(structured, selected, registeredDefinition, firmwareVersion);
+            RecordCapabilitySelection(device.Id, selected, registeredDefinition, firmwareVersion);
+            logger?.LogInformation(
+                "Telnet capability fallback completed for {DeviceId}/{CommandId}: sessions {SessionCount}, reconnects {ReconnectCount}.",
+                device.Id, command.Id, session.SessionCount, session.ReconnectCount);
+            return new CollectedOutput(device.Id, command.Id, output.CollectedAt, structured, output.RawOutput);
+        }
+        catch (AgentOperationException exception)
+        {
+            return new CollectedOutput(
+                device.Id,
+                command.Id,
+                DateTimeOffset.UtcNow,
+                [],
+                string.Empty,
+                NormalizeCode(exception.Code));
+        }
+        catch (SwitchWatchException exception)
+        {
+            var code = NormalizeCode(exception.Error.Code);
+            logger?.LogWarning(
+                "Telnet capability fallback ended for {DeviceId}/{CommandId} with {ErrorCode}.",
+                device.Id, command.Id, code);
+            return new CollectedOutput(
+                device.Id,
+                command.Id,
+                DateTimeOffset.UtcNow,
+                [],
+                string.Empty,
+                code);
+        }
+    }
+
+    private async Task<DeviceCommandProfile> ApplyStoredCapabilitySelectionsAsync(
+        string deviceId,
+        DeviceCommandProfile profile,
+        IReadOnlyList<CommandDefinition> commands,
+        string? firmwareVersion,
+        CancellationToken cancellationToken)
+    {
+        foreach (var command in commands)
+        {
+            var definition = profile.GetRequiredCommand(command.Id);
+            if (definition.CandidateCommands.Count < 2)
+            {
+                continue;
+            }
+
+            var signature = CapabilitySignature(definition);
+            var key = CapabilityKey(deviceId, command.Id);
+            _capabilitySelections.TryGetValue(key, out var selected);
+            if (selected is null && store is not null)
+            {
+                var snapshot = await store.GetSnapshotAsync(deviceId, command.Id, cancellationToken);
+                var selectedCli = snapshot?.Data["collectorCli"]?.GetValue<string>();
+                var storedSignature = snapshot?.Data["collectorProfileKey"]?.GetValue<string>();
+                var storedFirmware = snapshot?.Data["collectorFirmwareVersion"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(selectedCli) &&
+                    string.Equals(storedSignature, signature, StringComparison.Ordinal) &&
+                    string.Equals(storedFirmware, firmwareVersion, StringComparison.Ordinal))
+                {
+                    selected = new CapabilitySelection(selectedCli, signature, firmwareVersion);
+                    _capabilitySelections[key] = selected;
+                }
+            }
+
+            if (selected is not null &&
+                string.Equals(selected.ProfileKey, signature, StringComparison.Ordinal) &&
+                string.Equals(selected.FirmwareVersion, firmwareVersion, StringComparison.Ordinal) &&
+                definition.CandidateCommands.Any(candidate =>
+                    string.Equals(candidate, selected.Command, StringComparison.OrdinalIgnoreCase)))
+            {
+                profile = profile.WithCommand(command.Id, selected.Command);
+            }
+        }
+        return profile;
+    }
+
+    private async Task<string?> GetStoredFirmwareVersionAsync(
+        string deviceId,
+        CancellationToken cancellationToken)
+    {
+        if (store is null)
+        {
+            return null;
+        }
+
+        var snapshot = await store.GetSnapshotAsync(deviceId, CommandIds.Version, cancellationToken);
+        return snapshot?.Data["softwareVersion"]?.GetValue<string>();
+    }
+
+    private void RecordCapabilitySelection(
+        string deviceId,
+        ReadOnlyCommandDefinition selectedDefinition,
+        ReadOnlyCommandDefinition registeredDefinition,
+        string? firmwareVersion)
+    {
+        if (registeredDefinition.CandidateCommands.Count < 2)
+        {
+            return;
+        }
+
+        _capabilitySelections[CapabilityKey(deviceId, registeredDefinition.Id)] = new CapabilitySelection(
+            selectedDefinition.Command,
+            CapabilitySignature(registeredDefinition),
+            firmwareVersion);
+    }
+
+    private static void AddCapabilityMetadata(
+        JsonObject structured,
+        ReadOnlyCommandDefinition selectedDefinition,
+        ReadOnlyCommandDefinition registeredDefinition,
+        string? firmwareVersion)
+    {
+        if (registeredDefinition.CandidateCommands.Count < 2)
+        {
+            return;
+        }
+
+        structured["collectorCli"] = selectedDefinition.Command;
+        structured["collectorProfileKey"] = CapabilitySignature(registeredDefinition);
+        structured["collectorFirmwareVersion"] = firmwareVersion;
+    }
+
+    private static string CapabilityKey(string deviceId, string commandId) => $"{deviceId}:{commandId}";
+
+    private static string CapabilitySignature(ReadOnlyCommandDefinition definition) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            string.Join("\n", definition.CandidateCommands))));
+
+    private sealed record CapabilitySelection(string Command, string ProfileKey, string? FirmwareVersion);
 
     private static void ValidateComplete(
         string commandId,
@@ -346,6 +590,7 @@ public sealed class CoreTelnetDeviceCollector(
         AgentErrorCodes.AuthFailed or
         AgentErrorCodes.CommandTimeout or
         AgentErrorCodes.PromptParseFailed or
+        AgentErrorCodes.TelnetSessionClosed or
          AgentErrorCodes.OutputLimitExceeded or
          AgentErrorCodes.IncompleteOutput or
          AgentErrorCodes.ParserUnsupported => code,
@@ -1063,6 +1308,7 @@ public sealed class CommandExecutionService(
         AgentErrorCodes.CredentialUnavailable or
         AgentErrorCodes.CommandTimeout or
         AgentErrorCodes.PromptParseFailed or
+        AgentErrorCodes.TelnetSessionClosed or
         AgentErrorCodes.OutputLimitExceeded or
         AgentErrorCodes.IncompleteOutput or
         AgentErrorCodes.ParserUnsupported => code,

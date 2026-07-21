@@ -2,30 +2,5 @@ namespace SamsungSwitchWatch.Core.Profiles;
 
 public static class Ies4224GpProfile
 {
-    public static DeviceCommandProfile Create() => new(
-        "IES4224GP",
-        new TelnetPromptProfile(
-            LoginPromptPattern: @"(?im)(?:login|user(?:name)?)[ \t]*:[ \t]*\r?$",
-            PasswordPromptPattern: @"(?im)password[ \t]*:[ \t]*\r?$",
-            DevicePromptPattern: @"(?m)^[^\r\n]{1,80}[>#][ \t]*\r?$",
-            AuthenticationFailurePatterns:
-            [
-                @"(?i)authentication\s+failed",
-                @"(?i)login\s+(?:incorrect|failed)",
-                @"(?i)(?:invalid|incorrect)\s+(?:user(?:name)?|password)",
-                @"(?i)access\s+denied"
-            ],
-            PagingMarkers:
-            [
-                "--More--",
-                "---- More ----",
-                "Press any key to continue",
-                "Press SPACE to continue"
-            ]),
-        [
-            new ReadOnlyCommandDefinition(CommandIds.Version, "버전", "show version", TimeSpan.FromSeconds(30), 3600),
-            new ReadOnlyCommandDefinition(CommandIds.System, "시스템 상태", "show system", TimeSpan.FromSeconds(30), 300),
-            new ReadOnlyCommandDefinition(CommandIds.LogRam, "RAM 로그", "show log ram", TimeSpan.FromSeconds(60), 60),
-            new ReadOnlyCommandDefinition(CommandIds.InterfaceStatus, "인터페이스 상태", "show interfaces status", TimeSpan.FromSeconds(60), 60)
-        ]);
+    public static DeviceCommandProfile Create() => SamsungIesProfileFactory.Create("IES4224GP");
 }

@@ -31,7 +31,10 @@ Assert-Pattern $workflow 'gh api --paginate --slurp' 'Release and draft lookup m
 Assert-Pattern $workflow '--signer-workflow' 'Attestation verification must constrain the signer workflow.'
 Assert-Pattern $workflow '--source-digest' 'Attestation verification must constrain the source digest.'
 Assert-Pattern $workflow '--source-ref' 'Attestation verification must constrain the source ref.'
-Assert-Pattern $workflow '\$expected\s*=\s*@\(' 'The exact six-file release set must be enumerated.'
+Assert-Pattern $workflow '\$internalExpected\s*=\s*@\(' 'The exact six-file internal validation set must be enumerated.'
+Assert-Pattern $workflow '\$publicAssetNames\s*=\s*@\(' 'The exact two-file public release set must be enumerated.'
+Assert-Pattern $workflow '\$arguments\s*=\s*@\(\$tag\)\s*\+\s*\$publicAssets' 'Only the explicit public ZIP allowlist may be passed to GitHub Release creation.'
+Assert-Pattern $workflow '\$remoteNames\s+-join\s+''\|''\)\s+-ne\s+\(\$publicAssetNames\s+-join\s+''\|''' 'Remote draft assets must match the public ZIP allowlist.'
 Assert-Pattern $workflow 'Exact release notes are missing' 'Publishing must require exact-version release notes.'
 Assert-Pattern $workflow 'gh release create @arguments' 'Release assets must be staged through the GitHub CLI.'
 Assert-Pattern $workflow '\$draftCreateOutput\s*=\s*@\(gh release create @arguments\)' 'Draft creation output must be captured without retrying creation.'
@@ -58,6 +61,12 @@ if ($workflow -match 'gh release delete') {
 }
 if ($workflow -match 'immutable-releases') {
     throw 'The default GITHUB_TOKEN cannot call the repository Administration immutable-settings endpoint.'
+}
+if ($workflow -match 'subject-path:\s*artifacts/release/\*') {
+    throw 'Build provenance must attest only the two public ZIP assets, never the six-file internal artifact wildcard.'
+}
+if ($workflow -notmatch '(?s)Upload internal validation artifact.+?path:\s*artifacts/release/\*') {
+    throw 'The six-file package contract must remain available as an internal Actions artifact.'
 }
 if ($workflow -match '>>\s*\$env:GITHUB_OUTPUT') {
     throw 'Windows PowerShell 5.1 must write GITHUB_OUTPUT through Out-File UTF-8.'
@@ -123,6 +132,41 @@ $verifyIndex = $workflow.IndexOf('Verify release contract and provenance before 
 $createIndex = $workflow.IndexOf('Stage, verify, and publish immutable release exactly once', [StringComparison]::Ordinal)
 if ($verifyIndex -lt 0 -or $createIndex -lt 0 -or $verifyIndex -gt $createIndex) {
     throw 'Contract and provenance verification must finish before release creation.'
+}
+$attestIndex = $workflow.IndexOf('Attest release assets', [StringComparison]::Ordinal)
+if ($attestIndex -lt 0 -or $attestIndex -gt $verifyIndex) {
+    throw 'Public release ZIP attestation must run before provenance verification.'
+}
+$attestBlock = $workflow.Substring($attestIndex, $verifyIndex - $attestIndex)
+$expectedAttestationPaths = @(
+    'artifacts/release/SamsungSwitchWatch-Agent-${{ needs.package.outputs.version }}-win-x64.zip'
+    'artifacts/release/SamsungSwitchWatch-Viewer-${{ needs.package.outputs.version }}-win-x64.zip'
+)
+foreach ($path in $expectedAttestationPaths) {
+    if ($attestBlock.IndexOf($path, [StringComparison]::Ordinal) -lt 0) {
+        throw "Public ZIP is missing from the build provenance allowlist: $path"
+    }
+}
+foreach ($privateValidationName in @('BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json', 'SHA256SUMS.txt')) {
+    if ($attestBlock.IndexOf($privateValidationName, [StringComparison]::Ordinal) -ge 0) {
+        throw "Internal validation file must not be attested as a public release asset: $privateValidationName"
+    }
+}
+$publicAllowlistBlocks = [regex]::Matches(
+    $workflow,
+    '(?s)\$publicAssetNames\s*=\s*@\((?<body>.*?)\)\s*\|\s*Sort-Object')
+if ($publicAllowlistBlocks.Count -lt 2) {
+    throw 'Both provenance verification and publication must define the public ZIP allowlist.'
+}
+foreach ($block in $publicAllowlistBlocks) {
+    $body = $block.Groups['body'].Value
+    $publicEntries = @([regex]::Matches($body, 'SamsungSwitchWatch-(?:Agent|Viewer)-[^\r\n"'']+-win-x64\.zip'))
+    if ($publicEntries.Count -ne 2 -or $body -match 'BUILD-MANIFEST|SBOM\.|SHA256SUMS') {
+        throw 'Each public asset allowlist must contain exactly the Agent and Viewer ZIP files.'
+    }
+}
+if ([regex]::Matches($workflow, 'foreach\s*\(\$name\s+in\s+\$publicAssetNames\)').Count -lt 3) {
+    throw 'Attestation, draft digest, and published verify-asset loops must all use the two-file public allowlist.'
 }
 $draftDigestIndex = $workflow.IndexOf('Uploaded draft digest or size differs', [StringComparison]::Ordinal)
 $draftCreateOutputIndex = $workflow.IndexOf('$draftCreateOutput = @(gh release create @arguments)', [StringComparison]::Ordinal)

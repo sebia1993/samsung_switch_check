@@ -91,6 +91,77 @@ public sealed class ParserTests
     }
 
     [Fact]
+    public void InterfaceParser_ParsesShowPortStatusWithOptionalAliasAndOperAdminOrder()
+    {
+        var result = InterfaceStatusOutputParser.Parse(SyntheticOutputs.PortStatusWithAlias);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(LinkState.Up, result.Value!.Interfaces["ge.1.1"].OperationalState);
+        Assert.Equal(AdministrativeState.Enabled, result.Value.Interfaces["ge.1.24"].AdministrativeState);
+        Assert.Equal(LinkState.Down, result.Value.Interfaces["ge.1.24"].OperationalState);
+        Assert.Null(result.Value.Interfaces["ge.1.24"].Speed);
+        Assert.Null(result.Value.Interfaces["ge.1.24"].Duplex);
+    }
+
+    [Fact]
+    public void InterfaceParser_ParsesPipeDelimitedShowPortStatusWithoutInventingAlias()
+    {
+        var result = InterfaceStatusOutputParser.Parse(SyntheticOutputs.PipeDelimitedPortStatus);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(LinkState.Up, result.Value!.Interfaces["ge.1.1"].OperationalState);
+        Assert.Equal(AdministrativeState.Disabled, result.Value.Interfaces["ge.1.2"].AdministrativeState);
+        Assert.Equal(LinkState.Down, result.Value.Interfaces["ge.1.2"].OperationalState);
+    }
+
+    [Fact]
+    public void LogParser_ParsesSyslogTailNumberedAndTimestampOnlyLines()
+    {
+        var result = LogOutputParser.Parse(SyntheticOutputs.SyslogTail);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(3, result.Value!.Entries.Count);
+        Assert.Equal(41, result.Value.Entries[0].SequenceNumber);
+        Assert.Null(result.Value.Entries[2].SequenceNumber);
+        Assert.Equal("[warning] STP root changed", result.Value.Entries[2].Message);
+    }
+
+    [Fact]
+    public void LogParser_ParsesTimeBeforeDateSyslogLines()
+    {
+        var result = LogOutputParser.Parse(SyntheticOutputs.SyslogTailTimeFirst);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Value!.Entries.Count);
+        Assert.Equal(51, result.Value.Entries[0].SequenceNumber);
+        Assert.Null(result.Value.Entries[1].SequenceNumber);
+    }
+
+    [Fact]
+    public void LogParser_AssignsDistinctIdentitiesToExactDuplicateLines()
+    {
+        const string output = """
+            2026-07-20 14:01:00 Repeated event
+            2026-07-20 14:01:00 Repeated event
+            """;
+
+        var result = LogOutputParser.Parse(output);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Value!.Entries.Count);
+        Assert.NotEqual(result.Value.Entries[0].Identity, result.Value.Entries[1].Identity);
+    }
+
+    [Fact]
+    public void LogParser_RecognizesExplicitEmptySyslogBuffer()
+    {
+        var result = LogOutputParser.Parse("No syslog entries.");
+
+        Assert.True(result.IsSuccess);
+        Assert.Empty(result.Value!.Entries);
+    }
+
+    [Fact]
     public void EmptyMarkers_MustDescribeTheWholeOutput()
     {
         var emptyLog = LogOutputParser.Parse("  No log entries.  ");

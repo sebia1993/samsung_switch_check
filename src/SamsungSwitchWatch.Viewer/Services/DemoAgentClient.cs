@@ -43,13 +43,13 @@ public sealed class DemoAgentClient : IAgentClient
         IReadOnlyList<DeviceSnapshotDto> devices =
         [
             new("sw-01", "ACCESS-SW-01", "IES4224GP", "192.0.2.11", DeviceHealth.Normal, now.AddSeconds(-8), "등록된 모든 점검 정상", "31일 04:22", Metrics(
-                ("Telnet", "정상", DeviceHealth.Normal), ("가동 시간", "31일 04:22", DeviceHealth.Normal), ("포트 24", "UP · 1G/Full", DeviceHealth.Normal), ("신규 로그", "0건", DeviceHealth.Normal))),
+                ("Telnet", "정상", DeviceHealth.Normal), ("가동 시간", "31일 04:22", DeviceHealth.Normal), ("포트 24", "UP · 1G/Full", DeviceHealth.Normal), ("신규 로그", "0건", DeviceHealth.Normal)), Capabilities()),
             new("sw-02", "ACCESS-SW-02", "IES4028XP", "장비 주소는 Agent에만 보관", DeviceHealth.Warning, now.AddSeconds(-15), "확인이 필요한 로그 3건", "18일 11:03", Metrics(
-                ("Telnet", "정상", DeviceHealth.Normal), ("STP Root", "변경됨", DeviceHealth.Warning), ("PoE 사용", "312 / 370 W", DeviceHealth.Warning), ("신규 로그", "3건", DeviceHealth.Warning))),
+                ("Telnet", "정상", DeviceHealth.Normal), ("STP Root", "변경됨", DeviceHealth.Warning), ("PoE 사용", "312 / 370 W", DeviceHealth.Warning), ("신규 로그", "3건", DeviceHealth.Warning)), Capabilities(logSelected: "show log ram")),
             new("sw-03", "ACCESS-SW-03", "IES4226XP", "장비 주소는 Agent에만 보관", DeviceHealth.Critical, now.AddSeconds(-22), "중요 업링크 포트 26 DOWN", "07일 09:41", Metrics(
-                ("Telnet", "정상", DeviceHealth.Normal), ("포트 26", "DOWN", DeviceHealth.Critical), ("LACP", "멤버 1개 이탈", DeviceHealth.Critical), ("장애 지속", "12분", DeviceHealth.Critical))),
+                ("Telnet", "정상", DeviceHealth.Normal), ("포트 26", "DOWN", DeviceHealth.Critical), ("LACP", "멤버 1개 이탈", DeviceHealth.Critical), ("장애 지속", "12분", DeviceHealth.Critical)), Capabilities(portSelected: "show interfaces status")),
             new("sw-04", "ACCESS-SW-04", "IES4226XP", "장비 주소는 Agent에만 보관", DeviceHealth.Disconnected, now.AddMinutes(-5), "TCP_TIMEOUT · 현재 상태 미확인", "-", Metrics(
-                ("Telnet", "연결 실패", DeviceHealth.Disconnected), ("마지막 정상", "5분 전", DeviceHealth.Warning), ("오류 코드", "TCP_TIMEOUT", DeviceHealth.Disconnected), ("다음 재시도", "42초 후", DeviceHealth.Loading)))
+                ("Telnet", "연결 실패", DeviceHealth.Disconnected), ("마지막 정상", "5분 전", DeviceHealth.Warning), ("오류 코드", "TCP_TIMEOUT", DeviceHealth.Disconnected), ("다음 재시도", "42초 후", DeviceHealth.Loading)), Capabilities(state: "Failed", errorCode: "TCP_TIMEOUT"))
         ];
 
         long unacknowledged;
@@ -162,6 +162,26 @@ public sealed class DemoAgentClient : IAgentClient
 
     private static IReadOnlyList<DeviceMetricDto> Metrics(params (string label, string value, DeviceHealth health)[] rows) =>
         rows.Select(row => new DeviceMetricDto(row.label, row.value, row.health)).ToArray();
+
+    private static IReadOnlyList<CollectorCapabilityDto> Capabilities(
+        string portSelected = "show port status",
+        string logSelected = "show syslog tail num 100",
+        string state = "Healthy",
+        string? errorCode = null)
+    {
+        var healthy = string.Equals(state, "Healthy", StringComparison.OrdinalIgnoreCase);
+        return
+    [
+        new("version", true, state, errorCode, "show version", healthy ? "show version" : null,
+            ["show version"], healthy ? null : "show version"),
+        new("system", true, state, errorCode, "show system", healthy ? "show system" : null,
+            ["show system"], healthy ? null : "show system"),
+        new("interface_status", true, state, errorCode, "show port status", healthy ? portSelected : null,
+            ["show port status", "show interfaces status"], healthy ? null : portSelected),
+        new("log_ram", true, state, errorCode, "show syslog tail num 100", healthy ? logSelected : null,
+            ["show syslog tail num 100", "show log ram"], healthy ? null : logSelected)
+    ];
+    }
 
     private static string DeviceName(string id) => id switch
     {

@@ -406,16 +406,41 @@ public static class ApiEndpoints
                 CommandCatalog.CollectorHealthSnapshotId, StringComparison.OrdinalIgnoreCase));
             var capabilities = CommandCatalog.Registered.Values.Select(command =>
             {
-                var profileSupported = profile?.TryGetCommand(command.Id, out _) == true;
+                ReadOnlyCommandDefinition? profileCommand = null;
+                var profileSupported = profile is not null && profile.TryGetCommand(command.Id, out profileCommand);
                 var health = deviceSnapshots.FirstOrDefault(snapshot => string.Equals(snapshot.CommandId,
                     CommandCatalog.CollectorHealthSnapshotIdFor(command.Id), StringComparison.OrdinalIgnoreCase));
+                var collection = deviceSnapshots.FirstOrDefault(snapshot => string.Equals(snapshot.CommandId,
+                    command.Id, StringComparison.OrdinalIgnoreCase));
                 var state = profileSupported
                     ? health?.Data["state"]?.GetValue<string>() ?? "Initializing"
                     : "Unsupported";
+                var candidates = profileCommand?.CandidateCommands ?? [command.Cli];
+                var primaryCli = candidates.First();
+                var lastSuccessfulCli = collection?.Data["collectorCli"]?.GetValue<string>();
+                var selectedCli = string.Equals(state, "Healthy", StringComparison.OrdinalIgnoreCase)
+                    ? lastSuccessfulCli
+                    : null;
+                if (string.IsNullOrWhiteSpace(selectedCli) && profileSupported &&
+                    string.Equals(state, "Healthy", StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedCli = primaryCli;
+                }
+                if (string.IsNullOrWhiteSpace(lastSuccessfulCli) &&
+                    string.Equals(state, "Healthy", StringComparison.OrdinalIgnoreCase))
+                {
+                    lastSuccessfulCli = selectedCli;
+                }
                 return new
                 {
                     commandId = command.Id,
-                    cli = command.Cli,
+                    cli = primaryCli,
+                    primaryCli,
+                    selectedCli,
+                    lastSuccessfulCli,
+                    candidateClis = candidates,
+                    fallbackUsed = !string.IsNullOrWhiteSpace(selectedCli) &&
+                                   !string.Equals(selectedCli, primaryCli, StringComparison.OrdinalIgnoreCase),
                     supported = profileSupported && !string.Equals(state, "Unsupported", StringComparison.Ordinal),
                     state,
                     errorCode = health?.Data["errorCode"]?.GetValue<string>(),

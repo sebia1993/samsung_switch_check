@@ -25,7 +25,19 @@ internal static class SamsungIesProfileFactory
         [
             new ReadOnlyCommandDefinition(CommandIds.Version, "버전", "show version", TimeSpan.FromSeconds(30), 3600),
             new ReadOnlyCommandDefinition(CommandIds.System, "시스템 상태", "show system", TimeSpan.FromSeconds(30), 300),
-            new ReadOnlyCommandDefinition(CommandIds.LogRam, "RAM 로그", "show log ram", TimeSpan.FromSeconds(60), 60),
-            new ReadOnlyCommandDefinition(CommandIds.InterfaceStatus, "인터페이스 상태", "show interfaces status", TimeSpan.FromSeconds(60), 60)
+            new ReadOnlyCommandDefinition(
+                CommandIds.LogRam,
+                "시스템 로그",
+                "show syslog tail num 100",
+                TimeSpan.FromSeconds(60),
+                60,
+                ["show log ram"]),
+            new ReadOnlyCommandDefinition(
+                CommandIds.InterfaceStatus,
+                "포트 상태",
+                "show port status",
+                TimeSpan.FromSeconds(60),
+                60,
+                ["show interfaces status"])
         ]);
 }

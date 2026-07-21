@@ -31,6 +31,7 @@ public static partial class LogOutputParser
 
         var lines = normalized.Split('\n');
         var entries = new List<SwitchLogEntry>();
+        var duplicateOrdinals = new Dictionary<string, int>(StringComparer.Ordinal);
         LogBuilder? current = null;
         var sawHeader = false;
         var incompleteEntry = false;
@@ -38,30 +39,13 @@ public static partial class LogOutputParser
         foreach (var rawLine in lines)
         {
             var line = rawLine.Trim();
-            var header = BracketHeaderRegex().Match(line);
-            if (header.Success)
-            {
-                sawHeader = true;
-                if (current is not null)
-                {
-                    incompleteEntry |= !TryAddEntry(entries, current);
-                }
-
-                current = new LogBuilder
-                {
-                    Sequence = ParseNullableInt(header.Groups["sequence"].Value),
-                    Timestamp = ParseTimestamp(header.Groups["date"].Value, header.Groups["time"].Value)
-                };
-                continue;
-            }
-
             var singleLine = SingleLineRegex().Match(line);
             if (singleLine.Success)
             {
                 sawHeader = true;
                 if (current is not null)
                 {
-                    incompleteEntry |= !TryAddEntry(entries, current);
+                    incompleteEntry |= !TryAddEntry(entries, current, duplicateOrdinals);
                     current = null;
                 }
 
@@ -71,7 +55,24 @@ public static partial class LogOutputParser
                     Timestamp = ParseTimestamp(singleLine.Groups["date"].Value, singleLine.Groups["time"].Value)
                 };
                 builder.MessageLines.Add(singleLine.Groups["message"].Value.Trim());
-                incompleteEntry |= !TryAddEntry(entries, builder);
+                incompleteEntry |= !TryAddEntry(entries, builder, duplicateOrdinals);
+                continue;
+            }
+
+            var header = BracketHeaderRegex().Match(line);
+            if (header.Success)
+            {
+                sawHeader = true;
+                if (current is not null)
+                {
+                    incompleteEntry |= !TryAddEntry(entries, current, duplicateOrdinals);
+                }
+
+                current = new LogBuilder
+                {
+                    Sequence = ParseNullableInt(header.Groups["sequence"].Value),
+                    Timestamp = ParseTimestamp(header.Groups["date"].Value, header.Groups["time"].Value)
+                };
                 continue;
             }
 
@@ -96,7 +97,7 @@ public static partial class LogOutputParser
 
         if (current is not null)
         {
-            incompleteEntry |= !TryAddEntry(entries, current);
+            incompleteEntry |= !TryAddEntry(entries, current, duplicateOrdinals);
         }
 
         if (incompleteEntry)
@@ -124,7 +125,10 @@ public static partial class LogOutputParser
         return ParseResult<LogSnapshot>.Success(new LogSnapshot(entries));
     }
 
-    private static bool TryAddEntry(ICollection<SwitchLogEntry> entries, LogBuilder builder)
+    private static bool TryAddEntry(
+        ICollection<SwitchLogEntry> entries,
+        LogBuilder builder,
+        IDictionary<string, int> duplicateOrdinals)
     {
         var message = string.Join(" ", builder.MessageLines)
             .Trim()
@@ -143,6 +147,13 @@ public static partial class LogOutputParser
             builder.Module?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
             builder.Function?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
             builder.EventNumber?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+        duplicateOrdinals.TryGetValue(canonical, out var duplicateOrdinal);
+        duplicateOrdinal++;
+        duplicateOrdinals[canonical] = duplicateOrdinal;
+        if (duplicateOrdinal > 1)
+        {
+            canonical += $"|duplicate:{duplicateOrdinal.ToString(CultureInfo.InvariantCulture)}";
+        }
         var identity = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
         entries.Add(new SwitchLogEntry(
             identity,
@@ -161,7 +172,14 @@ public static partial class LogOutputParser
         var combined = $"{date} {time}";
         return DateTime.TryParseExact(
             combined,
-            "yyyy-MM-dd HH:mm:ss",
+            [
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy/MM/dd HH:mm:ss",
+                "yyyy.MM.dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm:ss.fff",
+                "yyyy/MM/dd HH:mm:ss.fff",
+                "yyyy.MM.dd HH:mm:ss.fff"
+            ],
             CultureInfo.InvariantCulture,
             DateTimeStyles.None,
             out var parsed)
@@ -192,12 +210,12 @@ public static partial class LogOutputParser
     [GeneratedRegex(@"^\s*\[(?<sequence>\d+)\]\s+(?:(?<time>\d{2}:\d{2}:\d{2})\s+(?<date>\d{4}-\d{2}-\d{2})|(?<date>\d{4}-\d{2}-\d{2})\s+(?<time>\d{2}:\d{2}:\d{2}))", RegexOptions.CultureInvariant)]
     private static partial Regex BracketHeaderRegex();
 
-    [GeneratedRegex(@"^\s*(?<sequence>\d+)\s+(?<date>\d{4}-\d{2}-\d{2})\s+(?<time>\d{2}:\d{2}:\d{2})\s+(?<message>.+)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^\s*(?:(?:\[(?<sequence>\d+)\]|(?<sequence>\d+)[.):]?)\s+)?(?:(?<date>\d{4}[-/.]\d{2}[-/.]\d{2})\s+(?<time>\d{2}:\d{2}:\d{2}(?:\.\d{3})?)|(?<time>\d{2}:\d{2}:\d{2}(?:\.\d{3})?)\s+(?<date>\d{4}[-/.]\d{2}[-/.]\d{2}))\s+(?<message>\S.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex SingleLineRegex();
 
     [GeneratedRegex(@"(?i)level\s*:\s*(?<level>\d+).*?module\s*:\s*(?<module>\d+).*?function\s*:\s*(?<function>\d+).*?event\s*(?:no\.?|number)?\s*:\s*(?<event>\d+)", RegexOptions.CultureInvariant)]
     private static partial Regex MetadataRegex();
 
-    [GeneratedRegex(@"(?is)^\s*(?:no\s+(?:log(?:\s+(?:entries|messages))?|entries|messages)|log\s+(?:is\s+)?empty)\s*[.!]?\s*$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?is)^\s*(?:no\s+(?:(?:system\s+)?logs?|syslog)(?:\s+(?:entries|messages))?|no\s+(?:entries|messages)|(?:logs?|syslog)\s+(?:is\s+)?empty)\s*[.!]?\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex EmptyLogRegex();
 }

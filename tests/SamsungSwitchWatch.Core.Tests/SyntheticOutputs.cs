@@ -32,6 +32,30 @@ internal static class SyntheticOutputs
         24        Enabled   Down    --      --
         """;
 
+    public const string PortStatusWithAlias = """
+        Port       Alias          Oper Status  Admin Status  Speed  Duplex  Type
+        ---------- -------------- ------------ ------------- ------ ------- ------------
+        ge.1.1     user-floor     Up           Up            1.0G   full    RJ45
+        ge.1.24                   Down         Up            N/A    N/A     SFP
+        """;
+
+    public const string PipeDelimitedPortStatus = """
+        Port | Alias | Oper | Admin | Speed | Duplex | Type
+        ge.1.1 | uplink | up | up | 1000M | full | RJ45
+        ge.1.2 | | down | disabled | -- | -- | RJ45
+        """;
+
+    public const string SyslogTail = """
+        41 2026-07-20 14:01:00 Port 1 link down
+        42 2026-07-20 14:01:02 Port 1 link up
+        2026-07-20 14:02:00 [warning] STP root changed
+        """;
+
+    public const string SyslogTailTimeFirst = """
+        [51] 14:03:00 2026-07-20 Uplink state changed
+        14:04:00 2026-07-20 Power status normal
+        """;
+
     public static string Logs(params (int Sequence, string Time, string Message)[] entries) =>
         string.Join(Environment.NewLine, entries.Select(entry => $"""
             [{entry.Sequence}] {entry.Time} 2026-07-20

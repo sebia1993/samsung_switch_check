@@ -16,7 +16,7 @@ Windows-only Samsung iES switch monitoring proof of concept.
 dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
-.\scripts\build-release.ps1 -Version 0.4.1-poc
+.\scripts\build-release.ps1 -Version 0.5.0-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, and must keep trimming disabled.
@@ -37,4 +37,5 @@ Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, and 
 - Figma file `Samsung Switch Watch` is the UI source of truth.
 - Keep operator screens compact, keyboard-accessible, and readable at 1280x720 or higher.
 - Do not commit generated `bin`, `obj`, `artifacts`, `release`, database, certificate, or secret files.
+- Keep all six package-validation files in the internal Actions artifact, but publish only the versioned Agent and Viewer ZIP files as GitHub Release custom assets.
 - Verify `git ls-files AGENTS.md` before any GitHub handoff.

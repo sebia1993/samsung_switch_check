@@ -46,6 +46,12 @@ public static partial class InterfaceStatusOutputParser
                 continue;
             }
 
+            if (headerFound && TryParseShowPortStatusRow(rawLine, out var showPortStatus))
+            {
+                interfaces[showPortStatus.PortId] = showPortStatus;
+                continue;
+            }
+
             if (headerFound && columns is not null && TryParseMappedRow(tokens, columns, out var mapped))
             {
                 interfaces[mapped.PortId] = mapped;
@@ -86,8 +92,8 @@ public static partial class InterfaceStatusOutputParser
     private static bool TryBuildColumnMap(string[] tokens, out ColumnMap? map)
     {
         map = null;
-        var normalized = tokens.Select(NormalizeHeader).ToArray();
-        var port = Array.FindIndex(normalized, static value => value is "port" or "interface" or "ifname");
+        var normalized = CollapseHeaderTokens(tokens);
+        var port = Array.FindIndex(normalized, static value => value is "port" or "slotport" or "interface" or "ifname");
         var admin = Array.FindIndex(normalized, static value => value.StartsWith("admin", StringComparison.Ordinal));
         var oper = Array.FindIndex(normalized, static value =>
             value is "oper" or "operstatus" or "link" or "linkstate" or "status" or "state");
@@ -101,6 +107,27 @@ public static partial class InterfaceStatusOutputParser
 
         map = new ColumnMap(port, admin, oper, speed, duplex);
         return true;
+    }
+
+    private static string[] CollapseHeaderTokens(string[] tokens)
+    {
+        var normalized = tokens.Select(NormalizeHeader).ToArray();
+        var collapsed = new List<string>(normalized.Length);
+        for (var index = 0; index < normalized.Length; index++)
+        {
+            var value = normalized[index];
+            if (index + 1 < normalized.Length &&
+                (value is "admin" or "administrative" or "oper" or "operational" or "link") &&
+                (normalized[index + 1] is "status" or "state"))
+            {
+                collapsed.Add(value + normalized[++index]);
+                continue;
+            }
+
+            collapsed.Add(value);
+        }
+
+        return collapsed.ToArray();
     }
 
     private static bool TryParseMappedRow(string[] tokens, ColumnMap map, out InterfaceStatus status)
@@ -153,6 +180,31 @@ public static partial class InterfaceStatusOutputParser
         return true;
     }
 
+    private static bool TryParseShowPortStatusRow(string line, out InterfaceStatus status)
+    {
+        status = null!;
+        var match = ShowPortStatusRowRegex().Match(line);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        var operational = ParseOperational(match.Groups["oper"].Value);
+        var admin = ParseAdministrative(match.Groups["admin"].Value);
+        if (operational == LinkState.Unknown || admin == AdministrativeState.Unknown)
+        {
+            return false;
+        }
+
+        status = new InterfaceStatus(
+            match.Groups["port"].Value,
+            admin,
+            operational,
+            CleanOptional(match.Groups["speed"].Value),
+            CleanOptional(match.Groups["duplex"].Value));
+        return true;
+    }
+
     private static AdministrativeState ParseAdministrative(string value) => NormalizeState(value) switch
     {
         "enable" or "enabled" or "up" or "on" => AdministrativeState.Enabled,
@@ -172,18 +224,28 @@ public static partial class InterfaceStatusOutputParser
 
     private static string NormalizeHeader(string value) => NormalizeState(value);
 
-    private static string? CleanOptional(string value) => value is "-" or "--" ? null : value;
+    private static string? CleanOptional(string value) => NormalizeState(value) is "" or "na" or "notapplicable" ? null : value;
 
-    private static string[] SplitColumns(string value) =>
-        Regex.Split(value.Trim(), @"\s+").Where(static token => token.Length > 0).ToArray();
+    private static string[] SplitColumns(string value)
+    {
+        if (value.Contains('|'))
+        {
+            return value.Trim().Trim('|').Split('|').Select(static token => token.Trim()).ToArray();
+        }
+
+        return Regex.Split(value.Trim(), @"\s+").Where(static token => token.Length > 0).ToArray();
+    }
 
     private sealed record ColumnMap(int Port, int Admin, int Operational, int Speed, int Duplex);
 
-    [GeneratedRegex(@"^(?:[A-Za-z]{1,12})?\d+(?:[/.:]\d+){0,3}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(?:[A-Za-z]{1,12}[./:-]?)?\d+(?:[/.:]\d+){0,3}$", RegexOptions.CultureInvariant)]
     private static partial Regex PortIdRegex();
 
     [GeneratedRegex(@"^\s*(?<port>(?:[A-Za-z]{1,12})?\d+(?:[/.:]\d+){0,3})\s+(?<admin>enable(?:d)?|disable(?:d)?|up|down|on|off)\s+(?<oper>up|down|connected|notconnect(?:ed)?|link[ -]?(?:up|down)|disconnected)\s+(?<speed>\S+)\s+(?<duplex>\S+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex FallbackRowRegex();
+
+    [GeneratedRegex(@"^\s*(?<port>(?:[A-Za-z]{1,12}[./:-]?)?\d+(?:[/.:]\d+){0,3})\s+(?:\S.*?\s+)?(?<oper>up|down|connected|notconnect(?:ed)?|link[ -]?(?:up|down)|disconnected)\s+(?<admin>enable(?:d)?|disable(?:d)?|up|down|on|off)\s+(?<speed>\S+)\s+(?<duplex>full|half|auto|n/?a|-{1,2})(?:\s+.*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ShowPortStatusRowRegex();
 
     [GeneratedRegex(@"(?is)^\s*no\s+interfaces?(?:\s+(?:found|available|configured))?\s*[.!]?\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex NoInterfacesRegex();

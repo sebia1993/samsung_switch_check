@@ -25,6 +25,11 @@ $hashedReleaseFiles = @($agentZip, $viewerZip, $rootManifestPath, $spdxPath, $cy
 foreach ($required in @($hashedReleaseFiles + $hashFile)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "필수 릴리스 파일이 없습니다: $required" }
 }
+$expectedReleaseNames = @($hashedReleaseFiles + $hashFile | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)
+$actualReleaseNames = @(Get-ChildItem -LiteralPath $release -File | ForEach-Object { $_.Name } | Sort-Object)
+if (($actualReleaseNames -join '|') -ne ($expectedReleaseNames -join '|')) {
+    throw "릴리스 폴더의 파일 이름 집합이 6개 패키지 계약과 일치하지 않습니다. actual=$($actualReleaseNames -join ', ')"
+}
 
 Write-SswStep 'SHA-256 파일 계약 검사'
 $declaredHashes = @{}
@@ -100,7 +105,7 @@ try {
             Exe = 'SamsungSwitchWatch.Agent.exe'
             Installer = 'install-agent.ps1'
             Required = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'set-switch-credential.ps1',
-                'new-pairing-code.ps1', 'new-agent-certificate.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
+                'new-pairing-code.ps1', 'new-viewer-pairing.ps1', 'new-agent-certificate.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
                 'switches.example.json', $releaseNotesName, 'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json')
         },
         [pscustomobject]@{
@@ -234,9 +239,36 @@ try {
             }
             $credentialText = Get-Content -LiteralPath (Join-Path $expanded 'set-switch-credential.ps1') -Raw -Encoding UTF8
             $pairingText = Get-Content -LiteralPath (Join-Path $expanded 'new-pairing-code.ps1') -Raw -Encoding UTF8
+            $viewerPairingText = Get-Content -LiteralPath (Join-Path $expanded 'new-viewer-pairing.ps1') -Raw -Encoding UTF8
             if ($credentialText -notmatch 'Push-Location\s+-LiteralPath\s+\$install' -or
-                $pairingText -notmatch 'Push-Location\s+-LiteralPath\s+\$install') {
+                $pairingText -notmatch 'Push-Location\s+-LiteralPath\s+\$install' -or
+                $viewerPairingText -notmatch 'Push-Location\s+-LiteralPath\s+\$install') {
                 throw 'Agent 유지보수 명령은 설치 폴더를 작업 디렉터리로 고정해야 합니다.'
+            }
+            foreach ($pairingPattern in @(
+                'pairing\s+create\s+--json',
+                'install-receipt\.json',
+                'appsettings\.Production\.json',
+                'certificateSha256',
+                'certificateStoreThumbprint',
+                '\^\[0-9A-Fa-f\]\{64\}\$',
+                'SSW1:',
+                '\[switch\]\$CopyToClipboard',
+                '\$service\.Status\s+-ne\s+''Running''',
+                'Get-NetTCPConnection',
+                'SkipAsSource',
+                'InterfaceAlias',
+                '\$expiresUtc\s+-\s+\[DateTimeOffset\]::UtcNow'
+            )) {
+                if ($viewerPairingText -notmatch $pairingPattern) {
+                    throw "Viewer 단일 연결 문자열 계약이 없습니다: $pairingPattern"
+                }
+            }
+            if ($viewerPairingText -match 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD') {
+                throw 'Viewer 연결 문자열 helper가 HTTPS 인증서 암호를 읽거나 복사해서는 안 됩니다.'
+            }
+            if ($viewerPairingText -match '10\s*분') {
+                throw 'Viewer 연결 문자열 helper는 유효 시간을 Agent의 expiresUtc에서 계산해야 합니다.'
             }
             if ($installerText -match 'AllowLegacyHealth' -or $credentialText -match 'AllowLegacyHealth') {
                 throw 'Agent 설치와 자격 증명 검증은 v2 readiness를 구형 health 응답으로 우회할 수 없습니다.'

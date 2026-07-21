@@ -7,7 +7,43 @@ public sealed record ReadOnlyCommandDefinition(
     string DisplayName,
     string Command,
     TimeSpan Timeout,
-    int DefaultIntervalSeconds);
+    int DefaultIntervalSeconds,
+    IReadOnlyList<string>? FallbackCommands = null)
+{
+    /// <summary>
+    /// Gets the ordered, case-insensitively de-duplicated CLI candidates for
+    /// this stable command ID. The first item is the preferred command.
+    /// </summary>
+    public IReadOnlyList<string> CandidateCommands =>
+        [.. new[] { Command }
+            .Concat(FallbackCommands ?? [])
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+
+    /// <summary>
+    /// Returns an equivalent definition with a capability-probed candidate
+    /// selected as the command that Telnet will execute.
+    /// </summary>
+    public ReadOnlyCommandDefinition WithCommand(string command)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+        var selected = CandidateCommands.FirstOrDefault(candidate =>
+            string.Equals(candidate, command, StringComparison.OrdinalIgnoreCase));
+        if (selected is null)
+        {
+            throw new ArgumentOutOfRangeException(nameof(command), command,
+                "The command is not a registered candidate for this definition.");
+        }
+
+        return new ReadOnlyCommandDefinition(
+            Id,
+            DisplayName,
+            selected,
+            Timeout,
+            DefaultIntervalSeconds,
+            CandidateCommands.Where(candidate =>
+                !string.Equals(candidate, selected, StringComparison.OrdinalIgnoreCase)).ToArray());
+    }
+}
 
 public sealed record TelnetPromptProfile(
     string LoginPromptPattern,
@@ -36,8 +72,10 @@ public sealed class DeviceCommandProfile
         var materialized = commands.ToArray();
         if (materialized.Length == 0 || materialized.Any(static command =>
                 string.IsNullOrWhiteSpace(command.Id) ||
-                string.IsNullOrWhiteSpace(command.Command) ||
-                !IsSafeReadOnlyCommand(command.Command) ||
+                string.IsNullOrWhiteSpace(command.DisplayName) ||
+                command.CandidateCommands.Count == 0 ||
+                command.CandidateCommands.Any(candidate =>
+                    string.IsNullOrWhiteSpace(candidate) || !IsSafeReadOnlyCommand(candidate)) ||
                 command.Timeout <= TimeSpan.Zero ||
                 command.DefaultIntervalSeconds <= 0))
         {
@@ -71,6 +109,16 @@ public sealed class DeviceCommandProfile
         }
 
         return command;
+    }
+
+    public DeviceCommandProfile WithCommand(string commandId, string command)
+    {
+        var selected = GetRequiredCommand(commandId).WithCommand(command);
+        return new DeviceCommandProfile(
+            Model,
+            Telnet,
+            _commands.Values.Select(item =>
+                string.Equals(item.Id, commandId, StringComparison.OrdinalIgnoreCase) ? selected : item));
     }
 
     private static bool IsSafeReadOnlyCommand(string command)

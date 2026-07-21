@@ -303,6 +303,18 @@ public sealed class AgentApiTests
         Assert.Equal("24", device.GetProperty("uplinkPort").GetString());
         Assert.Equal(4, device.GetProperty("capabilities").GetArrayLength());
         Assert.Equal(2, device.GetProperty("collections").GetArrayLength());
+        var capabilities = device.GetProperty("capabilities").EnumerateArray().ToArray();
+        var versionCapability = capabilities.Single(item =>
+            item.GetProperty("commandId").GetString() == "version");
+        Assert.Equal("show version", versionCapability.GetProperty("primaryCli").GetString());
+        Assert.Equal("show version", versionCapability.GetProperty("selectedCli").GetString());
+        Assert.Equal("show version", versionCapability.GetProperty("lastSuccessfulCli").GetString());
+        var portCapability = capabilities.Single(item =>
+            item.GetProperty("commandId").GetString() == "interface_status");
+        Assert.Equal("show port status", portCapability.GetProperty("primaryCli").GetString());
+        Assert.Equal(
+            ["show port status", "show interfaces status"],
+            portCapability.GetProperty("candidateClis").EnumerateArray().Select(item => item.GetString()!).ToArray());
 
         using var recent = await host.Client.GetAsync("/api/v3/events/recent?limit=10");
         recent.EnsureSuccessStatusCode();

@@ -38,7 +38,63 @@ public sealed record CollectorCapabilityDto(
     string CommandId,
     bool Supported,
     string State,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? PrimaryCli = null,
+    string? SelectedCli = null,
+    IReadOnlyList<string>? CandidateClis = null,
+    string? LastSuccessfulCli = null)
+{
+    public string DisplayName => CommandId switch
+    {
+        "interface_status" => "포트 상태",
+        "log_ram" => "시스템 로그",
+        "system" => "장비 상태",
+        "version" => "버전 정보",
+        _ => CommandId
+    };
+
+    public bool UsingFallback => Supported &&
+        !string.IsNullOrWhiteSpace(PrimaryCli) &&
+        !string.IsNullOrWhiteSpace(SelectedCli) &&
+        !string.Equals(PrimaryCli, SelectedCli, StringComparison.OrdinalIgnoreCase);
+
+    public string StateText
+    {
+        get
+        {
+            var errorSuffix = string.IsNullOrWhiteSpace(ErrorCode) ? string.Empty : $" · {ErrorCode}";
+            if (!Supported || string.Equals(State, "Unsupported", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"미지원{errorSuffix}";
+            }
+            if (string.Equals(State, "Initializing", StringComparison.OrdinalIgnoreCase))
+            {
+                return "확인 중";
+            }
+            if (string.Equals(State, "Degraded", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"경고{errorSuffix}";
+            }
+            if (string.Equals(State, "Failed", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(State, "AuthBlocked", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"장애{errorSuffix}";
+            }
+
+            return UsingFallback ? "정상 · 대체 명령 사용" : "정상 · 우선 명령 사용";
+        }
+    }
+
+    public string SelectedCommandText => !string.IsNullOrWhiteSpace(SelectedCli)
+        ? SelectedCli
+        : !string.IsNullOrWhiteSpace(LastSuccessfulCli)
+            ? $"마지막 성공: {LastSuccessfulCli}"
+            : PrimaryCli ?? "명령 확인 중";
+
+    public string FallbackText => CandidateClis is { Count: > 1 }
+        ? $"대체: {string.Join(" → ", CandidateClis.Skip(1))}"
+        : "등록된 대체 명령 없음";
+}
 
 public sealed record OperationalStatusDto(
     string Code,

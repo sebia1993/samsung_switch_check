@@ -313,13 +313,51 @@
                         </TabItem>
                         <TabItem Header="수집기 _건강">
                             <Grid Margin="8,12,8,8">
-                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
                                 <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                                     <TextBlock Text="구조화된 상태와 이벤트만 수신합니다. Telnet 원문·자격 증명은 Agent PC에만 남습니다."
                                                Foreground="#1E40AF" />
                                 </Border>
-                                <ListBox Grid.Row="1" ItemsSource="{Binding OperationalStatuses}" BorderThickness="0"
-                                         Background="Transparent" AutomationProperties.Name="Agent API SignalR DB 인증서 수집기 상태" />
+                                <TextBlock Grid.Row="1" Text="장비별 명령 자동 선택" FontWeight="SemiBold" Margin="2,0,0,8"/>
+                                <ListBox Grid.Row="2" ItemsSource="{Binding SelectedDevice.Capabilities}" BorderThickness="0"
+                                         Background="Transparent" MaxHeight="210"
+                                         AutomationProperties.Name="선택 장비 명령 지원 및 대체 상태">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,9">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="120"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                                                    <StackPanel Grid.Column="1">
+                                                        <TextBlock Text="{Binding SelectedCommandText}" FontFamily="Roboto Mono, Consolas" FontSize="11"/>
+                                                        <TextBlock Text="{Binding FallbackText}" Margin="0,3,0,0" FontSize="10"
+                                                                   Foreground="{StaticResource MutedTextBrush}"/>
+                                                    </StackPanel>
+                                                    <TextBlock Grid.Column="2" Text="{Binding StateText}" Margin="12,0,0,0" FontSize="11"
+                                                               Foreground="{StaticResource MutedTextBrush}"/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                                <ListBox Grid.Row="3" Margin="0,12,0,0" ItemsSource="{Binding OperationalStatuses}" BorderThickness="0"
+                                         Background="Transparent" AutomationProperties.Name="Agent API SignalR DB 인증서 수집기 상태">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                            <Setter Property="Padding" Value="0"/>
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                </ListBox>
                             </Grid>
                         </TabItem>
                     </TabControl>

@@ -1,3 +1,5 @@
+using SamsungSwitchWatch.Core.Diagnostics;
+
 namespace SamsungSwitchWatch.Core.Telnet;
 
 public sealed record TelnetEndpoint(string Host, int Port = 23);
@@ -44,7 +46,7 @@ public sealed record TelnetTimeouts(
         TimeSpan.FromSeconds(2))
     {
         Write = TimeSpan.FromSeconds(5),
-        Session = TimeSpan.FromMinutes(3)
+        Session = TimeSpan.FromMinutes(4)
     };
 }
 
@@ -56,6 +58,12 @@ public sealed record TelnetClientOptions(
     int MaximumWireBytes = 2 * 1024 * 1024,
     int DetectionWindowCharacters = 16 * 1024)
 {
+    public TimeSpan SessionSafetyMargin { get; init; } = TimeSpan.FromSeconds(15);
+
+    public int SessionCloseRetryCount { get; init; } = 1;
+
+    public TimeSpan SessionCloseRetryDelay { get; init; } = TimeSpan.FromSeconds(2);
+
     public static TelnetClientOptions Default { get; } = new(TelnetTimeouts.Default);
 }
 
@@ -70,4 +78,39 @@ public sealed record TelnetSessionResult(
     string Model,
     IReadOnlyList<CommandOutput> Outputs,
     DateTimeOffset StartedAt,
-    DateTimeOffset CompletedAt);
+    DateTimeOffset CompletedAt)
+{
+    public int SessionCount { get; init; } = 1;
+
+    public int ReconnectCount { get; init; }
+}
+
+/// <summary>
+/// A sanitized partial-result failure. It contains registered command IDs and
+/// completed command output only; endpoint and credential values are excluded.
+/// </summary>
+public sealed class TelnetExecutionException : SwitchWatchException
+{
+    public TelnetExecutionException(
+        DiagnosticError error,
+        IReadOnlyList<CommandOutput> completedOutputs,
+        IReadOnlyList<string> remainingCommandIds,
+        int sessionCount,
+        int reconnectCount,
+        Exception? innerException = null)
+        : base(error, innerException)
+    {
+        CompletedOutputs = completedOutputs;
+        RemainingCommandIds = remainingCommandIds;
+        SessionCount = sessionCount;
+        ReconnectCount = reconnectCount;
+    }
+
+    public IReadOnlyList<CommandOutput> CompletedOutputs { get; }
+
+    public IReadOnlyList<string> RemainingCommandIds { get; }
+
+    public int SessionCount { get; }
+
+    public int ReconnectCount { get; }
+}

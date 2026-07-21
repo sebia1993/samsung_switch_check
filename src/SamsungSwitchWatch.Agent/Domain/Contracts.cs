@@ -11,6 +11,7 @@ public static class AgentErrorCodes
     public const string AuthFailed = "AUTH_FAILED";
     public const string CommandTimeout = "COMMAND_TIMEOUT";
     public const string PromptParseFailed = "PROMPT_PARSE_FAILED";
+    public const string TelnetSessionClosed = "TELNET_SESSION_CLOSED";
     public const string OutputLimitExceeded = "OUTPUT_LIMIT_EXCEEDED";
     public const string IncompleteOutput = "INCOMPLETE_OUTPUT";
     public const string ParserUnsupported = "PARSER_UNSUPPORTED";

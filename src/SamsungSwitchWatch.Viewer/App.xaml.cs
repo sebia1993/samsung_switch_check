@@ -16,6 +16,7 @@ public partial class App : Application
     private TrayIconService? _trayIcon;
     private AlertPopupService? _alertService;
     private SingleInstanceCoordinator? _singleInstance;
+    private ConnectionSettingsWindow? _connectionDialog;
     private readonly CancellationTokenSource _lifetime = new();
     private bool _exiting;
 
@@ -43,7 +44,9 @@ public partial class App : Application
         _alertService = new AlertPopupService(OpenAlert, _trayIcon);
         _viewModel.AlertRaised += OnAlertRaised;
 
-        var needsPairing = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.NeedsPairing or ViewerSettingsLoadStatus.Corrupt
+        var needsPairing = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.Missing
+                or ViewerSettingsLoadStatus.NeedsPairing
+                or ViewerSettingsLoadStatus.Corrupt
                            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
         if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing))
         {
@@ -107,19 +110,44 @@ public partial class App : Application
         _miniWindow.Activate();
     }
 
-    public async void OpenConnectionSettings()
+    public void OpenConnectionSettings()
     {
-        if (_viewModel is null || _mainWindow is null) return;
-        var dialog = new ConnectionSettingsWindow(_viewModel.CurrentSettings) { Owner = _mainWindow };
-        if (dialog.ShowDialog() != true || dialog.Result is null) return;
+        if (_viewModel is null || _mainWindow is null || _settingsStore is null) return;
+        if (_connectionDialog is { IsVisible: true } existing)
+        {
+            if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
+            existing.Activate();
+            return;
+        }
+
+        var dialog = new ConnectionSettingsWindow(_viewModel.CurrentSettings, PersistAndSwitchClientAsync)
+        {
+            Owner = _mainWindow
+        };
+        _connectionDialog = dialog;
         try
         {
-            await _viewModel.SwitchClientAsync(dialog.Result, _lifetime.Token);
+            dialog.ShowDialog();
         }
-        catch
+        finally
         {
-            MessageBox.Show(_mainWindow, "연결 설정을 적용하지 못했습니다. 주소, 인증서 지문, 토큰을 확인하세요.", "Samsung Switch Watch", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (ReferenceEquals(_connectionDialog, dialog)) _connectionDialog = null;
         }
+    }
+
+    private async Task PersistAndSwitchClientAsync(ViewerSettings settings, CancellationToken cancellationToken)
+    {
+        if (_settingsStore is null || _viewModel is null) return;
+
+        // A pairing code is consumed when the Agent issues its bearer token. Protect the
+        // candidate with DPAPI before network preflight so a transient failure cannot
+        // orphan the token or consume the Agent's Viewer-token limit invisibly.
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        await ViewerConnectionApply.PersistThenSwitchAsync(
+            settings,
+            _settingsStore.Save,
+            _viewModel.SwitchClientAsync,
+            linked.Token);
     }
 
     public void RestoreMainWindowBounds(MainWindow window)

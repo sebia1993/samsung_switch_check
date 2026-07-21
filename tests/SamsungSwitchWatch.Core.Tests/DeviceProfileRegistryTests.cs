@@ -34,11 +34,67 @@ public sealed class DeviceProfileRegistryTests
                 profile.Commands.Select(command => command.Id).Order(StringComparer.OrdinalIgnoreCase));
             Assert.All(profile.Commands, command =>
             {
-                Assert.StartsWith("show ", command.Command, StringComparison.OrdinalIgnoreCase);
-                Assert.DoesNotContain(';', command.Command);
-                Assert.DoesNotContain('|', command.Command);
+                Assert.All(command.CandidateCommands, candidate =>
+                {
+                    Assert.StartsWith("show ", candidate, StringComparison.OrdinalIgnoreCase);
+                    Assert.DoesNotContain(';', candidate);
+                    Assert.DoesNotContain('|', candidate);
+                });
             });
         }
+    }
+
+    [Fact]
+    public void OperationalCollectorsPreferRequestedCommandsAndKeepCompatibleIds()
+    {
+        foreach (var model in CreateRegistry().Models)
+        {
+            var profile = CreateRegistry().GetRequired(model);
+            Assert.Equal(
+                ["show port status", "show interfaces status"],
+                profile.GetRequiredCommand(CommandIds.InterfaceStatus).CandidateCommands);
+            Assert.Equal(
+                ["show syslog tail num 100", "show log ram"],
+                profile.GetRequiredCommand(CommandIds.LogRam).CandidateCommands);
+        }
+    }
+
+    [Fact]
+    public void CandidateCommandsAreDeduplicatedAndCanSelectFallbackWithoutChangingContract()
+    {
+        var definition = new ReadOnlyCommandDefinition(
+            CommandIds.InterfaceStatus,
+            "포트 상태",
+            "show port status",
+            TimeSpan.FromSeconds(60),
+            60,
+            ["SHOW PORT STATUS", "show interfaces status"]);
+
+        Assert.Equal(["show port status", "show interfaces status"], definition.CandidateCommands);
+
+        var selected = definition.WithCommand("SHOW INTERFACES STATUS");
+        Assert.Equal(CommandIds.InterfaceStatus, selected.Id);
+        Assert.Equal("포트 상태", selected.DisplayName);
+        Assert.Equal(TimeSpan.FromSeconds(60), selected.Timeout);
+        Assert.Equal(60, selected.DefaultIntervalSeconds);
+        Assert.Equal("show interfaces status", selected.Command);
+    }
+
+    [Fact]
+    public void ProfileRejectsUnsafeFallbackCommand()
+    {
+        var baseProfile = Ies4224GpProfile.Create();
+
+        Assert.Throws<ArgumentException>(() => new DeviceCommandProfile(
+            baseProfile.Model,
+            baseProfile.Telnet,
+            [new ReadOnlyCommandDefinition(
+                CommandIds.InterfaceStatus,
+                "포트 상태",
+                "show port status",
+                TimeSpan.FromSeconds(60),
+                60,
+                ["show interfaces status; reload"])]));
     }
 
     private static DeviceProfileRegistry CreateRegistry() => new(

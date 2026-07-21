@@ -43,6 +43,16 @@ Viewer 설정의 Bearer 토큰은 현재 Windows 사용자 DPAPI로 보호합니
 
 ## 페어링과 토큰
 
+- Agent의 `new-viewer-pairing.ps1`은 `SSW1:` 문자열에 Agent 주소, 공개 인증서 지문,
+  일회용 코드와 만료 시각만 넣으며 최종 Bearer 토큰은 넣지 않습니다.
+- Viewer는 연결 문자열에 포함된 pin으로 최초 HTTPS 응답을 검증한 뒤에만 코드를 교환합니다.
+  원격 Agent 응답에서 받은 새 지문을 자동 신뢰하지 않습니다.
+- 최종 토큰은 Viewer 내부에서 바로 DPAPI로 보호하며 기본 화면이나 로그에 표시하지 않습니다.
+- 토큰 발급 뒤 HTTPS 사전 점검이 실패해도 DPAPI 저장을 먼저 완료하고 같은 창에서 재시도하여
+  일회용 코드 재소비와 보이지 않는 토큰 한도 소진을 방지합니다.
+- 페어링 HTTP는 redirect와 시스템 proxy를 사용하지 않고 연결 문자열의 Agent endpoint에만
+  직접 전송하며, 성공 응답은 크기와 JSON 필드 집합을 제한합니다.
+- 연결 문자열 생성 CLI는 Kestrel 인증서를 로드하지 않으므로 PFX 비밀번호를 읽지 않습니다.
 - 일회용 페어링 코드는 기본 10분 뒤 만료되고 한 번만 소비됩니다.
 - 코드 소비와 토큰 저장은 같은 DB 트랜잭션입니다.
 - Viewer 토큰은 최대 5개, 절대 180일, 마지막 사용 후 60일이 기본입니다.
@@ -56,7 +66,7 @@ SamsungSwitchWatch.Agent.exe token revoke <16자리-token-id>
 SamsungSwitchWatch.Agent.exe token rotate <16자리-token-id>
 ```
 
-교체 명령이 표시하는 새 토큰은 한 번만 보관하고 Viewer 설정에 즉시 적용하십시오.
+교체 명령이 표시하는 새 토큰은 복구용 고급 설정에 즉시 적용하고 화면이나 파일에 남기지 마십시오.
 
 ## 인증서와 pin
 
@@ -83,7 +93,8 @@ SamsungSwitchWatch.Agent.exe token rotate <16자리-token-id>
 
 ## POC 공급망 제한
 
-`-poc` 패키지는 코드 서명 인증서가 없으면 서명되지 않습니다. 공식 GitHub Release에서만
-받고 `SHA256SUMS.txt`, 빌드 매니페스트, SPDX/CycloneDX SBOM과 provenance attestation을
-확인하십시오. 실제 운영 전에는 사내 코드 서명, 신뢰 가능한 서버 인증서, 3모델 실제
-펌웨어 검증과 장시간 soak test가 별도로 필요합니다.
+`-poc` 패키지는 코드 서명 인증서가 없으면 서명되지 않습니다. 공식 GitHub Release의
+Agent·Viewer ZIP만 받고 각 ZIP의 build provenance와 release attestation을 확인하십시오.
+패키지 내부의 빌드 매니페스트와 SPDX/CycloneDX SBOM도 함께 확인할 수 있습니다. 실제 운영
+전에는 사내 코드 서명, 신뢰 가능한 서버 인증서, 3모델 실제 펌웨어 검증과 장시간 soak
+test가 별도로 필요합니다.

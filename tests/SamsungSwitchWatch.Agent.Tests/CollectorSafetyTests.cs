@@ -8,6 +8,7 @@ using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
 using SamsungSwitchWatch.Agent.Security;
+using SamsungSwitchWatch.Core.Diagnostics;
 using SamsungSwitchWatch.Core.Profiles;
 using SamsungSwitchWatch.Core.Telnet;
 
@@ -131,6 +132,158 @@ public sealed class CollectorSafetyTests
         Assert.Equal("OK", outputs.Single(output => output.CommandId == CommandIds.Version).CollectorStatus);
         Assert.Equal(AgentErrorCodes.ParserUnsupported,
             outputs.Single(output => output.CommandId == CommandIds.System).CollectorStatus);
+    }
+
+    [Fact]
+    public async Task CoreCollectorFallsBackAndReusesWorkingCommandForDevice()
+    {
+        var telnet = new CapabilityFallbackTelnetClient();
+        var collector = new CoreTelnetDeviceCollector(
+            telnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault());
+        var device = new SwitchOptions { Id = "TEST-SW-01", UplinkPort = "24" };
+        var commands = new[] { CommandCatalog.Registered[CommandIds.InterfaceStatus] };
+
+        var first = Assert.Single(await collector.CollectBatchAsync(device, commands, CancellationToken.None));
+        var second = Assert.Single(await collector.CollectBatchAsync(device, commands, CancellationToken.None));
+
+        Assert.Equal("OK", first.CollectorStatus);
+        Assert.Equal("show interfaces status", first.Structured["collectorCli"]?.GetValue<string>());
+        Assert.Equal("OK", second.CollectorStatus);
+        Assert.Equal(
+            ["show port status", "show interfaces status", "show interfaces status"],
+            telnet.Commands);
+    }
+
+    [Fact]
+    public async Task CoreCollectorFallsBackForSyslogAndReusesWorkingCommandForDevice()
+    {
+        var telnet = new LogCapabilityFallbackTelnetClient();
+        var collector = new CoreTelnetDeviceCollector(
+            telnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault());
+        var device = new SwitchOptions { Id = "TEST-SW-01", UplinkPort = "24" };
+        var commands = new[] { CommandCatalog.Registered[CommandIds.LogRam] };
+
+        var first = Assert.Single(await collector.CollectBatchAsync(device, commands, CancellationToken.None));
+        var second = Assert.Single(await collector.CollectBatchAsync(device, commands, CancellationToken.None));
+
+        Assert.Equal("OK", first.CollectorStatus);
+        Assert.Equal("show log ram", first.Structured["collectorCli"]?.GetValue<string>());
+        Assert.Equal("OK", second.CollectorStatus);
+        Assert.Equal(
+            ["show syslog tail num 100", "show log ram", "show log ram"],
+            telnet.Commands);
+    }
+
+    [Fact]
+    public async Task CoreCollectorFallsBackIndependentlyWhenBothPrimaryCommandsAreUnsupported()
+    {
+        var telnet = new BatchCapabilityFallbackTelnetClient();
+        var collector = new CoreTelnetDeviceCollector(
+            telnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault());
+        var commands = new[]
+        {
+            CommandCatalog.Registered[CommandIds.InterfaceStatus],
+            CommandCatalog.Registered[CommandIds.LogRam]
+        };
+
+        var outputs = await collector.CollectBatchAsync(
+            new SwitchOptions { Id = "TEST-SW-01", UplinkPort = "24" },
+            commands,
+            CancellationToken.None);
+
+        Assert.All(outputs, output => Assert.Equal("OK", output.CollectorStatus));
+        Assert.Equal(3, telnet.Batches.Count);
+        Assert.Equal(
+            ["show port status", "show syslog tail num 100"],
+            telnet.Batches[0]);
+        Assert.Equal(["show interfaces status"], telnet.Batches[1]);
+        Assert.Equal(["show log ram"], telnet.Batches[2]);
+    }
+
+    [Fact]
+    public async Task CoreCollectorRestoresWorkingCommandFromPersistedSnapshot()
+    {
+        await using var host = await TestAgentHost.StartAsync();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        var device = new SwitchOptions { Id = "TEST-SW-01", UplinkPort = "24" };
+        var command = CommandCatalog.Registered[CommandIds.InterfaceStatus];
+        var firstTelnet = new CapabilityFallbackTelnetClient();
+        var firstCollector = new CoreTelnetDeviceCollector(
+            firstTelnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault(),
+            store);
+        var first = Assert.Single(await firstCollector.CollectBatchAsync(
+            device, [command], CancellationToken.None));
+        await store.UpsertSnapshotAsync(new DeviceSnapshot(
+            device.Id,
+            command.Id,
+            first.CapturedUtc,
+            first.Structured));
+
+        var restoredTelnet = new CapabilityFallbackTelnetClient();
+        var restoredCollector = new CoreTelnetDeviceCollector(
+            restoredTelnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault(),
+            store);
+        var restored = Assert.Single(await restoredCollector.CollectBatchAsync(
+            device, [command], CancellationToken.None));
+
+        Assert.Equal("OK", restored.CollectorStatus);
+        Assert.Equal(["show interfaces status"], restoredTelnet.Commands);
+    }
+
+    [Fact]
+    public async Task CoreCollectorInvalidatesPersistedSelectionWhenCandidatePriorityChanges()
+    {
+        await using var host = await TestAgentHost.StartAsync();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        var device = new SwitchOptions { Id = "TEST-SW-01", UplinkPort = "24" };
+        var command = CommandCatalog.Registered[CommandIds.InterfaceStatus];
+        var baseProfile = Ies4224GpProfile.Create();
+        var reversedDefinition = baseProfile.GetRequiredCommand(CommandIds.InterfaceStatus)
+            .WithCommand("show interfaces status");
+        var reversedProfile = new DeviceCommandProfile(
+            baseProfile.Model,
+            baseProfile.Telnet,
+            baseProfile.Commands.Select(definition =>
+                string.Equals(definition.Id, CommandIds.InterfaceStatus, StringComparison.OrdinalIgnoreCase)
+                    ? reversedDefinition
+                    : definition));
+        var firstTelnet = new CapabilityFallbackTelnetClient();
+        var firstCollector = new CoreTelnetDeviceCollector(
+            firstTelnet,
+            new DeviceProfileRegistry([reversedProfile]),
+            new StaticCredentialVault(),
+            store);
+        var first = Assert.Single(await firstCollector.CollectBatchAsync(
+            device, [command], CancellationToken.None));
+        await store.UpsertSnapshotAsync(new DeviceSnapshot(
+            device.Id,
+            command.Id,
+            first.CapturedUtc,
+            first.Structured));
+
+        var restoredTelnet = new CapabilityFallbackTelnetClient();
+        var restoredCollector = new CoreTelnetDeviceCollector(
+            restoredTelnet,
+            CreateProfileRegistry(),
+            new StaticCredentialVault(),
+            store);
+        var restored = Assert.Single(await restoredCollector.CollectBatchAsync(
+            device, [command], CancellationToken.None));
+
+        Assert.Equal("OK", restored.CollectorStatus);
+        Assert.Equal(
+            ["show port status", "show interfaces status"],
+            restoredTelnet.Commands);
     }
 
     [Fact]
@@ -404,6 +557,93 @@ public sealed class CollectorSafetyTests
         Assert.Equal(TimeSpan.FromSeconds(60), PollBackoffPolicy.ForError(AgentErrorCodes.IncompleteOutput, 3));
     }
 
+    [Fact]
+    public async Task CoreCollectorPreservesCompletedOutputAndMarksOnlyRemainingCommandFailed()
+    {
+        var collector = new CoreTelnetDeviceCollector(
+            new PartialFailureTelnetClient(),
+            CreateProfileRegistry(),
+            new StaticCredentialVault());
+
+        var outputs = await collector.CollectBatchAsync(
+            new SwitchOptions(),
+            [CommandCatalog.Registered[CommandIds.Version], CommandCatalog.Registered[CommandIds.System]],
+            CancellationToken.None);
+
+        Assert.Equal("OK", outputs.Single(output => output.CommandId == CommandIds.Version).CollectorStatus);
+        Assert.Equal(AgentErrorCodes.TelnetSessionClosed,
+            outputs.Single(output => output.CommandId == CommandIds.System).CollectorStatus);
+    }
+
+    [Theory]
+    [InlineData(119, 1, 2)]
+    [InlineData(241, 1, 2)]
+    [InlineData(240, 2, 2)]
+    [InlineData(240, 1, 0)]
+    [InlineData(240, 1, 11)]
+    public void AgentOptionsRejectUnsafeTelnetSessionRecoverySettings(
+        int maxSessionSeconds,
+        int retryCount,
+        int retryDelaySeconds)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"ssw-telnet-options-{Guid.NewGuid():N}");
+        var options = new AgentOptions
+        {
+            DataDirectory = Path.Combine(folder, "data"),
+            Switches = [new SwitchOptions()],
+            Telnet = new TelnetSessionOptions
+            {
+                MaxSessionSeconds = maxSessionSeconds,
+                ImmediateSessionCloseRetryCount = retryCount,
+                ImmediateSessionCloseRetryDelaySeconds = retryDelaySeconds
+            }
+        };
+
+        try
+        {
+            var exception = Assert.Throws<AgentConfigurationException>(() =>
+                AgentOptionsValidator.ValidateAndNormalize(options, folder));
+            Assert.Equal("CONFIG_INVALID", exception.Code);
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void AgentOptionsAllowMaximumTelnetSessionOf240Seconds()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"ssw-telnet-options-{Guid.NewGuid():N}");
+        var options = new AgentOptions
+        {
+            DataDirectory = Path.Combine(folder, "data"),
+            Switches = [new SwitchOptions()],
+            Telnet = new TelnetSessionOptions
+            {
+                MaxSessionSeconds = 240,
+                ImmediateSessionCloseRetryCount = 1,
+                ImmediateSessionCloseRetryDelaySeconds = 2
+            }
+        };
+
+        try
+        {
+            AgentOptionsValidator.ValidateAndNormalize(options, folder);
+            Assert.Equal(240, options.Telnet.MaxSessionSeconds);
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+    }
+
     private sealed class StaticTelnetClient(TelnetSessionResult result) : ITelnetClient
     {
         public Task<TelnetSessionResult> ExecuteRegisteredAsync(
@@ -412,6 +652,122 @@ public sealed class CollectorSafetyTests
             DeviceCommandProfile profile,
             IReadOnlyCollection<string> commandIds,
             CancellationToken cancellationToken = default) => Task.FromResult(result);
+    }
+
+    private sealed class PartialFailureTelnetClient : ITelnetClient
+    {
+        public Task<TelnetSessionResult> ExecuteRegisteredAsync(
+            TelnetEndpoint endpoint,
+            TelnetCredentials credentials,
+            DeviceCommandProfile profile,
+            IReadOnlyCollection<string> commandIds,
+            CancellationToken cancellationToken = default)
+        {
+            var captured = DateTimeOffset.UtcNow;
+            var output = new CommandOutput(
+                CommandIds.Version,
+                profile.GetRequiredCommand(CommandIds.Version).Command,
+                "Model Name : IES4224GP\nSoftware Version : TEST",
+                "Model Name : IES4224GP\nSoftware Version : TEST",
+                captured);
+            return Task.FromException<TelnetSessionResult>(new TelnetExecutionException(
+                new DiagnosticError(
+                    ErrorCodes.TelnetSessionClosed,
+                    "command",
+                    "The switch closed the Telnet session before a valid prompt was received.",
+                    IsRetryable: true),
+                [output],
+                [CommandIds.System],
+                sessionCount: 2,
+                reconnectCount: 1));
+        }
+    }
+
+    private sealed class CapabilityFallbackTelnetClient : ITelnetClient
+    {
+        public List<string> Commands { get; } = [];
+
+        public Task<TelnetSessionResult> ExecuteRegisteredAsync(
+            TelnetEndpoint endpoint,
+            TelnetCredentials credentials,
+            DeviceCommandProfile profile,
+            IReadOnlyCollection<string> commandIds,
+            CancellationToken cancellationToken = default)
+        {
+            var commandId = Assert.Single(commandIds);
+            var command = profile.GetRequiredCommand(commandId).Command;
+            Commands.Add(command);
+            var captured = DateTimeOffset.UtcNow;
+            var output = string.Equals(command, "show port status", StringComparison.OrdinalIgnoreCase)
+                ? "% Invalid input detected at marker."
+                : "Port Admin Link Speed Duplex\n1 Enabled Up 1000M Full\n24 Enabled Up 1000M Full";
+            return Task.FromResult(new TelnetSessionResult(
+                profile.Model,
+                [new CommandOutput(commandId, command, output, output, captured)],
+                captured.AddMilliseconds(-10),
+                captured));
+        }
+    }
+
+    private sealed class LogCapabilityFallbackTelnetClient : ITelnetClient
+    {
+        public List<string> Commands { get; } = [];
+
+        public Task<TelnetSessionResult> ExecuteRegisteredAsync(
+            TelnetEndpoint endpoint,
+            TelnetCredentials credentials,
+            DeviceCommandProfile profile,
+            IReadOnlyCollection<string> commandIds,
+            CancellationToken cancellationToken = default)
+        {
+            var commandId = Assert.Single(commandIds);
+            var command = profile.GetRequiredCommand(commandId).Command;
+            Commands.Add(command);
+            var captured = DateTimeOffset.UtcNow;
+            var output = string.Equals(command, "show syslog tail num 100", StringComparison.OrdinalIgnoreCase)
+                ? "% Invalid input detected at marker."
+                : "[1] 00:01:00 2026-07-20\n\"Sanitized log\"\nlevel: 6, module: 6, function: 1, and event no.: 1";
+            return Task.FromResult(new TelnetSessionResult(
+                profile.Model,
+                [new CommandOutput(commandId, command, output, output, captured)],
+                captured.AddMilliseconds(-10),
+                captured));
+        }
+    }
+
+    private sealed class BatchCapabilityFallbackTelnetClient : ITelnetClient
+    {
+        public List<IReadOnlyList<string>> Batches { get; } = [];
+
+        public Task<TelnetSessionResult> ExecuteRegisteredAsync(
+            TelnetEndpoint endpoint,
+            TelnetCredentials credentials,
+            DeviceCommandProfile profile,
+            IReadOnlyCollection<string> commandIds,
+            CancellationToken cancellationToken = default)
+        {
+            var captured = DateTimeOffset.UtcNow;
+            var commands = commandIds.Select(commandId => profile.GetRequiredCommand(commandId).Command).ToArray();
+            Batches.Add(commands);
+            var outputs = commandIds.Select(commandId =>
+            {
+                var command = profile.GetRequiredCommand(commandId).Command;
+                var text = (commandId, command) switch
+                {
+                    (CommandIds.InterfaceStatus, "show interfaces status") =>
+                        "Port Admin Link Speed Duplex\n1 Enabled Up 1000M Full\n24 Enabled Up 1000M Full",
+                    (CommandIds.LogRam, "show log ram") =>
+                        "[1] 00:01:00 2026-07-20\n\"Sanitized log\"\nlevel: 6, module: 6, function: 1, and event no.: 1",
+                    _ => "% Invalid input detected at marker."
+                };
+                return new CommandOutput(commandId, command, text, text, captured);
+            }).ToArray();
+            return Task.FromResult(new TelnetSessionResult(
+                profile.Model,
+                outputs,
+                captured.AddMilliseconds(-10),
+                captured));
+        }
     }
 
     private sealed class StaticCredentialVault : ICredentialVault

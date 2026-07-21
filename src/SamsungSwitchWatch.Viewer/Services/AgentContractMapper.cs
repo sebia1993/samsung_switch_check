@@ -483,11 +483,25 @@ public static class AgentContractMapper
             {
                 var commandId = StringValue(capability, "commandId");
                 if (string.IsNullOrWhiteSpace(commandId)) continue;
+                var candidates = capability.TryGetProperty("candidateClis", out var candidateItems)
+                                 && candidateItems.ValueKind == JsonValueKind.Array
+                    ? candidateItems.EnumerateArray()
+                        .Where(item => item.ValueKind == JsonValueKind.String)
+                        .Select(item => item.GetString())
+                        .Where(item => !string.IsNullOrWhiteSpace(item))
+                        .Cast<string>()
+                        .Take(8)
+                        .ToArray()
+                    : [];
                 capabilities.Add(new CollectorCapabilityDto(
                     commandId,
                     BoolValue(capability, "supported") ?? false,
                     StringValue(capability, "state") ?? "Unknown",
-                    StringValue(capability, "errorCode")));
+                    StringValue(capability, "errorCode"),
+                    StringValue(capability, "primaryCli") ?? StringValue(capability, "cli"),
+                    StringValue(capability, "selectedCli"),
+                    candidates,
+                    StringValue(capability, "lastSuccessfulCli")));
             }
         }
 

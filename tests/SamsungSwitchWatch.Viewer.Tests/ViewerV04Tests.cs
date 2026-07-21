@@ -62,8 +62,8 @@ public sealed class ViewerV04Tests
             "lastCollectionUtc":"2026-07-21T02:59:30Z",
             "collectionHealth":{"state":"Degraded","errorCode":"COMMAND_TIMEOUT"},
             "capabilities":[
-              {"commandId":"version","supported":true,"state":"Healthy"},
-              {"commandId":"log_ram","supported":false,"state":"Unsupported","errorCode":"PARSER_UNSUPPORTED"}
+              {"commandId":"version","supported":true,"state":"Healthy","primaryCli":"show version","selectedCli":"show version","candidateClis":["show version"]},
+              {"commandId":"log_ram","supported":true,"state":"Healthy","primaryCli":"show syslog tail num 100","selectedCli":"show log ram","candidateClis":["show syslog tail num 100","show log ram"]}
             ],
             "collections":[{"commandId":"interface_status","capturedUtc":"2026-07-21T02:59:30Z","data":{"uplinkOperationalUp":true,"portsUp":24,"portsDown":0}}]
           }]
@@ -79,9 +79,52 @@ public sealed class ViewerV04Tests
         var device = Assert.Single(snapshot.Devices);
         Assert.Equal("IES4028XP", device.Model);
         Assert.Equal(2, device.Capabilities?.Count);
+        var fallback = Assert.Single(device.Capabilities!, item => item.CommandId == "log_ram");
+        Assert.True(fallback.UsingFallback);
+        Assert.Equal("show log ram", fallback.SelectedCli);
+        Assert.Contains("대체 명령", fallback.StateText, StringComparison.Ordinal);
         Assert.Equal(DeviceHealth.Warning, device.Health);
         Assert.Contains(snapshot.OperationalStatuses!, item => item.Code == "DB_INTEGRITY_FAILED");
         Assert.Contains(snapshot.OperationalStatuses!, item => item.Code == "CERT_EXPIRING");
+    }
+
+    [Theory]
+    [InlineData("Degraded", "PROMPT_PARSE_FAILED", "경고 · PROMPT_PARSE_FAILED")]
+    [InlineData("Failed", "COMMAND_TIMEOUT", "장애 · COMMAND_TIMEOUT")]
+    [InlineData("AuthBlocked", "AUTH_FAILED", "장애 · AUTH_FAILED")]
+    public void CapabilityStateTextDoesNotReportUnhealthyCollectorAsNormal(
+        string state,
+        string errorCode,
+        string expected)
+    {
+        var capability = new CollectorCapabilityDto(
+            "interface_status",
+            true,
+            state,
+            errorCode,
+            "show port status",
+            "show port status",
+            ["show port status", "show interfaces status"]);
+
+        Assert.Equal(expected, capability.StateText);
+    }
+
+    [Fact]
+    public void FailedCapabilityLabelsLastSuccessfulCommandWithoutCallingItSelected()
+    {
+        var capability = new CollectorCapabilityDto(
+            "log_ram",
+            true,
+            "Failed",
+            "COMMAND_TIMEOUT",
+            "show syslog tail num 100",
+            null,
+            ["show syslog tail num 100", "show log ram"],
+            "show log ram");
+
+        Assert.False(capability.UsingFallback);
+        Assert.Equal("마지막 성공: show log ram", capability.SelectedCommandText);
+        Assert.StartsWith("장애", capability.StateText, StringComparison.Ordinal);
     }
 
     [Fact]

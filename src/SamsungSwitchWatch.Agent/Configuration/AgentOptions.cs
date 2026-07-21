@@ -23,6 +23,7 @@ public sealed class AgentOptions
     public int PairingCodeLifetimeMinutes { get; set; } = 10;
     public string TokenPepper { get; set; } = "change-this-local-secret-before-production";
     public TokenOptions Tokens { get; set; } = new();
+    public TelnetSessionOptions Telnet { get; set; } = new();
     public RetentionOptions Retention { get; set; } = new();
     public HttpsOptions Https { get; set; } = new();
     public List<SwitchOptions> Switches { get; set; } = [];
@@ -50,6 +51,15 @@ public sealed class HttpsOptions
     public DateTimeOffset? PreviousCertificateAcceptUntilUtc { get; set; }
 }
 
+public sealed class TelnetSessionOptions
+{
+    public int MaxSessionSeconds { get; set; } = 240;
+
+    public int ImmediateSessionCloseRetryCount { get; set; } = 1;
+
+    public int ImmediateSessionCloseRetryDelaySeconds { get; set; } = 2;
+}
+
 public sealed class RetentionOptions
 {
     public int RawDays { get; set; } = 7;
@@ -75,7 +85,8 @@ public static class AgentOptionsValidator
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (options.Switches is null || options.Tokens is null || options.Retention is null || options.Https is null ||
+        if (options.Switches is null || options.Tokens is null || options.Telnet is null ||
+            options.Retention is null || options.Https is null ||
             string.IsNullOrEmpty(options.TokenPepper) || options.TokenPepper.Length > 1024)
         {
             throw new AgentConfigurationException("CONFIG_INVALID", "Agent security settings are invalid.");
@@ -103,6 +114,13 @@ public static class AgentOptionsValidator
         {
             throw new AgentConfigurationException("CONFIG_INVALID",
                 "PairingCodeLifetimeMinutes must be between 1 and 60.");
+        }
+
+        if (options.Telnet.MaxSessionSeconds is < 120 or > 240 ||
+            options.Telnet.ImmediateSessionCloseRetryCount is < 0 or > 1 ||
+            options.Telnet.ImmediateSessionCloseRetryDelaySeconds is < 1 or > 10)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", "Telnet session recovery settings are invalid.");
         }
 
         if (options.Tokens.MaximumActiveTokens is < 1 or > TokenOptions.MaximumActiveTokenLimit ||

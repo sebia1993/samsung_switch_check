@@ -40,9 +40,12 @@ public sealed class TelnetClient : ITelnetClient
         var timeouts = _options.Timeouts;
         if (timeouts.Connect <= TimeSpan.Zero || timeouts.LoginPrompt <= TimeSpan.Zero ||
             timeouts.Authentication <= TimeSpan.Zero || timeouts.Logout <= TimeSpan.Zero ||
-            timeouts.Write <= TimeSpan.Zero || timeouts.Session <= TimeSpan.Zero)
+            timeouts.Write <= TimeSpan.Zero || timeouts.Session <= TimeSpan.Zero ||
+            _options.SessionSafetyMargin <= TimeSpan.Zero ||
+            _options.SessionCloseRetryDelay <= TimeSpan.Zero ||
+            _options.SessionCloseRetryCount is < 0 or > 1)
         {
-            throw new ArgumentOutOfRangeException(nameof(options), "Telnet timeouts must be positive.");
+            throw new ArgumentOutOfRangeException(nameof(options), "Telnet timeout or retry settings are outside the supported safety range.");
         }
     }
 
@@ -73,10 +76,87 @@ public sealed class TelnetClient : ITelnetClient
 
         var commands = commandIds.Select(profile.GetRequiredCommand).DistinctBy(static item => item.Id).ToArray();
         var startedAt = _timeProvider.GetUtcNow();
+        var outputs = new List<CommandOutput>(commands.Length);
+        var sessionCount = 0;
+        var reconnectCount = 0;
+
+        foreach (var batch in PlanCommandBatches(commands))
+        {
+            IReadOnlyList<ReadOnlyCommandDefinition> remaining = batch;
+            var closeRetries = 0;
+            while (remaining.Count > 0)
+            {
+                sessionCount++;
+                try
+                {
+                    var attempt = await ExecuteSessionAttemptAsync(
+                            endpoint,
+                            credentials,
+                            profile.Telnet,
+                            remaining,
+                            CalculateSessionBudget(remaining),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    outputs.AddRange(attempt);
+                    remaining = [];
+                }
+                catch (TelnetAttemptException exception)
+                {
+                    outputs.AddRange(exception.CompletedOutputs);
+                    remaining = remaining.Skip(exception.CompletedOutputs.Count).ToArray();
+                    if (string.Equals(exception.Failure.Error.Code, ErrorCodes.TelnetSessionClosed,
+                            StringComparison.Ordinal) &&
+                        string.Equals(exception.Failure.Error.Stage, "command",
+                            StringComparison.Ordinal) &&
+                        remaining.Count > 0 && closeRetries < _options.SessionCloseRetryCount)
+                    {
+                        closeRetries++;
+                        reconnectCount++;
+                        await Task.Delay(_options.SessionCloseRetryDelay, _timeProvider, cancellationToken)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var completedIds = outputs.Select(static output => output.CommandId)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var remainingIds = commands.Where(command => !completedIds.Contains(command.Id))
+                        .Select(static command => command.Id)
+                        .ToArray();
+                    if (outputs.Count == 0)
+                    {
+                        throw exception.Failure;
+                    }
+                    throw new TelnetExecutionException(
+                        exception.Failure.Error,
+                        outputs.ToArray(),
+                        remainingIds,
+                        sessionCount,
+                        reconnectCount,
+                        exception.Failure);
+                }
+            }
+        }
+
+        return new TelnetSessionResult(profile.Model, outputs, startedAt, _timeProvider.GetUtcNow())
+        {
+            SessionCount = sessionCount,
+            ReconnectCount = reconnectCount
+        };
+    }
+
+    private async Task<IReadOnlyList<CommandOutput>> ExecuteSessionAttemptAsync(
+        TelnetEndpoint endpoint,
+        TelnetCredentials credentials,
+        TelnetPromptProfile promptProfile,
+        IReadOnlyList<ReadOnlyCommandDefinition> commands,
+        TimeSpan sessionBudget,
+        CancellationToken cancellationToken)
+    {
         await using var transport = _transportFactory.Create();
         var negotiator = new TelnetNegotiator();
         var authenticated = false;
-        using var sessionCancellation = CreateStageCancellation(cancellationToken, _options.Timeouts.Session);
+        var outputs = new List<CommandOutput>(commands.Count);
+        using var sessionCancellation = CreateStageCancellation(cancellationToken, sessionBudget);
         var sessionToken = sessionCancellation.Token;
 
         try
@@ -86,12 +166,11 @@ public sealed class TelnetClient : ITelnetClient
                     transport,
                     negotiator,
                     credentials,
-                    profile.Telnet,
+                    promptProfile,
                     sessionToken)
                 .ConfigureAwait(false);
             authenticated = true;
 
-            var outputs = new List<CommandOutput>(commands.Length);
             foreach (var command in commands)
             {
                 sessionToken.ThrowIfCancellationRequested();
@@ -107,8 +186,8 @@ public sealed class TelnetClient : ITelnetClient
                         negotiator,
                         [devicePromptPattern],
                         [],
-                        profile.Telnet.PagingMarkers,
-                        profile.Telnet.PagingContinueByte,
+                        promptProfile.PagingMarkers,
+                        promptProfile.PagingContinueByte,
                         command.Timeout,
                         ErrorCodes.CommandTimeout,
                         "command",
@@ -123,24 +202,24 @@ public sealed class TelnetClient : ITelnetClient
                         raw.VisibleText,
                         command.Command,
                         devicePromptPattern,
-                        profile.Telnet.PagingMarkers),
+                        promptProfile.PagingMarkers),
                     _timeProvider.GetUtcNow()));
             }
 
-            return new TelnetSessionResult(profile.Model, outputs, startedAt, _timeProvider.GetUtcNow());
+            return outputs;
         }
-        catch (SwitchWatchException)
+        catch (SwitchWatchException exception)
         {
-            throw;
+            throw new TelnetAttemptException(exception, outputs.ToArray());
         }
         catch (TelnetProtocolException exception)
         {
-            throw Failure(
+            throw new TelnetAttemptException(Failure(
                 ErrorCodes.TelnetNegotiationFailed,
                 "telnet-negotiation",
                 "The Telnet option negotiation did not complete safely.",
                 true,
-                exception);
+                exception), outputs.ToArray());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -148,32 +227,70 @@ public sealed class TelnetClient : ITelnetClient
         }
         catch (OperationCanceledException exception) when (sessionCancellation.IsCancellationRequested)
         {
-            throw Failure(
+            throw new TelnetAttemptException(Failure(
                 ErrorCodes.CommandTimeout,
                 "telnet-session",
                 "The Telnet session exceeded its total time limit.",
                 true,
-                exception);
+                exception), outputs.ToArray());
         }
         catch (Exception exception) when (exception is IOException or SocketException or InvalidOperationException)
         {
-            throw Failure(
-                ErrorCodes.PromptParseFailed,
+            throw new TelnetAttemptException(Failure(
+                ErrorCodes.TelnetSessionClosed,
                 authenticated ? "command" : "telnet-session",
                 "The switch closed the Telnet session before a valid prompt was received.",
                 true,
-                exception);
+                exception), outputs.ToArray());
         }
         finally
         {
             if (authenticated && transport.IsConnected)
             {
-                await TryLogoutAsync(transport, profile.Telnet.LogoutCommand).ConfigureAwait(false);
+                await TryLogoutAsync(transport, promptProfile.LogoutCommand).ConfigureAwait(false);
             }
 
             await transport.CloseAsync().ConfigureAwait(false);
         }
     }
+
+    private IReadOnlyList<IReadOnlyList<ReadOnlyCommandDefinition>> PlanCommandBatches(
+        IReadOnlyList<ReadOnlyCommandDefinition> commands)
+    {
+        var batches = new List<IReadOnlyList<ReadOnlyCommandDefinition>>();
+        var current = new List<ReadOnlyCommandDefinition>();
+        var currentBudget = SessionOverhead();
+        foreach (var command in commands)
+        {
+            var nextBudget = currentBudget + command.Timeout;
+            if (current.Count > 0 && nextBudget > _options.Timeouts.Session)
+            {
+                batches.Add(current.ToArray());
+                current = [];
+                currentBudget = SessionOverhead();
+            }
+            current.Add(command);
+            currentBudget += command.Timeout;
+        }
+        if (current.Count > 0)
+        {
+            batches.Add(current.ToArray());
+        }
+        return batches;
+    }
+
+    private TimeSpan CalculateSessionBudget(IReadOnlyList<ReadOnlyCommandDefinition> commands)
+    {
+        var requested = SessionOverhead() + TimeSpan.FromTicks(commands.Sum(static command => command.Timeout.Ticks));
+        return requested <= _options.Timeouts.Session ? requested : _options.Timeouts.Session;
+    }
+
+    private TimeSpan SessionOverhead() =>
+        _options.Timeouts.Connect +
+        _options.Timeouts.LoginPrompt +
+        _options.Timeouts.Authentication +
+        _options.Timeouts.Logout +
+        _options.SessionSafetyMargin;
 
     private async Task ConnectAsync(IByteTransport transport, TelnetEndpoint endpoint, CancellationToken cancellationToken)
     {
@@ -317,7 +434,7 @@ public sealed class TelnetClient : ITelnetClient
                 if (read == 0)
                 {
                     throw Failure(
-                        ErrorCodes.PromptParseFailed,
+                        ErrorCodes.TelnetSessionClosed,
                         stage,
                         "The Telnet stream ended before the expected prompt.",
                         true);
@@ -577,4 +694,13 @@ public sealed class TelnetClient : ITelnetClient
     private sealed record TerminalPatternMatch(int PatternIndex, string MatchedText);
 
     private sealed record PagingMarkerMatch(int Index, int Length);
+
+    private sealed class TelnetAttemptException(
+        SwitchWatchException failure,
+        IReadOnlyList<CommandOutput> completedOutputs) : Exception(failure.Message, failure)
+    {
+        public SwitchWatchException Failure { get; } = failure;
+
+        public IReadOnlyList<CommandOutput> CompletedOutputs { get; } = completedOutputs;
+    }
 }

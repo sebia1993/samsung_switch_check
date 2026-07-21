@@ -5,7 +5,7 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 
 ## A. 설치와 복구
 
-- [ ] ZIP·`SHA256SUMS.txt`·매니페스트·SBOM·provenance 일치
+- [ ] Agent·Viewer ZIP의 build provenance·release attestation과 ZIP 내부 매니페스트·SBOM 일치
 - [ ] Python/.NET 미설치 Windows x64에서 EXE 단독 실행
 - [ ] 한글 사용자 경로와 임시 폴더에서 Viewer 설치
 - [ ] Agent 신규 설치 후 서비스 자동 시작
@@ -30,12 +30,14 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 - [ ] 토큰 최대 5개, 180일 절대·60일 idle 만료, 폐기 즉시 401
 - [ ] 인증서 현재/예정 pin 2개 전환 후 오래된 pin 제거
 - [ ] 만료 60/30/7일 상태와 만료 readiness 실패 확인
+- [ ] `new-viewer-pairing.ps1`의 `SSW1:` 문자열 한 번으로 Viewer 최초 연결 성공
+- [ ] 만료·재사용 문자열 거부, 인증서 불일치 `TLS_PIN_MISMATCH`, 최종 토큰 화면 미표시
 
 ## C. 모델별 Telnet 수집
 
 아래 항목을 각 모델과 실제 펌웨어 조합별로 따로 기록합니다.
 
-| 모델 | 펌웨어 | 로그인 | version | system | log_ram | interface_status | 페이징 | 결과 |
+| 모델 | 펌웨어 | 로그인 | `show port status` | 포트 대체 명령 | `show syslog tail num 100` | 로그 대체 명령 | 페이징 | 결과 |
 |---|---|---|---|---|---|---|---|---|
 | IES4224GP |  |  |  |  |  |  |  |  |
 | IES4028XP |  |  |  |  |  |  |  |  |
@@ -47,8 +49,11 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 - [ ] ANSI/백스페이스형 `--More--` 처리
 - [ ] 명시적 empty 로그만 정상, 공백·부분 출력은 `INCOMPLETE_OUTPUT`
 - [ ] 미지원 명령만 `PARSER_UNSUPPORTED`, 다른 수집은 계속
+- [ ] 우선 명령 미지원 시 대체 명령 자동 선택, 재시작 후 선택 결과 재사용
 - [ ] 인증 실패 1회 후 circuit block 및 자격 증명 교체 후 복구
 - [ ] 장비별 동시 Telnet 세션 1개
+- [ ] 세션 예산 초과 명령 분할, 중간 종료 시 완료 결과 보존과 남은 명령 1회만 재접속
+- [ ] `COMMAND_TIMEOUT`·인증 실패에는 즉시 재접속하지 않음
 - [ ] 5대 이상 동시 due에서 기본 최대 4대만 병렬 실행
 
 ## D. 로그와 상태 변경

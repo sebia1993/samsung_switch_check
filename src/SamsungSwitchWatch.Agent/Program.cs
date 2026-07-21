@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging.Abstractions;
 using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
@@ -65,7 +66,15 @@ public static class AgentApplication
             Ies4028XpProfile.Create(),
             Ies4226XpProfile.Create()
         ]));
-        builder.Services.AddSingleton<ITelnetClient, TelnetClient>();
+        builder.Services.AddSingleton<ITelnetClient>(_ => new TelnetClient(options: new TelnetClientOptions(
+            TelnetTimeouts.Default with
+            {
+                Session = TimeSpan.FromSeconds(options.Telnet.MaxSessionSeconds)
+            })
+        {
+            SessionCloseRetryCount = options.Telnet.ImmediateSessionCloseRetryCount,
+            SessionCloseRetryDelay = TimeSpan.FromSeconds(options.Telnet.ImmediateSessionCloseRetryDelaySeconds)
+        }));
         builder.Services.AddSingleton<IDeviceCollector>(service => options.MockMode
             ? new MockDeviceCollector()
             : ActivatorUtilities.CreateInstance<CoreTelnetDeviceCollector>(service));
@@ -144,16 +153,25 @@ internal static class AgentMaintenanceCommands
             return true;
         }
 
-        if (args.Length == 2 && string.Equals(args[0], "pairing", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(args[1], "create", StringComparison.OrdinalIgnoreCase))
+        if (args.Length is 2 or 3 && string.Equals(args[0], "pairing", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(args[1], "create", StringComparison.OrdinalIgnoreCase) &&
+            (args.Length == 2 || string.Equals(args[2], "--json", StringComparison.OrdinalIgnoreCase)))
         {
-            await using var app = AgentApplication.Build([]);
-            var store = app.Services.GetRequiredService<SqliteAgentStore>();
-            await store.InitializeAsync();
-            var pairing = app.Services.GetRequiredService<PairingService>();
-            var created = await pairing.CreateCodeAsync();
-            Console.WriteLine($"One-time pairing code: {created.Code}");
-            Console.WriteLine($"Expires (UTC): {created.ExpiresUtc:O}");
+            var options = AgentMaintenanceBootstrap.LoadOptions();
+            var created = await AgentMaintenanceBootstrap.CreatePairingCodeAsync(options);
+            if (args.Length == 3)
+            {
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    code = created.Code,
+                    expiresUtc = created.ExpiresUtc
+                }, JsonDefaults.Serializer));
+            }
+            else
+            {
+                Console.WriteLine($"One-time pairing code: {created.Code}");
+                Console.WriteLine($"Expires (UTC): {created.ExpiresUtc:O}");
+            }
             return true;
         }
 
@@ -229,5 +247,47 @@ internal static class AgentMaintenanceCommands
                 value.Append(key.KeyChar);
             }
         }
+    }
+}
+
+internal static class AgentMaintenanceBootstrap
+{
+    public static AgentOptions LoadOptions(
+        string? contentRootPath = null,
+        string? environmentName = null)
+    {
+        var contentRoot = Path.GetFullPath(contentRootPath ?? AppContext.BaseDirectory);
+        var environment = string.IsNullOrWhiteSpace(environmentName)
+            ? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+              ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+              ?? Environments.Production
+            : environmentName.Trim();
+
+        if (environment.Length > 64 ||
+            environment.Any(character => !char.IsLetterOrDigit(character) && character is not '-' and not '_'))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", "Agent environment name is invalid.");
+        }
+
+        var configuration = new ConfigurationBuilder()
+            .SetBasePath(contentRoot)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .AddJsonFile($"appsettings.{environment}.json", optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables()
+            .Build();
+        var options = configuration.GetSection(AgentOptions.SectionName).Get<AgentOptions>() ?? new AgentOptions();
+        AgentOptionsValidator.ValidateAndNormalize(options, contentRoot);
+        return options;
+    }
+
+    public static async Task<(string Code, DateTimeOffset ExpiresUtc)> CreatePairingCodeAsync(
+        AgentOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var store = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
+        await store.InitializeAsync(cancellationToken);
+        var pairing = new PairingService(options, store);
+        return await pairing.CreateCodeAsync(cancellationToken);
     }
 }
