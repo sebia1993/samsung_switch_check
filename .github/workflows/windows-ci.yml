@@ -2,38 +2,64 @@ name: Windows CI
 
 on:
   push:
-    branches: [main, 'agent/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate-and-package:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          dotnet-version: 10.0.x
+          persist-credentials: false
 
-      - name: Validate solution and scripts
+      - name: Install exact .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Validate solution, deployment helpers, and dependency advisories
         shell: powershell
         run: .\scripts\validate.ps1 -Configuration Release
 
-      - name: Build v0.2.0 POC packages
+      - name: Build unsigned POC packages
         shell: powershell
-        run: .\scripts\build-release.ps1 -Version 0.2.0-poc -SkipTests
+        run: .\scripts\build-release.ps1 -Version 0.4.0-poc -SkipTests
 
-      - name: Upload unsigned POC packages
-        uses: actions/upload-artifact@v4
+      - name: Upload immutable candidate artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: samsung-switch-watch-0.2.0-poc-win-x64
+          name: samsung-switch-watch-0.4.0-poc-${{ github.sha }}
           path: artifacts/release/*
           if-no-files-found: error
           retention-days: 14
+
+  verify-downloaded-artifact:
+    needs: validate-and-package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout verification scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download candidate artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: samsung-switch-watch-0.4.0-poc-${{ github.sha }}
+          path: artifacts/release
+
+      - name: Verify post-download hashes and package contract
+        shell: powershell
+        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version 0.4.0-poc

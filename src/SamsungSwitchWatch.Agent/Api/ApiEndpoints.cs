@@ -1,12 +1,22 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
 using SamsungSwitchWatch.Agent.Security;
+using SamsungSwitchWatch.Core.Profiles;
 
 namespace SamsungSwitchWatch.Agent.Api;
 
 public sealed record PairingExchangeRequest(string Code);
+
+public sealed record DeviceCheckRunResult(
+    string DeviceId,
+    string Model,
+    bool Success,
+    string? ErrorCode,
+    IReadOnlyList<BatchCommandExecutionResult> Commands);
 
 public static class ApiEndpoints
 {
@@ -181,6 +191,155 @@ public static class ApiEndpoints
             });
         });
 
+        app.MapGet("/api/v3/events/changes", async (
+            long? after,
+            int? limit,
+            SqliteAgentStore store,
+            CancellationToken token) =>
+        {
+            var page = await store.GetEventChangesAsync(after ?? 0, limit ?? 500, token);
+            return Results.Ok(new
+            {
+                apiVersion = 3,
+                page.HighWatermark,
+                page.NextCursor,
+                page.HasMore,
+                page.Changes,
+                page.ResetRequired,
+                page.ResetCursor
+            });
+        });
+
+        app.MapGet("/api/v3/events/recent", async (
+            int? limit,
+            SqliteAgentStore store,
+            CancellationToken token) =>
+        {
+            var events = await store.GetRecentEventsAsync(limit ?? 500, token);
+            return Results.Ok(new
+            {
+                apiVersion = 3,
+                count = events.Count,
+                events
+            });
+        });
+
+        app.MapGet("/api/v3/snapshot", async (
+            SqliteAgentStore store,
+            AgentReadinessService readiness,
+            AgentRuntimeState runtime,
+            DeviceProfileRegistry profiles,
+            CertificateStatusService certificates,
+            CancellationToken token) =>
+        {
+            var storage = await store.CheckReadinessAsync(token);
+            var ready = await readiness.CheckAsync(token);
+            var eventSummary = await store.GetEventSummaryAsync(token);
+            var highWatermark = await store.GetChangeHighWatermarkAsync(token);
+            var snapshots = await store.GetAllSnapshotsAsync(token);
+            var devices = BuildVersionThreeDevices(options, profiles, snapshots);
+            return Results.Ok(new
+            {
+                apiVersion = 3,
+                agentId = options.AgentId,
+                mockMode = options.MockMode,
+                utc = DateTimeOffset.UtcNow,
+                lastCollectionUtc = snapshots
+                    .Where(snapshot => CommandCatalog.Registered.ContainsKey(snapshot.CommandId))
+                    .OrderByDescending(snapshot => snapshot.CapturedUtc)
+                    .FirstOrDefault()?.CapturedUtc,
+                counts = new
+                {
+                    configuredDevices = options.Switches.Count,
+                    eventSummary.ActiveCritical,
+                    eventSummary.Unacknowledged,
+                    eventSummary.LastSequence,
+                    eventChangeHighWatermark = highWatermark
+                },
+                channels = new
+                {
+                    agent = new
+                    {
+                        status = "connected",
+                        runtime.StartedUtc,
+                        runtime.SchedulerHeartbeatUtc
+                    },
+                    api = new { status = "available", version = 3 },
+                    realtime = new
+                    {
+                        status = "available",
+                        meaning = "agent-endpoint-available",
+                        endpoint = "/hubs/events"
+                    },
+                    storage = new
+                    {
+                        ready = storage.Ready,
+                        errorCode = storage.ErrorCode,
+                        schemaVersion = storage.SchemaVersion,
+                        integrityCheckedUtc = store.LastIntegrityCheckUtc
+                    },
+                    certificate = new
+                    {
+                        certificates.Status.State,
+                        certificates.Status.NotAfterUtc,
+                        certificates.Status.DaysRemaining
+                    },
+                    readiness = new
+                    {
+                        status = ready.Ready ? "ready" : "not-ready",
+                        ready.Code,
+                        ready.SchemaVersion,
+                        ready.SchedulerHeartbeatUtc,
+                        ready.CheckedUtc
+                    }
+                },
+                devices
+            });
+        });
+
+        app.MapPost("/api/v3/check-runs", async (
+            JsonElement request,
+            HttpContext context,
+            CommandExecutionService execution,
+            CancellationToken token) =>
+        {
+            var selection = ParseCheckRunRequest(request, options);
+            var startedUtc = DateTimeOffset.UtcNow;
+            var actor = Actor(context);
+            var results = new ConcurrentDictionary<string, DeviceCheckRunResult>(StringComparer.OrdinalIgnoreCase);
+            await Parallel.ForEachAsync(selection.Devices, new ParallelOptions
+            {
+                CancellationToken = token,
+                MaxDegreeOfParallelism = Math.Clamp(options.MaxConcurrentDevices, 1,
+                    AgentOptions.MaximumConcurrentDeviceLimit)
+            }, async (device, cancellationToken) =>
+            {
+                try
+                {
+                    var commands = await execution.ExecuteBatchAsync(device.Id, selection.CommandIds,
+                        actor, cancellationToken);
+                    results[device.Id] = new DeviceCheckRunResult(device.Id, device.Model,
+                        commands.All(command => command.Success),
+                        commands.FirstOrDefault(command => !command.Success)?.ErrorCode,
+                        commands);
+                }
+                catch (AgentOperationException ex)
+                {
+                    results[device.Id] = new DeviceCheckRunResult(device.Id, device.Model, false, ex.Code, []);
+                }
+            });
+            var completedUtc = DateTimeOffset.UtcNow;
+            return Results.Ok(new
+            {
+                apiVersion = 3,
+                startedUtc,
+                completedUtc,
+                deviceCount = selection.Devices.Count,
+                commandCount = selection.CommandIds.Count,
+                devices = selection.Devices.Select(device => results[device.Id]).ToArray()
+            });
+        });
+
         app.MapPost("/api/v1/events/{id}/ack", async (
             string id,
             HttpContext context,
@@ -222,6 +381,136 @@ public static class ApiEndpoints
         options.MockMode || string.Equals(environmentName, Environments.Development, StringComparison.OrdinalIgnoreCase);
 
     private static string Actor(HttpContext context) => context.Items["actor"] as string ?? "unknown";
+
+    private static IReadOnlyList<object> BuildVersionThreeDevices(
+        AgentOptions options,
+        DeviceProfileRegistry profiles,
+        IReadOnlyList<DeviceSnapshot> snapshots)
+    {
+        return options.Switches.Select(device =>
+        {
+            profiles.TryGet(device.Model, out var profile);
+            var deviceSnapshots = snapshots.Where(snapshot =>
+                    string.Equals(snapshot.DeviceId, device.Id, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var collections = deviceSnapshots
+                .Where(snapshot => CommandCatalog.Registered.ContainsKey(snapshot.CommandId))
+                .OrderBy(snapshot => snapshot.CommandId, StringComparer.OrdinalIgnoreCase)
+                .Select(snapshot => new
+                {
+                    snapshot.CommandId,
+                    snapshot.CapturedUtc,
+                    data = snapshot.Data
+                }).ToArray();
+            var aggregate = deviceSnapshots.FirstOrDefault(snapshot => string.Equals(snapshot.CommandId,
+                CommandCatalog.CollectorHealthSnapshotId, StringComparison.OrdinalIgnoreCase));
+            var capabilities = CommandCatalog.Registered.Values.Select(command =>
+            {
+                var profileSupported = profile?.TryGetCommand(command.Id, out _) == true;
+                var health = deviceSnapshots.FirstOrDefault(snapshot => string.Equals(snapshot.CommandId,
+                    CommandCatalog.CollectorHealthSnapshotIdFor(command.Id), StringComparison.OrdinalIgnoreCase));
+                var state = profileSupported
+                    ? health?.Data["state"]?.GetValue<string>() ?? "Initializing"
+                    : "Unsupported";
+                return new
+                {
+                    commandId = command.Id,
+                    cli = command.Cli,
+                    supported = profileSupported && !string.Equals(state, "Unsupported", StringComparison.Ordinal),
+                    state,
+                    errorCode = health?.Data["errorCode"]?.GetValue<string>(),
+                    lastAttemptUtc = health?.Data["lastAttemptUtc"]?.GetValue<string>(),
+                    lastSuccessUtc = health?.Data["lastSuccessUtc"]?.GetValue<string>()
+                };
+            }).ToArray();
+            return (object)new
+            {
+                id = device.Id,
+                device.DisplayName,
+                device.Model,
+                device.UplinkPort,
+                lastCollectionUtc = collections.OrderByDescending(collection => collection.CapturedUtc)
+                    .FirstOrDefault()?.CapturedUtc,
+                collectionHealth = new
+                {
+                    state = aggregate?.Data["state"]?.GetValue<string>() ?? "Initializing",
+                    errorCode = aggregate?.Data["errorCode"]?.GetValue<string>(),
+                    lastAttemptUtc = aggregate?.Data["lastAttemptUtc"]?.GetValue<string>(),
+                    lastSuccessUtc = aggregate?.Data["lastSuccessUtc"]?.GetValue<string>()
+                },
+                capabilities,
+                collections
+            };
+        }).ToArray();
+    }
+
+    private static CheckRunSelection ParseCheckRunRequest(JsonElement request, AgentOptions options)
+    {
+        if (request.ValueKind != JsonValueKind.Object)
+        {
+            throw new AgentOperationException("REQUEST_INVALID", "Check run request must be a JSON object.", 400);
+        }
+
+        var allowed = new HashSet<string>(["deviceIds", "commandIds"], StringComparer.Ordinal);
+        if (request.EnumerateObject().Any(property => !allowed.Contains(property.Name)))
+        {
+            throw new AgentOperationException("REQUEST_INVALID",
+                "Check run accepts only deviceIds and commandIds.", 400);
+        }
+
+        var deviceIds = ReadRequiredStringArray(request, "deviceIds");
+        var commandIds = ReadRequiredStringArray(request, "commandIds");
+        if (deviceIds.Count > options.Switches.Count || commandIds.Count > CommandCatalog.Registered.Count)
+        {
+            throw new AgentOperationException("REQUEST_INVALID", "Check run contains too many ids.", 400);
+        }
+        var devices = new List<SwitchOptions>(deviceIds.Count);
+        foreach (var deviceId in deviceIds)
+        {
+            var device = options.Switches.FirstOrDefault(item =>
+                string.Equals(item.Id, deviceId, StringComparison.OrdinalIgnoreCase))
+                ?? throw new AgentOperationException(AgentErrorCodes.DeviceNotFound, "Device was not found.", 404);
+            devices.Add(device);
+        }
+
+        foreach (var commandId in commandIds)
+        {
+            if (!CommandCatalog.TryGet(commandId, out _))
+            {
+                throw new AgentOperationException(AgentErrorCodes.CommandNotAllowed,
+                    "Command id is not registered.", 400);
+            }
+        }
+        return new CheckRunSelection(devices, commandIds);
+    }
+
+    private static IReadOnlyList<string> ReadRequiredStringArray(JsonElement request, string propertyName)
+    {
+        if (!request.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            throw new AgentOperationException("REQUEST_INVALID", $"{propertyName} must be an array.", 400);
+        }
+
+        var values = new List<string>();
+        foreach (var element in value.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(element.GetString()))
+            {
+                throw new AgentOperationException("REQUEST_INVALID", $"{propertyName} contains an invalid id.", 400);
+            }
+            values.Add(element.GetString()!);
+        }
+        var distinct = values.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (distinct.Length == 0 || distinct.Length != values.Count)
+        {
+            throw new AgentOperationException("REQUEST_INVALID", $"{propertyName} must contain unique ids.", 400);
+        }
+        return distinct;
+    }
+
+    private sealed record CheckRunSelection(
+        IReadOnlyList<SwitchOptions> Devices,
+        IReadOnlyList<string> CommandIds);
 }
 
 public sealed class ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandlingMiddleware> logger)

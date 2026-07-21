@@ -44,15 +44,36 @@ public sealed class DemoAgentClient : IAgentClient
         [
             new("sw-01", "ACCESS-SW-01", "IES4224GP", "192.0.2.11", DeviceHealth.Normal, now.AddSeconds(-8), "등록된 모든 점검 정상", "31일 04:22", Metrics(
                 ("Telnet", "정상", DeviceHealth.Normal), ("가동 시간", "31일 04:22", DeviceHealth.Normal), ("포트 24", "UP · 1G/Full", DeviceHealth.Normal), ("신규 로그", "0건", DeviceHealth.Normal))),
-            new("sw-02", "ACCESS-SW-02", "IES4224GP", "192.0.2.12", DeviceHealth.Warning, now.AddSeconds(-15), "확인이 필요한 로그 3건", "18일 11:03", Metrics(
+            new("sw-02", "ACCESS-SW-02", "IES4028XP", "장비 주소는 Agent에만 보관", DeviceHealth.Warning, now.AddSeconds(-15), "확인이 필요한 로그 3건", "18일 11:03", Metrics(
                 ("Telnet", "정상", DeviceHealth.Normal), ("STP Root", "변경됨", DeviceHealth.Warning), ("PoE 사용", "312 / 370 W", DeviceHealth.Warning), ("신규 로그", "3건", DeviceHealth.Warning))),
-            new("sw-03", "ACCESS-SW-03", "IES4224GP", "192.0.2.13", DeviceHealth.Critical, now.AddSeconds(-22), "중요 업링크 포트 26 DOWN", "07일 09:41", Metrics(
+            new("sw-03", "ACCESS-SW-03", "IES4226XP", "장비 주소는 Agent에만 보관", DeviceHealth.Critical, now.AddSeconds(-22), "중요 업링크 포트 26 DOWN", "07일 09:41", Metrics(
                 ("Telnet", "정상", DeviceHealth.Normal), ("포트 26", "DOWN", DeviceHealth.Critical), ("LACP", "멤버 1개 이탈", DeviceHealth.Critical), ("장애 지속", "12분", DeviceHealth.Critical))),
-            new("sw-04", "ACCESS-SW-04", "IES4224GP", "192.0.2.14", DeviceHealth.Disconnected, now.AddMinutes(-5), "TCP_TIMEOUT · 현재 상태 미확인", "-", Metrics(
+            new("sw-04", "ACCESS-SW-04", "IES4226XP", "장비 주소는 Agent에만 보관", DeviceHealth.Disconnected, now.AddMinutes(-5), "TCP_TIMEOUT · 현재 상태 미확인", "-", Metrics(
                 ("Telnet", "연결 실패", DeviceHealth.Disconnected), ("마지막 정상", "5분 전", DeviceHealth.Warning), ("오류 코드", "TCP_TIMEOUT", DeviceHealth.Disconnected), ("다음 재시도", "42초 후", DeviceHealth.Loading)))
         ];
 
-        return Task.FromResult(new AgentSnapshotDto(now, AgentConnectionState.Demo, devices, _changeSequence, "POC 데모 1.0", "재현 가능한 오프라인 시뮬레이션", "demo-agent"));
+        long unacknowledged;
+        lock (_events) unacknowledged = _events.LongCount(item => !item.Acknowledged);
+        return Task.FromResult(new AgentSnapshotDto(
+            now,
+            AgentConnectionState.Demo,
+            devices,
+            _changeSequence,
+            "데모 Agent · API v3",
+            "API 정상 · 실시간 데모 · 3개 모델",
+            "demo-agent",
+            AuthoritativeUnacknowledged: unacknowledged,
+            ApiVersion: 3,
+            AgentChannelStatus: "connected",
+            ApiChannelStatus: "available",
+            RealtimeChannelStatus: "available",
+            OperationalStatuses:
+            [
+                new("DB_READY", "로컬 상태 DB", "Readiness 정상 · 데모 저장소", DeviceHealth.Normal),
+                new("CERT_VALID", "HTTPS 인증서", "데모 모드 · 실환경 pin 검증은 비활성", DeviceHealth.Normal),
+                new("POLLING", "수집 진행", "동시 장비 수집 상한 4대", DeviceHealth.Normal)
+            ],
+            MaxConcurrentDevices: 4));
     }
 
     public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken)

@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260720-v1",
+  "runId": "ssw-20260721-v2",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -14,7 +14,11 @@
     "dashboard": "7:2",
     "mini": "7:174",
     "popup": "7:189",
-    "stateGallery": "7:195"
+    "stateGallery": "7:195",
+    "dashboardOperationsV2": "11:64",
+    "miniOfflineRecoveryV2": "14:127",
+    "popupStatesV2": "15:129",
+    "operationalStatesV2": "15:148"
   },
   "componentSets": {
     "StatusBadge": "5:17",

@@ -15,16 +15,16 @@ public static partial class OutputNormalizer
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
         ArgumentException.ThrowIfNullOrWhiteSpace(devicePromptPattern);
 
-        var cleaned = CleanControlCharacters(rawOutput);
-        foreach (var marker in pagingMarkers)
-        {
-            cleaned = cleaned.Replace(marker, string.Empty, StringComparison.OrdinalIgnoreCase);
-        }
-
-        var lines = cleaned.Replace("\r\n", "\n", StringComparison.Ordinal)
+        var markerSet = pagingMarkers
+            .Where(static marker => !string.IsNullOrWhiteSpace(marker))
+            .Select(static marker => marker.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var lines = CleanControlCharacters(rawOutput)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n')
             .Split('\n')
             .Select(static line => line.TrimEnd())
+            .Where(line => !markerSet.Contains(line.Trim()))
             .ToList();
 
         while (lines.Count > 0 && string.IsNullOrWhiteSpace(lines[0]))

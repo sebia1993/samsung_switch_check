@@ -58,6 +58,120 @@ public sealed class TelnetClientTests
     }
 
     [Fact]
+    public async Task ExecuteRegisteredAsync_UsesCapturedPromptInsteadOfHashEndedOutputLine()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nAudit summary #"),
+            Bytes("\r\nUptime: 0 days, 01:00:00\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("Audit summary #", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("Uptime: 0 days, 01:00:00", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("ACCESS-SW-01#", output.NormalizedOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_RecognizesCapturedPromptAcrossReads()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nUptime: 0 days, 01:00:00\r\nACCESS-"),
+            Bytes("SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]);
+
+        Assert.Contains(
+            "Uptime: 0 days, 01:00:00",
+            Assert.Single(result.Outputs).NormalizedOutput,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_DoesNotTreatEmbeddedPagingTextAsMarker()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show log ram\r\nWarning: Press any key to continue policy changed\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.LogRam]);
+
+        Assert.Contains(
+            "Warning: Press any key to continue policy changed",
+            Assert.Single(result.Outputs).NormalizedOutput,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(transport.Writes, bytes => bytes.SequenceEqual(new byte[] { 0x20 }));
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_HandlesWhitespacePaddedFullLinePagingMarker()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show interfaces status\r\n1 Enabled Up 1000M Full\r\n  Press SPACE to continue  \r\n"),
+            Bytes("24 Enabled Down -- --\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.InterfaceStatus]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("1 Enabled Up", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("24 Enabled Down", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("Press SPACE", output.NormalizedOutput, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(transport.Writes, bytes => bytes.SequenceEqual(new byte[] { 0x20 }));
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_DoesNotReturnPartialOutputWhenPromptIsMissingAfterPaging()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show interfaces status\r\n1 Enabled Up 1000M Full\r\n--More--"));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.InterfaceStatus]));
+
+        Assert.Equal(ErrorCodes.PromptParseFailed, exception.Error.Code);
+        Assert.Equal("command", exception.Error.Stage);
+        Assert.Contains(transport.Writes, bytes => bytes.SequenceEqual(new byte[] { 0x20 }));
+    }
+
+    [Fact]
     public async Task ExecuteRegisteredAsync_MapsTcpTimeoutToStableCode()
     {
         var transport = new ScriptedTransport { WaitDuringConnect = true };

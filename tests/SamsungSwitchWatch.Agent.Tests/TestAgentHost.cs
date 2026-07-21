@@ -25,7 +25,9 @@ internal sealed class TestAgentHost : IAsyncDisposable
     public HttpClient Client { get; }
     public IServiceProvider Services => _app.Services;
 
-    public static async Task<TestAgentHost> StartAsync(IDeviceCollector? collector = null)
+    public static async Task<TestAgentHost> StartAsync(
+        IDeviceCollector? collector = null,
+        IReadOnlyDictionary<string, string?>? additionalOverrides = null)
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-AgentTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -38,6 +40,13 @@ internal sealed class TestAgentHost : IAsyncDisposable
             ["Agent:EnableSimulator"] = "true",
             ["Agent:TokenPepper"] = Guid.NewGuid().ToString("N")
         };
+        if (additionalOverrides is not null)
+        {
+            foreach (var item in additionalOverrides)
+            {
+                overrides[item.Key] = item.Value;
+            }
+        }
         var app = AgentApplication.Build([], overrides, services =>
         {
             if (collector is not null)

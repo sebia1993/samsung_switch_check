@@ -33,12 +33,9 @@ public static class AgentApplication
 
         if (options.Https.Enabled)
         {
-            var certificatePath = Path.IsPathRooted(options.Https.CertificatePath)
-                ? options.Https.CertificatePath
-                : Path.Combine(builder.Environment.ContentRootPath, options.Https.CertificatePath);
-            var certificatePassword = Environment.GetEnvironmentVariable(options.Https.CertificatePasswordEnvironmentVariable);
             builder.WebHost.ConfigureKestrel(server => server.ListenAnyIP(options.Https.Port,
-                listen => listen.UseHttps(certificatePath, certificatePassword)));
+                listen => listen.UseHttps(AgentCertificateLoader.Load(options.Https,
+                    builder.Environment.ContentRootPath))));
         }
         else
         {
@@ -56,12 +53,18 @@ public static class AgentApplication
         builder.Services.AddSingleton<AgentRuntimeState>();
         builder.Services.AddSingleton<AgentReadinessService>();
         builder.Services.AddSingleton<ICredentialProtector, DpapiCredentialProtector>();
+        builder.Services.AddSingleton<IRawOutputProtector, RawOutputProtector>();
         builder.Services.AddSingleton<ICredentialVault, FileCredentialVault>();
         builder.Services.AddSingleton<PairingService>();
         builder.Services.AddSingleton<PairingAttemptLimiter>();
         builder.Services.AddSingleton<CertificateStatusService>();
         builder.Services.AddHostedService(service => service.GetRequiredService<CertificateStatusService>());
-        builder.Services.AddSingleton(Ies4224GpProfile.Create());
+        builder.Services.AddSingleton(new DeviceProfileRegistry(
+        [
+            Ies4224GpProfile.Create(),
+            Ies4028XpProfile.Create(),
+            Ies4226XpProfile.Create()
+        ]));
         builder.Services.AddSingleton<ITelnetClient, TelnetClient>();
         builder.Services.AddSingleton<IDeviceCollector>(service => options.MockMode
             ? new MockDeviceCollector()
@@ -151,6 +154,50 @@ internal static class AgentMaintenanceCommands
             var created = await pairing.CreateCodeAsync();
             Console.WriteLine($"One-time pairing code: {created.Code}");
             Console.WriteLine($"Expires (UTC): {created.ExpiresUtc:O}");
+            return true;
+        }
+
+        if (args.Length == 2 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(args[1], "list", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var app = AgentApplication.Build([]);
+            var store = app.Services.GetRequiredService<SqliteAgentStore>();
+            await store.InitializeAsync();
+            var pairing = app.Services.GetRequiredService<PairingService>();
+            var tokens = await pairing.ListTokensAsync();
+            if (tokens.Count == 0)
+            {
+                Console.WriteLine("No Viewer tokens are registered.");
+                return true;
+            }
+            foreach (var token in tokens)
+            {
+                var state = token.RevokedUtc is not null ? "revoked" : token.Expired ? "expired" : "active";
+                Console.WriteLine($"{token.Id}  {state}  created={token.CreatedUtc:O}  last-used={token.LastUsedUtc:O}");
+            }
+            return true;
+        }
+
+        if (args.Length == 3 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(args[1], "revoke", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var app = AgentApplication.Build([]);
+            var store = app.Services.GetRequiredService<SqliteAgentStore>();
+            await store.InitializeAsync();
+            await app.Services.GetRequiredService<PairingService>().RevokeTokenAsync(args[2]);
+            Console.WriteLine($"Viewer token {args[2].ToUpperInvariant()} was revoked.");
+            return true;
+        }
+
+        if (args.Length == 3 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(args[1], "rotate", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var app = AgentApplication.Build([]);
+            var store = app.Services.GetRequiredService<SqliteAgentStore>();
+            await store.InitializeAsync();
+            var replacement = await app.Services.GetRequiredService<PairingService>().RotateTokenAsync(args[2]);
+            Console.WriteLine("Replacement Viewer token (shown once):");
+            Console.WriteLine(replacement);
             return true;
         }
 

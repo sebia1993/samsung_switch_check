@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
@@ -40,7 +41,32 @@ public sealed class AgentApiTests
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
         using var document = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
         Assert.True(document.RootElement.GetProperty("ready").GetBoolean());
-        Assert.Equal(2, document.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(4, document.RootElement.GetProperty("schemaVersion").GetInt32());
+    }
+
+    [Fact]
+    public async Task IntegrityFailureKeepsLivenessButMakesReadinessUnavailable()
+    {
+        await using var host = await TestAgentHost.StartAsync();
+        var options = host.Services.GetRequiredService<AgentOptions>();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        await using (var connection = new SqliteConnection($"Data Source={options.DatabasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+        Assert.False(await store.RefreshIntegrityStatusAsync());
+
+        using var live = await host.Client.GetAsync("/health/live");
+        using var ready = await host.Client.GetAsync("/health/ready");
+
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+        using var document = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
+        Assert.Equal(AgentErrorCodes.StorageWriteFailed,
+            document.RootElement.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -227,6 +253,109 @@ public sealed class AgentApiTests
         Assert.Equal(3, page.RootElement.GetProperty("resetCursor").GetInt64());
         Assert.Equal(3, page.RootElement.GetProperty("nextCursor").GetInt64());
         Assert.Empty(page.RootElement.GetProperty("changes").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task VersionThreeSnapshotAndEventFeedsExposeAuthoritativeHealthContract()
+    {
+        await using var host = await TestAgentHost.StartAsync();
+        await host.PairAsync();
+        var store = host.Services.GetRequiredService<SqliteAgentStore>();
+        await store.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Warning,
+            "v3-fixture", "V3 fixture", "Sanitized", EventState.New, "v3:fixture"));
+
+        using var run = await host.Client.PostAsJsonAsync("/api/v3/check-runs", new
+        {
+            deviceIds = new[] { "TEST-SW-01" },
+            commandIds = new[] { "version", "system" }
+        });
+        run.EnsureSuccessStatusCode();
+        using var runDocument = JsonDocument.Parse(await run.Content.ReadAsStringAsync());
+        Assert.Equal(3, runDocument.RootElement.GetProperty("apiVersion").GetInt32());
+        Assert.Equal(1, runDocument.RootElement.GetProperty("deviceCount").GetInt32());
+        Assert.True(runDocument.RootElement.GetProperty("devices")[0].GetProperty("success").GetBoolean());
+
+        using var snapshot = await host.Client.GetAsync("/api/v3/snapshot");
+        snapshot.EnsureSuccessStatusCode();
+        using var snapshotDocument = JsonDocument.Parse(await snapshot.Content.ReadAsStringAsync());
+        var root = snapshotDocument.RootElement;
+        Assert.Equal(3, root.GetProperty("apiVersion").GetInt32());
+        Assert.Equal(1, root.GetProperty("counts").GetProperty("configuredDevices").GetInt32());
+        Assert.Equal(1, root.GetProperty("counts").GetProperty("unacknowledged").GetInt32());
+        Assert.True(root.GetProperty("counts").GetProperty("eventChangeHighWatermark").GetInt64() >= 1);
+        Assert.Equal("available", root.GetProperty("channels").GetProperty("api").GetProperty("status").GetString());
+        var channels = root.GetProperty("channels");
+        Assert.Equal("available", channels.GetProperty("realtime").GetProperty("status").GetString());
+        Assert.Equal("agent-endpoint-available",
+            channels.GetProperty("realtime").GetProperty("meaning").GetString());
+        var storage = channels.GetProperty("storage");
+        Assert.True(storage.GetProperty("ready").GetBoolean());
+        Assert.Equal(4, storage.GetProperty("schemaVersion").GetInt32());
+        Assert.NotEqual(JsonValueKind.Null, storage.GetProperty("integrityCheckedUtc").ValueKind);
+        var certificate = channels.GetProperty("certificate");
+        Assert.Equal("disabled", certificate.GetProperty("state").GetString());
+        Assert.False(certificate.TryGetProperty("sha256Fingerprint", out _));
+        var readiness = channels.GetProperty("readiness");
+        Assert.Equal(4, readiness.GetProperty("schemaVersion").GetInt32());
+        Assert.True(readiness.TryGetProperty("schedulerHeartbeatUtc", out _));
+        var device = Assert.Single(root.GetProperty("devices").EnumerateArray());
+        Assert.Equal("IES4224GP", device.GetProperty("model").GetString());
+        Assert.Equal("24", device.GetProperty("uplinkPort").GetString());
+        Assert.Equal(4, device.GetProperty("capabilities").GetArrayLength());
+        Assert.Equal(2, device.GetProperty("collections").GetArrayLength());
+
+        using var recent = await host.Client.GetAsync("/api/v3/events/recent?limit=10");
+        recent.EnsureSuccessStatusCode();
+        using var recentDocument = JsonDocument.Parse(await recent.Content.ReadAsStringAsync());
+        Assert.Equal(3, recentDocument.RootElement.GetProperty("apiVersion").GetInt32());
+        Assert.Equal(1, recentDocument.RootElement.GetProperty("count").GetInt32());
+
+        using var changes = await host.Client.GetAsync("/api/v3/events/changes?after=0&limit=10");
+        changes.EnsureSuccessStatusCode();
+        using var changesDocument = JsonDocument.Parse(await changes.Content.ReadAsStringAsync());
+        Assert.Equal(3, changesDocument.RootElement.GetProperty("apiVersion").GetInt32());
+        Assert.Single(changesDocument.RootElement.GetProperty("changes").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task VersionThreeCheckRunSupportsSeveralDevicesAndRejectsUnregisteredInput()
+    {
+        await using var host = await TestAgentHost.StartAsync(additionalOverrides: MultiDeviceOverrides());
+        await host.PairAsync();
+
+        using var run = await host.Client.PostAsJsonAsync("/api/v3/check-runs", new
+        {
+            deviceIds = new[] { "SW-01", "SW-02", "SW-03" },
+            commandIds = new[] { "version" }
+        });
+        run.EnsureSuccessStatusCode();
+        using var runDocument = JsonDocument.Parse(await run.Content.ReadAsStringAsync());
+        Assert.Equal(3, runDocument.RootElement.GetProperty("deviceCount").GetInt32());
+        Assert.All(runDocument.RootElement.GetProperty("devices").EnumerateArray(),
+            device => Assert.True(device.GetProperty("success").GetBoolean()));
+
+        using var snapshot = await host.Client.GetAsync("/api/v3/snapshot");
+        snapshot.EnsureSuccessStatusCode();
+        using var snapshotDocument = JsonDocument.Parse(await snapshot.Content.ReadAsStringAsync());
+        Assert.Equal(3, snapshotDocument.RootElement.GetProperty("devices").GetArrayLength());
+
+        using var unsafeCommand = await host.Client.PostAsJsonAsync("/api/v3/check-runs", new
+        {
+            deviceIds = new[] { "SW-01" },
+            commandIds = new[] { "reload" }
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, unsafeCommand.StatusCode);
+        using var unsafeDocument = JsonDocument.Parse(await unsafeCommand.Content.ReadAsStringAsync());
+        Assert.Equal(AgentErrorCodes.CommandNotAllowed,
+            unsafeDocument.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+        using var unknownField = await host.Client.PostAsJsonAsync("/api/v3/check-runs", new
+        {
+            deviceIds = new[] { "SW-01" },
+            commandIds = new[] { "version" },
+            cli = "show version"
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
     }
 
     [Fact]
@@ -494,6 +623,24 @@ public sealed class AgentApiTests
         }
         return new JsonObject { ["entries"] = entries };
     }
+
+    private static IReadOnlyDictionary<string, string?> MultiDeviceOverrides() =>
+        new Dictionary<string, string?>
+        {
+            ["Agent:MaxConcurrentDevices"] = "2",
+            ["Agent:Switches:0:Id"] = "SW-01",
+            ["Agent:Switches:0:DisplayName"] = "Switch 1",
+            ["Agent:Switches:0:Model"] = "IES4224GP",
+            ["Agent:Switches:0:Host"] = "192.0.2.10",
+            ["Agent:Switches:1:Id"] = "SW-02",
+            ["Agent:Switches:1:DisplayName"] = "Switch 2",
+            ["Agent:Switches:1:Model"] = "IES4028XP",
+            ["Agent:Switches:1:Host"] = "192.0.2.11",
+            ["Agent:Switches:2:Id"] = "SW-03",
+            ["Agent:Switches:2:DisplayName"] = "Switch 3",
+            ["Agent:Switches:2:Model"] = "IES4226XP",
+            ["Agent:Switches:2:Host"] = "192.0.2.12"
+        };
 
     private sealed class LogSequenceCollector(params JsonObject[] values) : IDeviceCollector
     {

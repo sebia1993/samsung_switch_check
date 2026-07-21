@@ -9,9 +9,15 @@ public static class AgentApiRoutes
     public const string Devices = "/api/v1/devices";
     public static string EventsAfter(long sequence) => $"/api/v1/events?after={Math.Max(0, sequence)}";
     public const string SnapshotV2 = "/api/v2/snapshot";
+    public const string SnapshotV3 = "/api/v3/snapshot";
     public static string RecentEventsV2(int limit) => $"/api/v2/events/recent?limit={Math.Clamp(limit, 1, 500)}";
+    public static string RecentEventsV3(int limit) => $"/api/v3/events/recent?limit={Math.Clamp(limit, 1, 500)}";
     public static string EventChangesV2(long cursor, int limit) =>
         $"/api/v2/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
+    public static string EventChangesV3(long cursor, int limit) =>
+        $"/api/v3/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
+    public const string CheckRunsV3 = "/api/v3/check-runs";
+    public const string CertificateStatus = "/api/v1/certificate/fingerprint";
     public static string Command(string deviceId, string commandId) =>
         $"/api/v1/commands/{Uri.EscapeDataString(deviceId)}/{Uri.EscapeDataString(commandId)}";
     public static string Acknowledge(string eventId) => $"/api/v1/events/{Uri.EscapeDataString(eventId)}/ack";
@@ -19,6 +25,12 @@ public static class AgentApiRoutes
 
 public static class AgentContractMapper
 {
+    public static AgentSnapshotDto MapSnapshotV3(string snapshotJson)
+    {
+        using var document = JsonDocument.Parse(snapshotJson);
+        return MapSnapshotV3(document.RootElement);
+    }
+
     public static AgentSnapshotDto MapSnapshotV2(string snapshotJson)
     {
         using var document = JsonDocument.Parse(snapshotJson);
@@ -95,6 +107,213 @@ public static class AgentContractMapper
             : new AgentEventChangeDto(sequence, StringValue(item, "changeKind") ?? "Changed", mappedEvent);
     }
 
+    internal static AgentSnapshotDto MapSnapshotV3(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object || IntValue(root, "apiVersion") != 3)
+        {
+            throw new JsonException("AGENT_V3_CONTRACT_INVALID");
+        }
+
+        var generatedAt = DateTimeValue(root, "utc") ?? DateTimeOffset.UtcNow;
+        var mockMode = BoolValue(root, "mockMode") ?? false;
+        var agentId = StringValue(root, "agentId") ?? "agent";
+        var counts = ObjectValue(root, "counts");
+        var channels = ObjectValue(root, "channels");
+        var agentChannel = ObjectValue(channels, "agent");
+        var apiChannel = ObjectValue(channels, "api");
+        var realtimeChannel = ObjectValue(channels, "realtime");
+        var readiness = ObjectValue(channels, "readiness");
+        var storage = ObjectValue(channels, "storage");
+        var certificate = ObjectValue(channels, "certificate");
+        var agentStatus = StringValue(agentChannel, "status") ?? "unknown";
+        var apiStatus = StringValue(apiChannel, "status") ?? "unknown";
+        var realtimeStatus = StringValue(realtimeChannel, "status") ?? "unknown";
+        var readinessStatus = StringValue(readiness, "status") ?? "not-ready";
+        var readinessCode = StringValue(readiness, "code")
+                            ?? (readinessStatus.Equals("ready", StringComparison.OrdinalIgnoreCase)
+                                ? "READY"
+                                : "AGENT_NOT_READY");
+        var ready = readinessStatus.Equals("ready", StringComparison.OrdinalIgnoreCase);
+        var connected = agentStatus.Equals("connected", StringComparison.OrdinalIgnoreCase)
+                        && apiStatus.Equals("available", StringComparison.OrdinalIgnoreCase);
+        var activeCritical = IntValue(counts, "activeCritical") ?? 0;
+        var unacknowledged = LongValue(counts, "unacknowledged") ?? 0;
+        var highWatermark = LongValue(counts, "eventChangeHighWatermark")
+                            ?? LongValue(counts, "lastSequence")
+                            ?? 0;
+        var maxConcurrentDevices = IntValue(root, "maxConcurrentDevices") ?? 1;
+        var storageReady = BoolValue(storage, "ready");
+        var storageCode = StringValue(storage, "errorCode");
+        var storageSchemaVersion = IntValue(storage, "schemaVersion");
+        var certificateStatus = StringValue(certificate, "state") ?? "unknown";
+        var certificateExpiresAt = DateTimeValue(certificate, "notAfterUtc");
+        var mappedDevices = new List<DeviceSnapshotDto>();
+        if (root.TryGetProperty("devices", out var devices) && devices.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var device in devices.EnumerateArray())
+            {
+                mappedDevices.Add(MapDevice(device, generatedAt, 0, false));
+            }
+        }
+
+        var state = mockMode ? AgentConnectionState.Demo
+            : !connected ? AgentConnectionState.Offline
+            : !ready ? AgentConnectionState.Stale
+            : AgentConnectionState.Connected;
+        var operational = BuildOperationalStatuses(
+            state,
+            agentStatus,
+            apiStatus,
+            realtimeStatus,
+            readinessCode,
+            maxConcurrentDevices,
+            storageReady,
+            storageCode,
+            storageSchemaVersion,
+            certificateStatus,
+            certificateExpiresAt);
+        return new AgentSnapshotDto(
+            generatedAt,
+            state,
+            mappedDevices,
+            Math.Max(0, highWatermark),
+            $"Agent {agentId} · API v3",
+            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · 활성 장애 {activeCritical}건 · {readinessCode}",
+            agentId,
+            ready,
+            readinessCode,
+            Math.Max(0, unacknowledged),
+            3,
+            agentStatus,
+            apiStatus,
+            realtimeStatus,
+            certificateStatus,
+            certificateExpiresAt,
+            operational,
+            MaxConcurrentDevices: Math.Max(1, maxConcurrentDevices));
+    }
+
+    public static AgentSnapshotDto WithCertificateStatus(AgentSnapshotDto snapshot, string certificateJson)
+    {
+        using var document = JsonDocument.Parse(certificateJson);
+        var root = document.RootElement;
+        var enabled = BoolValue(root, "httpsEnabled") ?? false;
+        var state = StringValue(root, "state") ?? (enabled ? "unknown" : "disabled");
+        var expiresAt = DateTimeValue(root, "notAfterUtc");
+        var statuses = (snapshot.OperationalStatuses ?? []).ToList();
+        statuses.RemoveAll(item => item.Code.StartsWith("CERT_", StringComparison.Ordinal));
+        var health = state.ToUpperInvariant() switch
+        {
+            "EXPIRED" or "UNAVAILABLE" => DeviceHealth.Critical,
+            "EXPIRING" => DeviceHealth.Warning,
+            "ACTIVE" or "VALID" => DeviceHealth.Normal,
+            _ when enabled => DeviceHealth.Normal,
+            _ => DeviceHealth.Warning
+        };
+        var code = state.ToUpperInvariant() switch
+        {
+            "EXPIRED" => "CERT_EXPIRED",
+            "EXPIRING" => "CERT_EXPIRING",
+            "UNAVAILABLE" => "CERT_UNAVAILABLE",
+            _ when enabled => "CERT_VALID",
+            _ => "CERT_DISABLED"
+        };
+        var detail = expiresAt is null
+            ? $"HTTPS 인증서 상태 {state}"
+            : $"HTTPS 인증서 상태 {state} · 만료 {expiresAt.Value.LocalDateTime:yyyy-MM-dd}";
+        statuses.Add(new OperationalStatusDto(code, "HTTPS 인증서", detail, health));
+        return snapshot with
+        {
+            CertificateStatus = state,
+            CertificateExpiresAt = expiresAt,
+            OperationalStatuses = statuses
+        };
+    }
+
+    private static IReadOnlyList<OperationalStatusDto> BuildOperationalStatuses(
+        AgentConnectionState state,
+        string agentStatus,
+        string apiStatus,
+        string realtimeStatus,
+        string readinessCode,
+        int maxConcurrentDevices,
+        bool? storageReady = null,
+        string? storageCode = null,
+        int? storageSchemaVersion = null,
+        string certificateStatus = "unknown",
+        DateTimeOffset? certificateExpiresAt = null)
+    {
+        var statuses = new List<OperationalStatusDto>
+        {
+            new("AGENT_CHANNEL", "원격 수집기", $"Agent 채널 {agentStatus}",
+                state is AgentConnectionState.Offline or AgentConnectionState.NeedsPairing
+                    ? DeviceHealth.Disconnected
+                    : DeviceHealth.Normal),
+            new("API_CHANNEL", "HTTPS API", $"API 채널 {apiStatus}",
+                apiStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
+                    ? DeviceHealth.Normal
+                    : DeviceHealth.Critical),
+            new(realtimeStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
+                    ? "REALTIME_AVAILABLE"
+                    : "REALTIME_DEGRADED",
+                "실시간 이벤트",
+                realtimeStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
+                    ? "SignalR 실시간 채널 정상"
+                    : $"SignalR 채널 {realtimeStatus} · HTTPS 캐치업 유지",
+                realtimeStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
+                    ? DeviceHealth.Normal
+                    : DeviceHealth.Warning),
+            new("POLLING", "수집 진행", $"동시 장비 수집 상한 {Math.Max(1, maxConcurrentDevices)}대", DeviceHealth.Normal)
+        };
+
+        if (storageReady.HasValue)
+        {
+            statuses.Add(new OperationalStatusDto(
+                storageReady.Value ? "DB_READY" : "DB_INTEGRITY_FAILED",
+                "로컬 상태 DB",
+                storageReady.Value
+                    ? $"Readiness 정상 · 스키마 v{storageSchemaVersion?.ToString() ?? "-"}"
+                    : $"Liveness 유지 · Readiness 실패 · {storageCode ?? "STORAGE_WRITE_FAILED"}",
+                storageReady.Value ? DeviceHealth.Normal : DeviceHealth.Critical));
+        }
+
+        if (!certificateStatus.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            var certificateHealth = certificateStatus.ToUpperInvariant() switch
+            {
+                "EXPIRED" or "UNAVAILABLE" => DeviceHealth.Critical,
+                "EXPIRING" => DeviceHealth.Warning,
+                _ => DeviceHealth.Normal
+            };
+            statuses.Add(new OperationalStatusDto(
+                certificateHealth == DeviceHealth.Critical ? "CERT_UNAVAILABLE"
+                    : certificateHealth == DeviceHealth.Warning ? "CERT_EXPIRING" : "CERT_VALID",
+                "HTTPS 인증서",
+                certificateExpiresAt is null
+                    ? $"인증서 상태 {certificateStatus}"
+                    : $"인증서 상태 {certificateStatus} · 만료 {certificateExpiresAt.Value.LocalDateTime:yyyy-MM-dd}",
+                certificateHealth));
+        }
+
+        if (!readinessCode.Equals("READY", StringComparison.OrdinalIgnoreCase)
+            && !readinessCode.Equals("ready", StringComparison.OrdinalIgnoreCase))
+        {
+            var databaseFailure = readinessCode.Contains("STORAGE", StringComparison.OrdinalIgnoreCase)
+                                  || readinessCode.Contains("DB_", StringComparison.OrdinalIgnoreCase);
+            if (!databaseFailure || !storageReady.HasValue)
+            {
+                statuses.Add(new OperationalStatusDto(
+                    databaseFailure ? "DB_INTEGRITY_FAILED" : readinessCode,
+                    databaseFailure ? "DB 준비 상태 실패" : "Agent 준비 상태",
+                    databaseFailure
+                        ? $"Liveness 유지 · Readiness 실패 · {readinessCode}"
+                        : $"현재 상태 미확인 · {readinessCode}",
+                    databaseFailure ? DeviceHealth.Critical : DeviceHealth.Warning));
+            }
+        }
+        return statuses;
+    }
+
     internal static AgentSnapshotDto MapSnapshotV2(JsonElement root, JsonElement devices)
     {
         var generatedAt = DateTimeValue(root, "utc") ?? DateTimeOffset.UtcNow;
@@ -102,6 +321,7 @@ public static class AgentContractMapper
         var ready = BoolValue(root, "ready") ?? false;
         var mockMode = BoolValue(root, "mockMode") ?? false;
         var activeCritical = IntValue(root, "activeCritical") ?? 0;
+        var unacknowledged = LongValue(root, "unacknowledged") ?? 0;
         var highWatermark = LongValue(root, "highWatermark") ?? 0;
         var agentId = StringValue(root, "agentId") ?? "agent";
         var readinessCode = StringValue(root, "readinessCode") ?? (ready ? "READY" : "AGENT_NOT_READY");
@@ -127,7 +347,19 @@ public static class AgentContractMapper
             $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · {readinessCode}",
             agentId,
             ready,
-            readinessCode);
+            readinessCode,
+            Math.Max(0, unacknowledged),
+            2,
+            connected ? "connected" : "offline",
+            connected ? "available" : "unavailable",
+            "unknown",
+            OperationalStatuses: BuildOperationalStatuses(
+                state,
+                connected ? "connected" : "offline",
+                connected ? "available" : "unavailable",
+                "unknown",
+                readinessCode,
+                1));
     }
 
     internal static AgentSnapshotDto MapSnapshot(JsonElement status, JsonElement devices)
@@ -195,7 +427,8 @@ public static class AgentContractMapper
             acknowledged,
             recovered,
             StringValue(item, "conditionKey"),
-            BoolValue(item, "isActiveCondition") ?? (!recovered && severity == DeviceHealth.Critical));
+            BoolValue(item, "isActiveCondition") ?? (!recovered && severity == DeviceHealth.Critical),
+            DateTimeValue(item, "recoveredUtc"));
     }
 
     private static DeviceSnapshotDto MapDevice(JsonElement device, DateTimeOffset generatedAt, int activeCritical, bool firstDevice)
@@ -204,36 +437,59 @@ public static class AgentContractMapper
         var name = StringValue(device, "displayName") ?? id;
         var model = StringValue(device, "model") ?? "Unknown";
         var uplinkPort = StringValue(device, "uplinkPort") ?? "-";
-        var collections = device.TryGetProperty("collection", out var collection) && collection.ValueKind == JsonValueKind.Array
-            ? collection.EnumerateArray().ToArray()
-            : [];
+        var collection = device.TryGetProperty("collections", out var v3Collections)
+                         && v3Collections.ValueKind == JsonValueKind.Array
+            ? v3Collections
+            : device.TryGetProperty("collection", out var legacyCollections)
+              && legacyCollections.ValueKind == JsonValueKind.Array
+                ? legacyCollections
+                : default;
+        var collections = collection.ValueKind == JsonValueKind.Array ? collection.EnumerateArray().ToArray() : [];
         var latestCapture = collections.Select(item => DateTimeValue(item, "capturedUtc"))
             .Where(item => item.HasValue).Select(item => item!.Value).DefaultIfEmpty().Max();
+        if (latestCapture == default) latestCapture = DateTimeValue(device, "lastCollectionUtc") ?? default;
         var hasCapture = latestCapture != default;
 
         var interfaces = FindCollection(collections, "interface_status");
         var system = FindCollection(collections, "system");
         var version = FindCollection(collections, "version");
         var collectorHealth = FindCollection(collections, "collector_health");
+        var collectionHealth = ObjectValue(device, "collectionHealth");
         var uplinkUp = DataBool(interfaces, "uplinkOperationalUp");
         var portsUp = DataLong(interfaces, "portsUp");
         var portsDown = DataLong(interfaces, "portsDown");
         var uptimeSeconds = DataLong(system, "uptimeSeconds");
         var softwareVersion = DataString(version, "softwareVersion") ?? "-";
         var post = DataString(system, "post") ?? PostSummary(system);
-        var collectorState = DataString(collectorHealth, "state");
-        var collectorCode = DataString(collectorHealth, "errorCode") ?? collections.Select(item => DataString(item, "collectorStatus"))
+        var reportedCollectorState = StringValue(collectionHealth, "state")
+                                     ?? DataString(collectorHealth, "state");
+        string collectorState = reportedCollectorState ?? "Initializing";
+        var collectorCode = StringValue(collectionHealth, "errorCode")
+                            ?? DataString(collectorHealth, "errorCode")
+                            ?? collections.Select(item => DataString(item, "collectorStatus"))
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !value.Equals("OK", StringComparison.OrdinalIgnoreCase));
         var collectorDegraded = string.Equals(collectorState, "Degraded", StringComparison.OrdinalIgnoreCase);
         var collectorUnsupported = string.Equals(collectorState, "Unsupported", StringComparison.OrdinalIgnoreCase);
-        // v0.2 is explicitly a single-device POC. Until the Agent exposes a
-        // per-device active count, apply its aggregate count only to that one
-        // device so the dashboard/tray cannot appear healthy during an active
-        // critical event.
         var hasActiveCriticalEvent = firstDevice && activeCritical > 0;
         var collectorFailed = string.Equals(collectorState, "Failed", StringComparison.OrdinalIgnoreCase)
                               || string.Equals(collectorState, "AuthBlocked", StringComparison.OrdinalIgnoreCase)
-                              || (collectorState is null && collectorCode is not null);
+                              || (reportedCollectorState is null && collectorCode is not null);
+
+        var capabilities = new List<CollectorCapabilityDto>();
+        if (device.TryGetProperty("capabilities", out var capabilityItems)
+            && capabilityItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var capability in capabilityItems.EnumerateArray())
+            {
+                var commandId = StringValue(capability, "commandId");
+                if (string.IsNullOrWhiteSpace(commandId)) continue;
+                capabilities.Add(new CollectorCapabilityDto(
+                    commandId,
+                    BoolValue(capability, "supported") ?? false,
+                    StringValue(capability, "state") ?? "Unknown",
+                    StringValue(capability, "errorCode")));
+            }
+        }
 
         var health = !hasCapture ? hasActiveCriticalEvent ? DeviceHealth.Critical : DeviceHealth.Loading
             : collectorFailed ? DeviceHealth.Disconnected
@@ -265,7 +521,9 @@ public static class AgentContractMapper
             new("포트 요약", portsUp.HasValue ? $"UP {portsUp} · DOWN {portsDown ?? 0}" : "데이터 없음", portsDown > 0 ? DeviceHealth.Warning : DeviceHealth.Normal),
             new("소프트웨어", softwareVersion),
             new("POST", post ?? "데이터 없음", post is not null && !post.Equals("PASS", StringComparison.OrdinalIgnoreCase) ? DeviceHealth.Warning : DeviceHealth.Normal),
-            new("수집기", collectorCode ?? "OK", collectorFailed ? DeviceHealth.Disconnected : collectorDegraded || collectorUnsupported ? DeviceHealth.Warning : DeviceHealth.Normal)
+            new("수집기", collectorCode ?? collectorState, collectorFailed ? DeviceHealth.Disconnected : collectorDegraded || collectorUnsupported ? DeviceHealth.Warning : DeviceHealth.Normal),
+            new("수집 기능", capabilities.Count == 0 ? "확인 중" : $"{capabilities.Count(item => item.Supported)}/{capabilities.Count} 지원",
+                capabilities.Any(item => !item.Supported) ? DeviceHealth.Warning : DeviceHealth.Normal)
         };
         if (hasActiveCriticalEvent)
         {
@@ -281,7 +539,10 @@ public static class AgentContractMapper
             hasCapture ? latestCapture : generatedAt,
             summary,
             FormatUptime(uptimeSeconds),
-            metrics);
+            metrics,
+            capabilities,
+            collectorState,
+            collectorCode);
     }
 
     private static JsonElement? FindCollection(JsonElement[] items, string commandId) => items
@@ -318,19 +579,36 @@ public static class AgentContractMapper
 
     private static string? StringValue(JsonElement item, string property)
     {
+        if (item.ValueKind != JsonValueKind.Object) return null;
         if (!item.TryGetProperty(property, out var value)) return null;
         return value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
     }
 
     private static bool? BoolValue(JsonElement item, string property) =>
-        item.TryGetProperty(property, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
 
     private static long? LongValue(JsonElement item, string property) =>
-        item.TryGetProperty(property, out var value) && value.TryGetInt64(out var result) ? result : null;
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.TryGetInt64(out var result) ? result : null;
 
     private static int? IntValue(JsonElement item, string property) =>
-        item.TryGetProperty(property, out var value) && value.TryGetInt32(out var result) ? result : null;
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.TryGetInt32(out var result) ? result : null;
 
     private static DateTimeOffset? DateTimeValue(JsonElement item, string property) =>
-        item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var result) ? result : null;
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && value.TryGetDateTimeOffset(out var result) ? result : null;
+
+    private static JsonElement ObjectValue(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.Object
+            ? value
+            : default;
 }

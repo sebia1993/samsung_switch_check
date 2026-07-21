@@ -60,6 +60,29 @@ public sealed class AgentReadinessTests
             var partialReady = await readiness.CheckAsync();
             Assert.True(partialReady.Ready);
 
+            var staleAttempt = now.AddHours(-2);
+            await store.UpsertSnapshotAsync(new DeviceSnapshot("TEST-SW-01",
+                CommandCatalog.CollectorHealthSnapshotIdFor("version"), staleAttempt, new JsonObject
+                {
+                    ["errorCode"] = null,
+                    ["lastAttemptUtc"] = staleAttempt.ToString("O"),
+                    ["lastSuccessUtc"] = staleAttempt.ToString("O"),
+                    ["consecutiveFailures"] = 0,
+                    ["state"] = "Healthy"
+                }));
+            var stale = await readiness.CheckAsync();
+            Assert.False(stale.Ready);
+            Assert.Equal(AgentErrorCodes.CollectorStale, stale.Code);
+            await store.UpsertSnapshotAsync(new DeviceSnapshot("TEST-SW-01",
+                CommandCatalog.CollectorHealthSnapshotIdFor("version"), now, new JsonObject
+                {
+                    ["errorCode"] = null,
+                    ["lastAttemptUtc"] = now.ToString("O"),
+                    ["lastSuccessUtc"] = now.ToString("O"),
+                    ["consecutiveFailures"] = 0,
+                    ["state"] = "Healthy"
+                }));
+
             await store.UpsertSnapshotAsync(new DeviceSnapshot("TEST-SW-01",
                 CommandCatalog.CollectorHealthSnapshotIdFor("log_ram"), now, new JsonObject
                 {

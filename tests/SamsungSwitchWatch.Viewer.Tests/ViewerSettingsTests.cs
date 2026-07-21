@@ -148,4 +148,23 @@ public sealed class ViewerSettingsTests
             if (Directory.Exists(folder)) Directory.Delete(folder, true);
         }
     }
+
+    [Fact]
+    public void StartupWindowPolicy_HonorsTrayStartUnlessPairingNeedsAttention()
+    {
+        var settings = new ViewerSettings { StartMinimizedToTray = true };
+
+        Assert.False(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: false));
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: true));
+
+        settings.StartMinimizedToTray = false;
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: false));
+    }
+
+    [Fact]
+    public void Sanitize_PreservesStartMinimizedToTray()
+    {
+        var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings { StartMinimizedToTray = true });
+        Assert.True(clean.StartMinimizedToTray);
+    }
 }

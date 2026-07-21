@@ -1,0 +1,47 @@
+# 불변 릴리스 절차
+
+Samsung Switch Watch의 GitHub 릴리스는 검증된 **annotated tag push**에서만 게시됩니다. `workflow_dispatch`는 동일한 패키지를 빌드하고 다운로드 검증까지 수행하지만 GitHub Release를 만들거나 기존 자산을 변경하지 않습니다.
+
+## 릴리스 전 조건
+
+- `global.json`의 정확한 .NET SDK 버전(현재 `10.0.302`)을 사용합니다.
+- 모든 `packages.lock.json`과 `packages.win-x64.lock.json`이 현재 프로젝트 파일과 일치해야 합니다.
+- 작업 트리가 깨끗해야 하며 `scripts/validate.ps1 -Configuration Release`가 통과해야 합니다.
+- 서명 인증서가 없으면 버전에는 반드시 `-poc`가 포함되어야 합니다. 이 경우 릴리스는 prerelease로 게시됩니다.
+- 정식 버전은 `release-signing` GitHub Environment의 `SSW_SIGNING_PFX_BASE64`, `SSW_SIGNING_CERTIFICATE_PASSWORD` secret으로 Authenticode 서명과 타임스탬프를 완료해야 합니다.
+
+## 게시 방법
+
+예를 들어 `0.4.0-poc`를 게시할 때는 검증된 커밋에 annotated tag를 만들고 한 번만 push합니다.
+
+```powershell
+git tag -a v0.4.0-poc -m "Samsung Switch Watch 0.4.0 POC"
+git push origin v0.4.0-poc
+```
+
+워크플로는 같은 태그의 GitHub Release가 이미 존재하면 즉시 실패합니다. `--clobber`를 사용하지 않으며, 기존 자산을 교체하거나 추가하는 경로도 제공하지 않습니다. 변경이 필요하면 소스와 버전을 올려 새 태그로 게시합니다.
+
+## 산출물 계약
+
+릴리스에는 다음 파일만 포함됩니다.
+
+- Agent/Viewer `win-x64` ZIP
+- `BUILD-MANIFEST.json`
+- `SBOM.spdx.json` (SPDX 2.3)
+- `SBOM.cdx.json` (CycloneDX 1.6)
+- `SHA256SUMS.txt`
+
+각 ZIP에도 실행 파일과 스크립트의 SHA-256, 소스 커밋, SDK, 서명 상태가 기록된 빌드 매니페스트와 두 SBOM이 포함됩니다. 업로드 전 계약 검사를 수행하고, Actions artifact를 다시 다운로드해 digest를 재검증합니다. 태그 릴리스에서는 GitHub build provenance attestation을 만든 뒤 게시 자산을 다시 다운로드하여 SHA-256, ZIP 계약, attestation을 다시 확인합니다.
+
+## 사용자 검증
+
+다운로드한 파일은 같은 폴더에서 다음처럼 확인할 수 있습니다.
+
+```powershell
+$declared = Get-Content .\SHA256SUMS.txt
+$declared
+Get-FileHash .\SamsungSwitchWatch-*-win-x64.zip -Algorithm SHA256
+gh attestation verify .\SamsungSwitchWatch-Agent-0.4.0-poc-win-x64.zip --repo sebia1993/samsung_switch_check
+```
+
+해시가 다르거나 attestation의 repository/commit이 기대값과 다르면 설치하지 않습니다.

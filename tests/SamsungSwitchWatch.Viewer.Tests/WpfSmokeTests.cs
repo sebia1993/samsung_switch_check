@@ -1,5 +1,7 @@
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
+using SamsungSwitchWatch.Viewer.Views;
+using SamsungSwitchWatch.Viewer.Models;
 using System.IO;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
@@ -26,6 +28,19 @@ public sealed class WpfSmokeTests
                 Assert.Equal(1280, window.MinWidth);
                 Assert.Equal(720, window.MinHeight);
                 Assert.True(window.IsVisible);
+                var mini = new MiniWindow(viewModel, true);
+                mini.Show();
+                mini.UpdateLayout();
+                Assert.True(mini.IsVisible);
+                mini.AllowClose();
+                mini.Close();
+                var popup = new AlertPopup(new EventViewModel(new SwitchEventDto(
+                    1, "smoke-event", "SW-DEMO", "ACCESS-SW-DEMO", DateTimeOffset.UtcNow,
+                    DeviceHealth.Critical, "상태 변경", "업링크 Down", "UP → DOWN")));
+                popup.Show();
+                popup.UpdateLayout();
+                Assert.True(popup.IsVisible);
+                popup.Close();
                 window.AllowClose();
                 window.Close();
                 viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();

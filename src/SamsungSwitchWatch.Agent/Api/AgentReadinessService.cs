@@ -4,6 +4,7 @@ using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
 using SamsungSwitchWatch.Agent.Security;
 using SamsungSwitchWatch.Core.Profiles;
+using System.Globalization;
 
 namespace SamsungSwitchWatch.Agent.Api;
 
@@ -27,9 +28,16 @@ public sealed class AgentReadinessService(
             return NotReady(storage.ErrorCode ?? AgentErrorCodes.StorageWriteFailed, storage.SchemaVersion, now);
         }
 
-        if (options.Https.Enabled && !certificates.Status.HttpsEnabled)
+        if (options.Https.Enabled &&
+            (!certificates.Status.HttpsEnabled ||
+             string.Equals(certificates.Status.State, "unavailable", StringComparison.Ordinal)))
         {
             return NotReady(AgentErrorCodes.CertificateUnavailable, storage.SchemaVersion, now);
+        }
+        if (options.Https.Enabled &&
+            string.Equals(certificates.Status.State, "expired", StringComparison.Ordinal))
+        {
+            return NotReady(AgentErrorCodes.CertificateExpired, storage.SchemaVersion, now);
         }
 
         if (!options.MockMode)
@@ -111,6 +119,14 @@ public sealed class AgentReadinessService(
                     {
                         return NotReady(AgentErrorCodes.CollectorInitializing, storage.SchemaVersion, now);
                     }
+
+                    var lastAttemptText = health?.Data["lastAttemptUtc"]?.GetValue<string>();
+                    if (!DateTimeOffset.TryParse(lastAttemptText, CultureInfo.InvariantCulture,
+                            DateTimeStyles.AssumeUniversal, out var lastAttempt) ||
+                        now - lastAttempt > FreshnessWindow(command))
+                    {
+                        return NotReady(AgentErrorCodes.CollectorStale, storage.SchemaVersion, now);
+                    }
                 }
             }
         }
@@ -121,6 +137,12 @@ public sealed class AgentReadinessService(
 
     private AgentReadiness NotReady(string code, int schemaVersion, DateTimeOffset checkedUtc) =>
         new(false, "not-ready", code, schemaVersion, runtime.SchedulerHeartbeatUtc, checkedUtc);
+
+    private TimeSpan FreshnessWindow(CommandDefinition command)
+    {
+        var schedulerGrace = TimeSpan.FromSeconds(Math.Max(30, options.SchedulerTickSeconds * 3));
+        return command.Interval + schedulerGrace;
+    }
 }
 
 public sealed class StorageIntegrityService(

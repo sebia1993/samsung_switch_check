@@ -24,7 +24,15 @@ public sealed class DpapiCredentialProtector(AgentOptions options) : ICredential
     {
         if (OperatingSystem.IsWindows())
         {
-            return ProtectedData.Protect(plaintext.ToArray(), Entropy, DataProtectionScope.LocalMachine);
+            var copy = plaintext.ToArray();
+            try
+            {
+                return ProtectedData.Protect(copy, Entropy, DataProtectionScope.LocalMachine);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(copy);
+            }
         }
 
         if (!options.MockMode)
@@ -39,7 +47,15 @@ public sealed class DpapiCredentialProtector(AgentOptions options) : ICredential
     {
         if (OperatingSystem.IsWindows())
         {
-            return ProtectedData.Unprotect(protectedBytes.ToArray(), Entropy, DataProtectionScope.LocalMachine);
+            var copy = protectedBytes.ToArray();
+            try
+            {
+                return ProtectedData.Unprotect(copy, Entropy, DataProtectionScope.LocalMachine);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(copy);
+            }
         }
 
         if (!options.MockMode)
@@ -178,8 +194,9 @@ public sealed class FileCredentialVault(AgentOptions options, ICredentialProtect
 
 public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
 {
-    private static readonly TimeSpan TokenValidationCacheDuration = TimeSpan.FromSeconds(30);
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _validatedTokens = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RealtimeConnectionBucket> _realtimeConnections =
+        new(StringComparer.OrdinalIgnoreCase);
+    private long _nextRealtimeConnectionId;
 
     public async Task<(string Code, DateTimeOffset ExpiresUtc)> CreateCodeAsync(CancellationToken cancellationToken = default)
     {
@@ -198,6 +215,8 @@ public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
         }
 
         var code = new string(characters);
+        CryptographicOperations.ZeroMemory(random);
+        characters.Clear();
         var now = DateTimeOffset.UtcNow;
         var expires = now.AddMinutes(Math.Clamp(options.PairingCodeLifetimeMinutes, 1, 60));
         await store.StorePairingCodeAsync(Hash(code), now, expires, cancellationToken);
@@ -206,61 +225,258 @@ public sealed class PairingService(AgentOptions options, SqliteAgentStore store)
 
     public async Task<string> ExchangeAsync(string code, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(code) || code.Length > 64 ||
-            !await store.ConsumePairingCodeAsync(Hash(code.Trim()), DateTimeOffset.UtcNow, cancellationToken))
+        if (string.IsNullOrWhiteSpace(code) || code.Length > 64)
         {
             throw new AgentOperationException(AgentErrorCodes.PairingInvalid, "Pairing code is invalid, expired, or already used.", 400);
         }
 
         var token = Base64Url(RandomNumberGenerator.GetBytes(32));
-        await store.StoreTokenAsync(Hash(token), DateTimeOffset.UtcNow, cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        if (!await store.ConsumePairingCodeAndStoreTokenAsync(
+                Hash(code.Trim()), Hash(token), now, cancellationToken))
+        {
+            throw new AgentOperationException(AgentErrorCodes.PairingInvalid,
+                "Pairing code is invalid, expired, or already used.", 400);
+        }
         return token;
     }
 
     public async Task<bool> ValidateTokenAsync(string token, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(token) || token.Length > 4096)
+        if (string.IsNullOrWhiteSpace(token) || token.Length != 43 ||
+            token.Any(character => !char.IsLetterOrDigit(character) && character is not '-' and not '_'))
         {
             return false;
         }
 
-        var tokenHash = Hash(token);
-        var now = DateTimeOffset.UtcNow;
-        if (_validatedTokens.TryGetValue(tokenHash, out var lastValidated) &&
-            now - lastValidated < TokenValidationCacheDuration)
+        return await store.ValidateAndTouchTokenAsync(Hash(token), DateTimeOffset.UtcNow, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<ApiTokenInfo>> ListTokensAsync(CancellationToken cancellationToken = default) =>
+        store.GetApiTokensAsync(DateTimeOffset.UtcNow, cancellationToken);
+
+    public async Task RevokeTokenAsync(string tokenId, CancellationToken cancellationToken = default)
+    {
+        if (!await store.RevokeTokenAsync(tokenId, DateTimeOffset.UtcNow, cancellationToken))
         {
-            return true;
+            throw new AgentOperationException(AgentErrorCodes.TokenNotFound,
+                "The Viewer token id was not found.", 404);
+        }
+        AbortRealtimeConnections(tokenId);
+    }
+
+    public async Task<string> RotateTokenAsync(string tokenId, CancellationToken cancellationToken = default)
+    {
+        var replacement = Base64Url(RandomNumberGenerator.GetBytes(32));
+        if (!await store.RotateTokenAsync(tokenId, Hash(replacement), DateTimeOffset.UtcNow, cancellationToken))
+        {
+            throw new AgentOperationException(AgentErrorCodes.TokenNotFound,
+                "The Viewer token id was not found.", 404);
+        }
+        AbortRealtimeConnections(tokenId);
+        return replacement;
+    }
+
+    public async Task<IDisposable?> TryRegisterRealtimeConnectionAsync(
+        string token,
+        Action abort,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(abort);
+        if (!await ValidateTokenAsync(token, cancellationToken))
+        {
+            return null;
         }
 
-        var valid = await store.ValidateAndTouchTokenAsync(tokenHash, now, cancellationToken);
-        if (valid)
+        var tokenId = Hash(token)[..16];
+        var connectionId = Interlocked.Increment(ref _nextRealtimeConnectionId);
+        var entry = new RealtimeConnectionEntry(abort);
+        RealtimeConnectionBucket bucket;
+        while (true)
         {
-            _validatedTokens[tokenHash] = now;
+            bucket = _realtimeConnections.GetOrAdd(tokenId, static _ => new RealtimeConnectionBucket());
+            if (bucket.TryAdd(connectionId, entry))
+            {
+                break;
+            }
+            RemoveExactBucket(tokenId, bucket);
         }
-        return valid;
+
+        var lease = new RealtimeConnectionLease(() =>
+            RemoveRealtimeConnection(tokenId, connectionId, bucket));
+        try
+        {
+            // Revalidate after registration. This closes the race where revoke
+            // commits after the first validation but before the connection is visible.
+            if (await ValidateTokenAsync(token, cancellationToken))
+            {
+                return lease;
+            }
+
+            lease.Dispose();
+            entry.AbortOnce();
+            return null;
+        }
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
     }
+
+    private void AbortRealtimeConnections(string tokenId)
+    {
+        if (_realtimeConnections.TryRemove(tokenId.ToUpperInvariant(), out var bucket))
+        {
+            bucket.AbortAll();
+        }
+    }
+
+    private void RemoveRealtimeConnection(
+        string tokenId,
+        long connectionId,
+        RealtimeConnectionBucket bucket)
+    {
+        bucket.Remove(connectionId);
+        if (bucket.TryRetireIfEmpty())
+        {
+            RemoveExactBucket(tokenId, bucket);
+        }
+    }
+
+    private void RemoveExactBucket(string tokenId, RealtimeConnectionBucket bucket) =>
+        ((ICollection<KeyValuePair<string, RealtimeConnectionBucket>>)_realtimeConnections)
+        .Remove(new KeyValuePair<string, RealtimeConnectionBucket>(tokenId, bucket));
 
     private string Hash(string value)
     {
-        var bytes = Encoding.UTF8.GetBytes(options.TokenPepper + "\0" + value);
+        var pepperLength = Encoding.UTF8.GetByteCount(options.TokenPepper);
+        var valueLength = Encoding.UTF8.GetByteCount(value);
+        var bytes = new byte[pepperLength + 1 + valueLength];
+        byte[]? digest = null;
         try
         {
-            return Convert.ToHexString(SHA256.HashData(bytes));
+            Encoding.UTF8.GetBytes(options.TokenPepper.AsSpan(), bytes.AsSpan(0, pepperLength));
+            bytes[pepperLength] = 0;
+            Encoding.UTF8.GetBytes(value.AsSpan(), bytes.AsSpan(pepperLength + 1, valueLength));
+            digest = SHA256.HashData(bytes);
+            return Convert.ToHexString(digest);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(bytes);
+            if (digest is not null)
+            {
+                CryptographicOperations.ZeroMemory(digest);
+            }
         }
     }
 
-    private static string Base64Url(byte[] value) => Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static string Base64Url(byte[] value)
+    {
+        try
+        {
+            return Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    private sealed class RealtimeConnectionEntry(Action abort)
+    {
+        private int _aborted;
+
+        public void AbortOnce()
+        {
+            if (Interlocked.Exchange(ref _aborted, 1) != 0)
+            {
+                return;
+            }
+            try
+            {
+                abort();
+            }
+            catch
+            {
+                // One broken transport must not prevent the remaining sessions
+                // for the revoked token from being terminated.
+            }
+        }
+    }
+
+    private sealed class RealtimeConnectionBucket
+    {
+        private readonly object _gate = new();
+        private readonly Dictionary<long, RealtimeConnectionEntry> _entries = [];
+        private bool _closed;
+
+        public bool TryAdd(long connectionId, RealtimeConnectionEntry entry)
+        {
+            lock (_gate)
+            {
+                if (_closed)
+                {
+                    return false;
+                }
+                _entries.Add(connectionId, entry);
+                return true;
+            }
+        }
+
+        public void Remove(long connectionId)
+        {
+            lock (_gate)
+            {
+                _entries.Remove(connectionId);
+            }
+        }
+
+        public bool TryRetireIfEmpty()
+        {
+            lock (_gate)
+            {
+                if (_closed || _entries.Count != 0)
+                {
+                    return false;
+                }
+                _closed = true;
+                return true;
+            }
+        }
+
+        public void AbortAll()
+        {
+            RealtimeConnectionEntry[] entries;
+            lock (_gate)
+            {
+                _closed = true;
+                entries = _entries.Values.ToArray();
+                _entries.Clear();
+            }
+            foreach (var entry in entries)
+            {
+                entry.AbortOnce();
+            }
+        }
+    }
+
+    private sealed class RealtimeConnectionLease(Action release) : IDisposable
+    {
+        private Action? _release = release;
+
+        public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+    }
 }
 
 public sealed class PairingAttemptLimiter
 {
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan BucketRetention = TimeSpan.FromMinutes(10);
     private const int MaximumAttemptsPerWindow = 5;
     private readonly ConcurrentDictionary<string, AttemptBucket> _buckets = new(StringComparer.Ordinal);
+    private int _operations;
 
     public bool TryAcquire(string clientKey, DateTimeOffset now, out TimeSpan retryAfter)
     {
@@ -268,6 +484,7 @@ public sealed class PairingAttemptLimiter
         var bucket = _buckets.GetOrAdd(clientKey, static _ => new AttemptBucket());
         lock (bucket.SyncRoot)
         {
+            bucket.LastSeenUtc = now;
             while (bucket.Attempts.TryPeek(out var oldest) && now - oldest >= Window)
             {
                 bucket.Attempts.Dequeue();
@@ -281,7 +498,30 @@ public sealed class PairingAttemptLimiter
 
             bucket.Attempts.Enqueue(now);
             retryAfter = TimeSpan.Zero;
-            return true;
+        }
+
+        MaybeCleanup(now);
+        return true;
+    }
+
+    private void MaybeCleanup(DateTimeOffset now)
+    {
+        if ((Interlocked.Increment(ref _operations) & 0xff) != 0 && _buckets.Count <= 1024)
+        {
+            return;
+        }
+
+        foreach (var pair in _buckets)
+        {
+            var stale = false;
+            lock (pair.Value.SyncRoot)
+            {
+                stale = now - pair.Value.LastSeenUtc >= BucketRetention;
+            }
+            if (stale)
+            {
+                _buckets.TryRemove(pair.Key, out _);
+            }
         }
     }
 
@@ -290,28 +530,92 @@ public sealed class PairingAttemptLimiter
         public object SyncRoot { get; } = new();
 
         public Queue<DateTimeOffset> Attempts { get; } = new();
+
+        public DateTimeOffset LastSeenUtc { get; set; }
     }
 }
 
 public sealed class CertificateStatusService(AgentOptions options, IWebHostEnvironment environment, ILogger<CertificateStatusService> logger) : IHostedService
 {
     public CertificateStatus Status { get; private set; } = new(false, null);
+    private CancellationTokenSource? _refreshCancellation;
+    private Task? _refreshTask;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        Status = ReadStatus();
+        try
+        {
+            Status = ReadStatus();
+        }
+        catch (Exception exception) when (IsCertificateAvailabilityFailure(exception))
+        {
+            logger.LogError("Agent HTTPS certificate status load failed with {ErrorCode}.",
+                AgentErrorCodes.CertificateUnavailable);
+            Status = new CertificateStatus(options.Https.Enabled, null, State: "unavailable");
+        }
         if (Status.HttpsEnabled)
         {
-            logger.LogInformation("Agent HTTPS certificate SHA-256 fingerprint: {Fingerprint}", Status.Sha256Fingerprint);
+            logger.LogInformation(
+                "Agent HTTPS certificate state {CertificateState}; expires {NotAfterUtc}; accepted pins {AcceptedPinCount}.",
+                Status.State, Status.NotAfterUtc, Status.AcceptedSha256Fingerprints?.Count ?? 0);
+            if (Status.State.StartsWith("expiring", StringComparison.Ordinal))
+            {
+                logger.LogWarning("Agent HTTPS certificate expires in {DaysRemaining} days.", Status.DaysRemaining);
+            }
+            else if (string.Equals(Status.State, "expired", StringComparison.Ordinal))
+            {
+                logger.LogError("Agent HTTPS certificate is expired.");
+            }
         }
         else
         {
             logger.LogWarning("Agent is running without HTTPS because mock/development mode is enabled.");
         }
+        _refreshCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _refreshTask = RefreshLoopAsync(_refreshCancellation.Token);
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_refreshCancellation is null || _refreshTask is null)
+        {
+            return;
+        }
+        await _refreshCancellation.CancelAsync();
+        try
+        {
+            await _refreshTask.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during service shutdown.
+        }
+        finally
+        {
+            _refreshCancellation.Dispose();
+            _refreshCancellation = null;
+            _refreshTask = null;
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromHours(6));
+        while (await timer.WaitForNextTickAsync(cancellationToken))
+        {
+            try
+            {
+                Status = ReadStatus();
+            }
+            catch (Exception exception) when (IsCertificateAvailabilityFailure(exception))
+            {
+                logger.LogError("Agent HTTPS certificate status refresh failed with {ErrorCode}.",
+                    AgentErrorCodes.CertificateUnavailable);
+                Status = new CertificateStatus(true, null, State: "unavailable");
+            }
+        }
+    }
 
     private CertificateStatus ReadStatus()
     {
@@ -320,13 +624,35 @@ public sealed class CertificateStatusService(AgentOptions options, IWebHostEnvir
             return new CertificateStatus(false, null);
         }
 
-        var path = Path.IsPathRooted(options.Https.CertificatePath)
-            ? options.Https.CertificatePath
-            : Path.Combine(environment.ContentRootPath, options.Https.CertificatePath);
-        var password = Environment.GetEnvironmentVariable(options.Https.CertificatePasswordEnvironmentVariable);
-        using var certificate = X509CertificateLoader.LoadPkcs12FromFile(path, password);
-        return new CertificateStatus(true, Convert.ToHexString(certificate.GetCertHash(HashAlgorithmName.SHA256)));
+        using var certificate = AgentCertificateLoader.Load(options.Https, environment.ContentRootPath);
+        var now = DateTimeOffset.UtcNow;
+        var notBefore = new DateTimeOffset(certificate.NotBefore.ToUniversalTime(), TimeSpan.Zero);
+        var notAfter = new DateTimeOffset(certificate.NotAfter.ToUniversalTime(), TimeSpan.Zero);
+        var remaining = notAfter - now;
+        var daysRemaining = (int)Math.Floor(remaining.TotalDays);
+        var state = now < notBefore ? "unavailable" : remaining <= TimeSpan.Zero ? "expired" : remaining switch
+        {
+            var value when value <= TimeSpan.FromDays(7) => "expiring-7",
+            var value when value <= TimeSpan.FromDays(30) => "expiring-30",
+            var value when value <= TimeSpan.FromDays(60) => "expiring-60",
+            _ => "valid"
+        };
+        var current = Convert.ToHexString(certificate.GetCertHash(HashAlgorithmName.SHA256));
+        var accepted = new List<string> { current };
+        if (!string.IsNullOrWhiteSpace(options.Https.PreviousCertificateSha256Fingerprint) &&
+            options.Https.PreviousCertificateAcceptUntilUtc > now &&
+            options.Https.PreviousCertificateAcceptUntilUtc <= now.AddDays(14) &&
+            !string.Equals(options.Https.PreviousCertificateSha256Fingerprint, current,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            accepted.Add(options.Https.PreviousCertificateSha256Fingerprint);
+        }
+        return new CertificateStatus(true, current, notAfter, daysRemaining, state, accepted);
     }
+
+    private static bool IsCertificateAvailabilityFailure(Exception exception) =>
+        exception is CryptographicException or IOException or UnauthorizedAccessException or
+            InvalidOperationException or PlatformNotSupportedException;
 }
 
 public sealed class BearerTokenMiddleware(RequestDelegate next)
@@ -353,13 +679,35 @@ public sealed class BearerTokenMiddleware(RequestDelegate next)
         var token = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
             ? authorization[7..].Trim()
             : string.Empty;
-        if (string.IsNullOrEmpty(token) && context.Request.Path.StartsWithSegments("/hubs/events"))
+        var isRealtimeEndpoint = context.Request.Path.StartsWithSegments("/hubs/events");
+        if (string.IsNullOrEmpty(token) && isRealtimeEndpoint)
         {
             // SignalR WebSocket handshakes may carry the access token in the query string.
             token = context.Request.Query["access_token"].ToString();
         }
-        if (token.Length > 4096 || !await pairingService.ValidateTokenAsync(token, context.RequestAborted))
+        IDisposable? realtimeLease = null;
+        var authenticated = false;
+        if (token.Length <= 4096)
         {
+            if (isRealtimeEndpoint)
+            {
+                realtimeLease = await pairingService.TryRegisterRealtimeConnectionAsync(
+                    token,
+                    context.Abort,
+                    context.RequestAborted);
+                authenticated = realtimeLease is not null;
+            }
+            else
+            {
+                authenticated = await pairingService.ValidateTokenAsync(token, context.RequestAborted);
+            }
+        }
+        if (!authenticated)
+        {
+            if (context.RequestAborted.IsCancellationRequested)
+            {
+                return;
+            }
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await context.Response.WriteAsJsonAsync(new
             {
@@ -369,6 +717,13 @@ public sealed class BearerTokenMiddleware(RequestDelegate next)
         }
 
         context.Items["actor"] = "paired-viewer";
-        await next(context);
+        try
+        {
+            await next(context);
+        }
+        finally
+        {
+            realtimeLease?.Dispose();
+        }
     }
 }

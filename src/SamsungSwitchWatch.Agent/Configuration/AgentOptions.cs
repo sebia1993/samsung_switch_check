@@ -5,6 +5,11 @@ namespace SamsungSwitchWatch.Agent.Configuration;
 
 public sealed class AgentOptions
 {
+    public const int MaximumSwitches = 256;
+    public const int MaximumConcurrentDeviceLimit = 16;
+    public static readonly IReadOnlySet<string> SupportedModels = new HashSet<string>(
+        ["IES4224GP", "IES4028XP", "IES4226XP"], StringComparer.OrdinalIgnoreCase);
+
     public const string SectionName = "Agent";
 
     public string AgentId { get; set; } = "agent-poc-01";
@@ -14,13 +19,24 @@ public sealed class AgentOptions
     public bool EnablePolling { get; set; } = true;
     public bool EnableSimulator { get; set; } = true;
     public int SchedulerTickSeconds { get; set; } = 1;
+    public int MaxConcurrentDevices { get; set; } = 4;
     public int PairingCodeLifetimeMinutes { get; set; } = 10;
     public string TokenPepper { get; set; } = "change-this-local-secret-before-production";
+    public TokenOptions Tokens { get; set; } = new();
     public RetentionOptions Retention { get; set; } = new();
     public HttpsOptions Https { get; set; } = new();
     public List<SwitchOptions> Switches { get; set; } = [];
 
     public string DatabasePath => Path.Combine(Path.GetFullPath(DataDirectory), "switchwatch.db");
+}
+
+public sealed class TokenOptions
+{
+    public const int MaximumActiveTokenLimit = 5;
+
+    public int MaximumActiveTokens { get; set; } = 5;
+    public int AbsoluteLifetimeDays { get; set; } = 180;
+    public int IdleLifetimeDays { get; set; } = 60;
 }
 
 public sealed class HttpsOptions
@@ -29,6 +45,9 @@ public sealed class HttpsOptions
     public int Port { get; set; } = 18443;
     public string CertificatePath { get; set; } = "certs/agent.pfx";
     public string CertificatePasswordEnvironmentVariable { get; set; } = "SAMSUNG_SWITCH_WATCH_CERT_PASSWORD";
+    public string? CertificateStoreThumbprint { get; set; }
+    public string? PreviousCertificateSha256Fingerprint { get; set; }
+    public DateTimeOffset? PreviousCertificateAcceptUntilUtc { get; set; }
 }
 
 public sealed class RetentionOptions
@@ -56,9 +75,16 @@ public static class AgentOptionsValidator
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (options.Switches.Count != 1)
+        if (options.Switches is null || options.Tokens is null || options.Retention is null || options.Https is null ||
+            string.IsNullOrEmpty(options.TokenPepper) || options.TokenPepper.Length > 1024)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "The POC requires exactly one configured switch.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Agent security settings are invalid.");
+        }
+
+        if (options.Switches.Count is < 1 or > AgentOptions.MaximumSwitches)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                $"Between 1 and {AgentOptions.MaximumSwitches} switches must be configured.");
         }
 
         if (!IsIdentifier(options.AgentId, 64))
@@ -67,53 +93,98 @@ public static class AgentOptionsValidator
                 "Agent id must contain only letters, digits, hyphen, or underscore.");
         }
 
-        var device = options.Switches[0];
-        if (!string.Equals(device.Model, "IES4224GP", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", "The POC supports only model IES4224GP.");
-        }
-
-        if (string.IsNullOrWhiteSpace(device.Id) || device.Id.Length > 64 ||
-            device.Id.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '-' and not '_'))
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Device id must contain only letters, digits, hyphen, or underscore.");
-        }
-
-
-        if (!IsIdentifier(device.CredentialId, 64))
+        if (options.MaxConcurrentDevices is < 1 or > AgentOptions.MaximumConcurrentDeviceLimit)
         {
             throw new AgentConfigurationException("CONFIG_INVALID",
-                "Credential id must contain only letters, digits, hyphen, or underscore.");
+                $"MaxConcurrentDevices must be between 1 and {AgentOptions.MaximumConcurrentDeviceLimit}.");
         }
 
-        if (string.IsNullOrWhiteSpace(device.DisplayName) || device.DisplayName.Length > 128 ||
-            device.DisplayName.Any(char.IsControl))
+        if (options.PairingCodeLifetimeMinutes is < 1 or > 60)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Switch display name is invalid.");
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "PairingCodeLifetimeMinutes must be between 1 and 60.");
         }
 
-        if (string.IsNullOrWhiteSpace(device.UplinkPort) || device.UplinkPort.Length > 32 ||
-            device.UplinkPort.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '-' and not '_' and not '/' and not '.'))
+        if (options.Tokens.MaximumActiveTokens is < 1 or > TokenOptions.MaximumActiveTokenLimit ||
+            options.Tokens.AbsoluteLifetimeDays is < 1 or > 365 ||
+            options.Tokens.IdleLifetimeDays is < 1 or > 365 ||
+            options.Tokens.IdleLifetimeDays > options.Tokens.AbsoluteLifetimeDays)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Uplink port identifier is invalid.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Token lifetime settings are invalid.");
         }
 
-        if (IPAddress.TryParse(device.Host, out var address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        if (options.Retention.RawDays is < 1 or > 30 ||
+            options.Retention.RawMaxMegabytes is < 10 or > 10_240 ||
+            options.Retention.EventDays is < 1 or > 3650 ||
+            options.Retention.AuditDays is < 1 or > 3650)
         {
-            throw new AgentConfigurationException(AgentErrorCodes.Ipv6Unsupported,
-                "The POC supports only IPv4 switch addresses.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Retention settings are invalid.");
         }
 
-        if (address is null || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
-            device.Port is < 1 or > 65535)
+        var duplicateId = options.Switches
+            .GroupBy(device => device.Id, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1)?.Key;
+        if (duplicateId is not null)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "A valid IPv4 switch endpoint is required.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Switch device ids must be unique.");
+        }
+
+        foreach (var device in options.Switches)
+        {
+            if (!AgentOptions.SupportedModels.Contains(device.Model))
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID",
+                    $"Supported switch models are: {string.Join(", ", AgentOptions.SupportedModels.Order())}.");
+            }
+
+            if (!IsIdentifier(device.Id, 64))
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID",
+                    "Device id must contain only letters, digits, hyphen, or underscore.");
+            }
+
+            if (!IsIdentifier(device.CredentialId, 64))
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID",
+                    "Credential id must contain only letters, digits, hyphen, or underscore.");
+            }
+
+            if (string.IsNullOrWhiteSpace(device.DisplayName) || device.DisplayName.Length > 128 ||
+                device.DisplayName.Any(char.IsControl))
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID", "Switch display name is invalid.");
+            }
+
+            if (string.IsNullOrWhiteSpace(device.UplinkPort) || device.UplinkPort.Length > 32 ||
+                device.UplinkPort.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '-' and not '_' and not '/' and not '.'))
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID", "Uplink port identifier is invalid.");
+            }
+
+            if (IPAddress.TryParse(device.Host, out var address) &&
+                address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+            {
+                throw new AgentConfigurationException(AgentErrorCodes.Ipv6Unsupported,
+                    "Only IPv4 switch addresses are supported.");
+            }
+
+            if (address is null || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork ||
+                device.Port is < 1 or > 65535)
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID", "A valid IPv4 switch endpoint is required.");
+            }
         }
 
         if (!Uri.TryCreate(options.ListenUrl, UriKind.Absolute, out var listenUri) ||
             (listenUri.Scheme != Uri.UriSchemeHttp && listenUri.Scheme != Uri.UriSchemeHttps))
         {
             throw new AgentConfigurationException("CONFIG_INVALID", "Agent listen URL is invalid.");
+        }
+
+        if (!options.Https.Enabled && listenUri.Scheme != Uri.UriSchemeHttp)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "ListenUrl must use HTTP when the explicit HTTPS endpoint is disabled.");
         }
 
         if (!options.MockMode && !options.Https.Enabled)
@@ -137,13 +208,56 @@ public static class AgentOptionsValidator
                 throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS port is invalid.");
             }
 
-            options.Https.CertificatePath = Path.IsPathRooted(options.Https.CertificatePath)
-                ? Path.GetFullPath(options.Https.CertificatePath)
-                : Path.GetFullPath(Path.Combine(contentRoot, options.Https.CertificatePath));
-            if (!File.Exists(options.Https.CertificatePath))
+            if (!string.IsNullOrWhiteSpace(options.Https.CertificateStoreThumbprint))
             {
-                throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS certificate file does not exist.");
+                options.Https.CertificateStoreThumbprint = NormalizeHex(
+                    options.Https.CertificateStoreThumbprint, 40, "HTTPS certificate store thumbprint");
             }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(options.Https.CertificatePath) ||
+                    string.IsNullOrWhiteSpace(options.Https.CertificatePasswordEnvironmentVariable) ||
+                    options.Https.CertificatePasswordEnvironmentVariable.Length > 128 ||
+                    options.Https.CertificatePasswordEnvironmentVariable.Any(character =>
+                        character is '=' or '\0' || char.IsControl(character)))
+                {
+                    throw new AgentConfigurationException("CONFIG_INVALID",
+                        "HTTPS certificate file settings are invalid.");
+                }
+                options.Https.CertificatePath = Path.IsPathRooted(options.Https.CertificatePath)
+                    ? Path.GetFullPath(options.Https.CertificatePath)
+                    : Path.GetFullPath(Path.Combine(contentRoot, options.Https.CertificatePath));
+                if (!File.Exists(options.Https.CertificatePath))
+                {
+                    throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS certificate file does not exist.");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.Https.PreviousCertificateSha256Fingerprint))
+            {
+                options.Https.PreviousCertificateSha256Fingerprint = NormalizeHex(
+                    options.Https.PreviousCertificateSha256Fingerprint, 64,
+                    "Previous HTTPS certificate SHA-256 fingerprint");
+                var now = DateTimeOffset.UtcNow;
+                if (options.Https.PreviousCertificateAcceptUntilUtc is null ||
+                    options.Https.PreviousCertificateAcceptUntilUtc <= now ||
+                    options.Https.PreviousCertificateAcceptUntilUtc > now.AddDays(14))
+                {
+                    throw new AgentConfigurationException("CONFIG_INVALID",
+                        "The previous certificate overlap must have an expiry no more than 14 days away.");
+                }
+            }
+            else if (options.Https.PreviousCertificateAcceptUntilUtc is not null)
+            {
+                throw new AgentConfigurationException("CONFIG_INVALID",
+                    "A previous certificate fingerprint is required for an overlap expiry.");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(options.Https.PreviousCertificateSha256Fingerprint) ||
+                 options.Https.PreviousCertificateAcceptUntilUtc is not null)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "Certificate pin overlap requires HTTPS to be enabled.");
         }
 
         options.DataDirectory = Path.IsPathRooted(options.DataDirectory)
@@ -155,6 +269,21 @@ public static class AgentOptionsValidator
     private static bool IsIdentifier(string value, int maximumLength) =>
         !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength &&
         value.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_');
+
+    private static string NormalizeHex(string value, int expectedLength, string field)
+    {
+        if (value.Any(character => !Uri.IsHexDigit(character) &&
+                                   character is not ':' and not '-' && !char.IsWhiteSpace(character)))
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", $"{field} is invalid.");
+        }
+        var normalized = new string(value.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
+        if (normalized.Length != expectedLength)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID", $"{field} is invalid.");
+        }
+        return normalized;
+    }
 }
 
 public sealed class AgentConfigurationException(string code, string message) : Exception(message)

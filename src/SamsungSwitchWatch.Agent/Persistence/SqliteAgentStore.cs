@@ -5,15 +5,21 @@ using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
+using SamsungSwitchWatch.Agent.Security;
 
 namespace SamsungSwitchWatch.Agent.Persistence;
 
-public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentStore> logger)
+public sealed class SqliteAgentStore(
+    AgentOptions options,
+    ILogger<SqliteAgentStore> logger,
+    IRawOutputProtector? rawOutputProtector = null)
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 4;
+    private const int CurrentRawProtectionVersion = 1;
     private const string EventColumns = "sequence, event_id, device_id, severity, type, title, message, state, occurred_utc, acknowledged_utc, recovered_utc, condition_key, details_json, is_active_condition";
     private const string EventColumnsWithAlias = "e.sequence, e.event_id, e.device_id, e.severity, e.type, e.title, e.message, e.state, e.occurred_utc, e.acknowledged_utc, e.recovered_utc, e.condition_key, e.details_json, e.is_active_condition";
     private readonly string _databasePath = options.DatabasePath;
+    private readonly IRawOutputProtector _rawOutputProtector = rawOutputProtector ?? new RawOutputProtector(options);
     private readonly string _connectionString = new SqliteConnectionStringBuilder
     {
         DataSource = options.DatabasePath,
@@ -30,6 +36,8 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
 
     public bool IsInitialized => _initialized;
     public string? InitializationErrorCode => _initializationErrorCode;
+    public bool WritesAllowed => _initialized && _integrityErrorCode is null &&
+                                 _schemaVersion == CurrentSchemaVersion;
     public DateTimeOffset? LastIntegrityCheckUtc
     {
         get
@@ -64,6 +72,7 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
 
             await using var connection = await OpenAsync(cancellationToken);
             await ApplyMigrationsAsync(connection, cancellationToken);
+            await EnsureEventChangeSnapshotsAsync(connection, cancellationToken);
             await ValidateDatabaseAsync(connection, cancellationToken);
             _schemaVersion = await GetSchemaVersionAsync(connection, cancellationToken);
             if (_schemaVersion != CurrentSchemaVersion)
@@ -224,7 +233,7 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         var changes = new List<EventChange>();
         await using var command = connection.CreateCommand();
         command.CommandText = $"""
-            SELECT c.change_sequence, c.change_kind, {EventColumnsWithAlias}
+            SELECT c.change_sequence, c.change_kind, c.event_snapshot_json, {EventColumnsWithAlias}
             FROM event_changes c
             INNER JOIN events e ON e.event_id = c.event_id
             WHERE c.change_sequence > $after AND c.change_sequence <= $high
@@ -239,7 +248,12 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         {
             var changeSequence = reader.GetInt64(0);
             var changeKind = Enum.Parse<EventChangeKind>(reader.GetString(1));
-            changes.Add(new EventChange(changeSequence, changeKind, ReadEvent(reader, 2)));
+            var snapshot = reader.IsDBNull(2)
+                ? ReadEvent(reader, 3)
+                : JsonSerializer.Deserialize<StructuredEvent>(reader.GetString(2), JsonDefaults.Serializer)
+                  ?? throw new AgentOperationException(AgentErrorCodes.StorageWriteFailed,
+                      "Event change snapshot is unavailable.", 503);
+            changes.Add(new EventChange(changeSequence, changeKind, snapshot));
         }
 
         var resetRequired = cursor > highWatermark;
@@ -407,26 +421,53 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         }, cancellationToken);
     }
 
-    public Task InsertRawAsync(string deviceId, string commandId, DateTimeOffset captured, string raw, CancellationToken cancellationToken = default) =>
-        InsertRawBytesAsync(deviceId, commandId, captured, Encoding.UTF8.GetBytes(raw), cancellationToken);
+    public async Task InsertRawAsync(string deviceId, string commandId, DateTimeOffset captured, string raw, CancellationToken cancellationToken = default)
+    {
+        var bytes = Encoding.UTF8.GetBytes(raw);
+        try
+        {
+            await InsertRawBytesAsync(deviceId, commandId, captured, bytes, cancellationToken);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
 
     public async Task InsertRawBytesAsync(string deviceId, string commandId, DateTimeOffset captured, byte[] content, CancellationToken cancellationToken = default)
     {
-        await ExecuteWriteAsync(async connection =>
+        byte[]? protectedContent = null;
+        try
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO raw_blobs(device_id, command_id, captured_utc, content, size_bytes)
-                VALUES($device, $command, $captured, $content, $size);
-                """;
-            command.Parameters.AddWithValue("$device", deviceId);
-            command.Parameters.AddWithValue("$command", commandId);
-            command.Parameters.AddWithValue("$captured", Format(captured));
-            command.Parameters.Add("$content", SqliteType.Blob).Value = content;
-            command.Parameters.AddWithValue("$size", content.LongLength);
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            await EnforceRawLimitAsync(connection, cancellationToken);
-        }, cancellationToken);
+            protectedContent = _rawOutputProtector.Protect(content);
+            await ExecuteWriteAsync(async connection =>
+            {
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    INSERT INTO raw_blobs(
+                        device_id, command_id, captured_utc, content, size_bytes, protection_version)
+                    VALUES($device, $command, $captured, $content, $size, $protectionVersion);
+                    """;
+                command.Parameters.AddWithValue("$device", deviceId);
+                command.Parameters.AddWithValue("$command", commandId);
+                command.Parameters.AddWithValue("$captured", Format(captured));
+                command.Parameters.Add("$content", SqliteType.Blob).Value = protectedContent;
+                command.Parameters.AddWithValue("$size", protectedContent.LongLength);
+                command.Parameters.AddWithValue("$protectionVersion", CurrentRawProtectionVersion);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+                await EnforceRawLimitAsync(connection, cancellationToken);
+            }, cancellationToken);
+        }
+        finally
+        {
+            if (protectedContent is not null)
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(protectedContent);
+            }
+            // Raw evidence buffers are ownership-transferred into this method so
+            // plaintext does not wait for a later GC cycle after persistence.
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(content);
+        }
     }
 
     public async Task<IReadOnlyList<EventChange>> CommitSuccessfulCollectionAsync(
@@ -452,16 +493,27 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
             {
                 raw.Transaction = transaction;
                 raw.CommandText = """
-                    INSERT INTO raw_blobs(device_id, command_id, captured_utc, content, size_bytes)
-                    VALUES($device, $command, $captured, $content, $size);
+                    INSERT INTO raw_blobs(
+                        device_id, command_id, captured_utc, content, size_bytes, protection_version)
+                    VALUES($device, $command, $captured, $content, $size, $protectionVersion);
                     """;
                 var bytes = Encoding.UTF8.GetBytes(output.RawOutput);
-                raw.Parameters.AddWithValue("$device", output.DeviceId);
-                raw.Parameters.AddWithValue("$command", output.CommandId);
-                raw.Parameters.AddWithValue("$captured", Format(output.CapturedUtc));
-                raw.Parameters.Add("$content", SqliteType.Blob).Value = bytes;
-                raw.Parameters.AddWithValue("$size", bytes.LongLength);
-                await raw.ExecuteNonQueryAsync(cancellationToken);
+                var protectedContent = _rawOutputProtector.Protect(bytes);
+                try
+                {
+                    raw.Parameters.AddWithValue("$device", output.DeviceId);
+                    raw.Parameters.AddWithValue("$command", output.CommandId);
+                    raw.Parameters.AddWithValue("$captured", Format(output.CapturedUtc));
+                    raw.Parameters.Add("$content", SqliteType.Blob).Value = protectedContent;
+                    raw.Parameters.AddWithValue("$size", protectedContent.LongLength);
+                    raw.Parameters.AddWithValue("$protectionVersion", CurrentRawProtectionVersion);
+                    await raw.ExecuteNonQueryAsync(cancellationToken);
+                }
+                finally
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(protectedContent);
+                }
             }
 
             foreach (var recovery in recoveries)
@@ -576,15 +628,59 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
     {
         await ExecuteWriteAsync(async connection =>
         {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO api_tokens(token_hash, created_utc, last_used_utc, revoked_utc)
-                VALUES($hash, $created, NULL, NULL);
-                """;
-            command.Parameters.AddWithValue("$hash", hash);
-            command.Parameters.AddWithValue("$created", Format(created));
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            if (await CountActiveTokensAsync(connection, transaction, created, cancellationToken) >=
+                MaximumActiveTokens)
+            {
+                throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
+                    "The maximum number of paired Viewer tokens has been reached.", 409);
+            }
+
+            await InsertTokenCoreAsync(connection, transaction, hash, created, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }, cancellationToken);
+    }
+
+    public async Task<bool> ConsumePairingCodeAndStoreTokenAsync(
+        string codeHash,
+        string tokenHash,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        var consumed = false;
+        await ExecuteWriteAsync(async connection =>
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using (var consume = connection.CreateCommand())
+            {
+                consume.Transaction = transaction;
+                consume.CommandText = """
+                    UPDATE pairing_codes SET used_utc=$now
+                    WHERE code_hash=$hash AND used_utc IS NULL AND expires_utc >= $now;
+                    """;
+                consume.Parameters.AddWithValue("$now", Format(now));
+                consume.Parameters.AddWithValue("$hash", codeHash);
+                consumed = await consume.ExecuteNonQueryAsync(cancellationToken) == 1;
+            }
+
+            if (!consumed)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return;
+            }
+
+            if (await CountActiveTokensAsync(connection, transaction, now, cancellationToken) >=
+                MaximumActiveTokens)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
+                    "The maximum number of paired Viewer tokens has been reached.", 409);
+            }
+
+            await InsertTokenCoreAsync(connection, transaction, tokenHash, now, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }, cancellationToken);
+        return consumed;
     }
 
     public async Task<bool> ValidateAndTouchTokenAsync(string hash, DateTimeOffset now, CancellationToken cancellationToken = default)
@@ -595,13 +691,107 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
             await using var command = connection.CreateCommand();
             command.CommandText = """
                 UPDATE api_tokens SET last_used_utc=$now
-                WHERE token_hash=$hash AND revoked_utc IS NULL;
+                WHERE token_hash=$hash AND revoked_utc IS NULL
+                  AND created_utc > $absoluteCutoff
+                  AND COALESCE(last_used_utc, created_utc) > $idleCutoff;
                 """;
             command.Parameters.AddWithValue("$now", Format(now));
             command.Parameters.AddWithValue("$hash", hash);
+            command.Parameters.AddWithValue("$absoluteCutoff",
+                Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
+            command.Parameters.AddWithValue("$idleCutoff",
+                Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
             valid = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
         }, cancellationToken);
         return valid;
+    }
+
+    public async Task<IReadOnlyList<ApiTokenInfo>> GetApiTokensAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureInitializedAsync(cancellationToken);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT token_hash, created_utc, last_used_utc, revoked_utc
+            FROM api_tokens ORDER BY created_utc DESC;
+            """;
+        var result = new List<ApiTokenInfo>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var hash = reader.GetString(0);
+            var created = Parse(reader.GetString(1));
+            DateTimeOffset? lastUsed = reader.IsDBNull(2) ? null : Parse(reader.GetString(2));
+            DateTimeOffset? revoked = reader.IsDBNull(3) ? null : Parse(reader.GetString(3));
+            var absoluteExpires = created.AddDays(options.Tokens.AbsoluteLifetimeDays);
+            var idleExpires = (lastUsed ?? created).AddDays(options.Tokens.IdleLifetimeDays);
+            result.Add(new ApiTokenInfo(
+                TokenId(hash), created, lastUsed, revoked, absoluteExpires, idleExpires,
+                revoked is not null || now >= absoluteExpires || now >= idleExpires));
+        }
+        return result;
+    }
+
+    public async Task<bool> RevokeTokenAsync(
+        string tokenId,
+        DateTimeOffset revokedUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTokenId(tokenId);
+        var revoked = false;
+        await ExecuteWriteAsync(async connection =>
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                UPDATE api_tokens SET revoked_utc=$revoked
+                WHERE substr(token_hash, 1, 16)=$id AND revoked_utc IS NULL;
+                """;
+            command.Parameters.AddWithValue("$revoked", Format(revokedUtc));
+            command.Parameters.AddWithValue("$id", tokenId.ToUpperInvariant());
+            revoked = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+        }, cancellationToken);
+        return revoked;
+    }
+
+    public async Task<bool> RotateTokenAsync(
+        string tokenId,
+        string replacementHash,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateTokenId(tokenId);
+        var rotated = false;
+        await ExecuteWriteAsync(async connection =>
+        {
+            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using (var revoke = connection.CreateCommand())
+            {
+                revoke.Transaction = transaction;
+                revoke.CommandText = """
+                    UPDATE api_tokens SET revoked_utc=$now
+                    WHERE substr(token_hash, 1, 16)=$id AND revoked_utc IS NULL;
+                    """;
+                revoke.Parameters.AddWithValue("$now", Format(now));
+                revoke.Parameters.AddWithValue("$id", tokenId.ToUpperInvariant());
+                rotated = await revoke.ExecuteNonQueryAsync(cancellationToken) == 1;
+            }
+
+            if (rotated)
+            {
+                if (await CountActiveTokensAsync(connection, transaction, now, cancellationToken) >=
+                    MaximumActiveTokens)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
+                        "The maximum number of paired Viewer tokens has been reached.", 409);
+                }
+                await InsertTokenCoreAsync(connection, transaction, replacementHash, now, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }, cancellationToken);
+        return rotated;
     }
 
     public async Task RunRetentionAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
@@ -616,11 +806,21 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
                   AND NOT (is_active_condition = 1 AND recovered_utc IS NULL);
                 DELETE FROM audit WHERE occurred_utc < $auditCutoff;
                 DELETE FROM pairing_codes WHERE expires_utc < $pairingCutoff;
+                DELETE FROM api_tokens
+                WHERE (revoked_utc IS NOT NULL AND revoked_utc < $tokenHistoryCutoff)
+                   OR (created_utc < $tokenAbsoluteCutoff
+                       AND COALESCE(last_used_utc, created_utc) < $tokenIdleCutoff);
                 """;
             command.Parameters.AddWithValue("$rawCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.RawDays))));
             command.Parameters.AddWithValue("$eventCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.EventDays))));
             command.Parameters.AddWithValue("$auditCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.AuditDays))));
             command.Parameters.AddWithValue("$pairingCutoff", Format(now.AddDays(-1)));
+            command.Parameters.AddWithValue("$tokenHistoryCutoff",
+                Format(now.AddDays(-Math.Max(30, options.Retention.AuditDays))));
+            command.Parameters.AddWithValue("$tokenAbsoluteCutoff",
+                Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
+            command.Parameters.AddWithValue("$tokenIdleCutoff",
+                Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await EnforceRawLimitAsync(connection, cancellationToken);
@@ -766,7 +966,8 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
             item.State == EventState.Acknowledged ? occurred : null,
             item.State == EventState.Recovered ? occurred : null,
             item.ConditionKey, details, item.IsActiveCondition);
-        var changeSequence = await InsertChangeCoreAsync(connection, transaction, id, changeKind, occurred, cancellationToken);
+        var changeSequence = await InsertChangeCoreAsync(connection, transaction, created, changeKind, occurred,
+            cancellationToken);
         return new EventChange(changeSequence, changeKind, created);
     }
 
@@ -868,23 +1069,29 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         DateTimeOffset occurred,
         CancellationToken cancellationToken)
     {
-        var changeSequence = await InsertChangeCoreAsync(connection, transaction, eventId, kind, occurred, cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = $"SELECT {EventColumns} FROM events WHERE event_id=$id;";
-        command.Parameters.AddWithValue("$id", eventId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        StructuredEvent snapshot;
+        await using (var command = connection.CreateCommand())
         {
-            throw new AgentOperationException(AgentErrorCodes.StorageWriteFailed, "Event change target is unavailable.", 503);
+            command.Transaction = transaction;
+            command.CommandText = $"SELECT {EventColumns} FROM events WHERE event_id=$id;";
+            command.Parameters.AddWithValue("$id", eventId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new AgentOperationException(AgentErrorCodes.StorageWriteFailed,
+                    "Event change target is unavailable.", 503);
+            }
+            snapshot = ReadEvent(reader);
         }
-        return new EventChange(changeSequence, kind, ReadEvent(reader));
+        var changeSequence = await InsertChangeCoreAsync(connection, transaction, snapshot, kind, occurred,
+            cancellationToken);
+        return new EventChange(changeSequence, kind, snapshot);
     }
 
     private static async Task<long> InsertChangeCoreAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        string eventId,
+        StructuredEvent snapshot,
         EventChangeKind kind,
         DateTimeOffset occurred,
         CancellationToken cancellationToken)
@@ -892,13 +1099,14 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO event_changes(event_id, change_kind, occurred_utc)
-            VALUES($id, $kind, $occurred);
+            INSERT INTO event_changes(event_id, change_kind, occurred_utc, event_snapshot_json)
+            VALUES($id, $kind, $occurred, $snapshot);
             SELECT last_insert_rowid();
             """;
-        command.Parameters.AddWithValue("$id", eventId);
+        command.Parameters.AddWithValue("$id", snapshot.Id);
         command.Parameters.AddWithValue("$kind", kind.ToString());
         command.Parameters.AddWithValue("$occurred", Format(occurred));
+        command.Parameters.AddWithValue("$snapshot", JsonSerializer.Serialize(snapshot, JsonDefaults.Serializer));
         return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
@@ -1000,7 +1208,108 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
                 INSERT INTO event_changes(event_id, change_kind, occurred_utc)
                 SELECT event_id, 'Created', occurred_utc FROM events ORDER BY sequence;
                 """, cancellationToken);
+            version = 2;
         }
+
+        if (version < 3)
+        {
+            await ApplyMigrationAsync(connection, 3, """
+                ALTER TABLE event_changes ADD COLUMN event_snapshot_json TEXT NULL;
+                UPDATE events SET is_active_condition=0
+                WHERE is_active_condition=1 AND recovered_utc IS NULL
+                  AND sequence NOT IN (
+                    SELECT MAX(sequence) FROM events
+                    WHERE is_active_condition=1 AND recovered_utc IS NULL
+                    GROUP BY device_id, condition_key
+                  );
+                CREATE UNIQUE INDEX ux_events_active_condition
+                    ON events(device_id, condition_key)
+                    WHERE is_active_condition=1 AND recovered_utc IS NULL;
+                CREATE TABLE raw_storage_stats (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    total_bytes INTEGER NOT NULL CHECK(total_bytes >= 0));
+                INSERT INTO raw_storage_stats(singleton, total_bytes)
+                    VALUES(1, COALESCE((SELECT SUM(size_bytes) FROM raw_blobs), 0));
+                CREATE TRIGGER raw_blobs_count_insert AFTER INSERT ON raw_blobs
+                BEGIN
+                    UPDATE raw_storage_stats SET total_bytes=total_bytes + NEW.size_bytes
+                    WHERE singleton=1;
+                END;
+                CREATE TRIGGER raw_blobs_count_delete AFTER DELETE ON raw_blobs
+                BEGIN
+                    UPDATE raw_storage_stats SET total_bytes=MAX(0, total_bytes - OLD.size_bytes)
+                    WHERE singleton=1;
+                END;
+                """, cancellationToken);
+            version = 3;
+        }
+
+        if (version < 4)
+        {
+            await ApplyMigrationAsync(connection, 4, """
+                PRAGMA secure_delete=ON;
+                DROP TRIGGER IF EXISTS raw_blobs_count_insert;
+                DROP TRIGGER IF EXISTS raw_blobs_count_delete;
+                DROP INDEX IF EXISTS ix_raw_captured;
+                DROP TABLE raw_blobs;
+                CREATE TABLE raw_blobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+                    command_id TEXT NOT NULL, captured_utc TEXT NOT NULL,
+                    content BLOB NOT NULL, size_bytes INTEGER NOT NULL,
+                    protection_version INTEGER NOT NULL CHECK(protection_version=1));
+                CREATE INDEX ix_raw_captured ON raw_blobs(captured_utc);
+                UPDATE raw_storage_stats SET total_bytes=0 WHERE singleton=1;
+                CREATE TRIGGER raw_blobs_count_insert AFTER INSERT ON raw_blobs
+                BEGIN
+                    UPDATE raw_storage_stats SET total_bytes=total_bytes + NEW.size_bytes
+                    WHERE singleton=1;
+                END;
+                CREATE TRIGGER raw_blobs_count_delete AFTER DELETE ON raw_blobs
+                BEGIN
+                    UPDATE raw_storage_stats SET total_bytes=MAX(0, total_bytes - OLD.size_bytes)
+                    WHERE singleton=1;
+                END;
+                """, cancellationToken);
+        }
+    }
+
+    private static async Task EnsureEventChangeSnapshotsAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var pending = new List<(long Sequence, StructuredEvent Snapshot)>();
+        await using (var select = connection.CreateCommand())
+        {
+            select.CommandText = $"""
+                SELECT c.change_sequence, {EventColumnsWithAlias}
+                FROM event_changes c
+                INNER JOIN events e ON e.event_id=c.event_id
+                WHERE c.event_snapshot_json IS NULL;
+                """;
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                pending.Add((reader.GetInt64(0), ReadEvent(reader, 1)));
+            }
+        }
+
+        if (pending.Count == 0)
+        {
+            return;
+        }
+
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        foreach (var item in pending)
+        {
+            await using var update = connection.CreateCommand();
+            update.Transaction = transaction;
+            update.CommandText = "UPDATE event_changes SET event_snapshot_json=$snapshot WHERE change_sequence=$sequence;";
+            update.Parameters.AddWithValue("$snapshot",
+                JsonSerializer.Serialize(item.Snapshot, JsonDefaults.Serializer));
+            update.Parameters.AddWithValue("$sequence", item.Sequence);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
     }
 
     private static async Task ApplyMigrationAsync(
@@ -1032,6 +1341,11 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
             return;
         }
 
+        if (version < 4)
+        {
+            await SecurelyPurgeLegacyRawAsync(source, cancellationToken);
+        }
+
         var backupPath = $"{_databasePath}.schema-v{version}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.bak";
         await using var destination = new SqliteConnection(new SqliteConnectionStringBuilder
         {
@@ -1040,6 +1354,36 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         }.ToString());
         await destination.OpenAsync(cancellationToken);
         source.BackupDatabase(destination);
+    }
+
+    private static async Task SecurelyPurgeLegacyRawAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using (var exists = connection.CreateCommand())
+        {
+            exists.CommandText =
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='raw_blobs';";
+            if (Convert.ToInt32(await exists.ExecuteScalarAsync(cancellationToken),
+                    CultureInfo.InvariantCulture) == 0)
+            {
+                return;
+            }
+        }
+
+        await using (var purge = connection.CreateCommand())
+        {
+            purge.CommandText = "PRAGMA secure_delete=ON; DELETE FROM raw_blobs;";
+            await purge.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var vacuum = connection.CreateCommand())
+        {
+            vacuum.CommandText = "VACUUM;";
+            await vacuum.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using var checkpoint = connection.CreateCommand();
+        checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        await checkpoint.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task ValidateDatabaseAsync(CancellationToken cancellationToken)
@@ -1080,15 +1424,24 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
     private async Task ExecuteWriteAsync(Func<SqliteConnection, Task> action, CancellationToken cancellationToken)
     {
         await EnsureInitializedAsync(cancellationToken);
+        ThrowIfWritesBlocked();
         await _writeGate.WaitAsync(cancellationToken);
         try
         {
+            ThrowIfWritesBlocked();
             await using var connection = await OpenAsync(cancellationToken);
             await action(connection);
         }
         catch (AgentOperationException)
         {
             throw;
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
+        {
+            // A uniqueness or other constraint rejection is an application-level conflict,
+            // not evidence that the database itself has lost integrity.
+            throw new AgentOperationException(AgentErrorCodes.StorageWriteFailed,
+                "Agent storage rejected a conflicting record.", 409);
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
         {
@@ -1108,35 +1461,86 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         SqliteTransaction? transaction = null)
     {
         var maxBytes = Math.Max(0L, options.Retention.RawMaxMegabytes) * 1024L * 1024L;
-        await using var select = connection.CreateCommand();
-        select.Transaction = transaction;
-        select.CommandText = "SELECT id, size_bytes FROM raw_blobs ORDER BY captured_utc DESC, id DESC";
-        var deleteIds = new List<long>();
-        long retained = 0;
-        await using (var reader = await select.ExecuteReaderAsync(cancellationToken))
+        const int batchSize = 256;
+        while (true)
         {
-            while (await reader.ReadAsync(cancellationToken))
+            var totalBytes = await GetRawBytesAsync(connection, transaction, cancellationToken);
+            if (totalBytes <= maxBytes)
             {
-                var id = reader.GetInt64(0);
-                var size = reader.GetInt64(1);
-                if (retained + size > maxBytes)
-                {
-                    deleteIds.Add(id);
-                }
-                else
-                {
-                    retained += size;
-                }
+                break;
             }
-        }
 
-        foreach (var id in deleteIds)
-        {
+            var deleteCount = await GetRawTrimCountAsync(connection, transaction,
+                totalBytes - maxBytes, batchSize, cancellationToken);
+            if (deleteCount == 0)
+            {
+                break;
+            }
             await using var delete = connection.CreateCommand();
             delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM raw_blobs WHERE id=$id";
-            delete.Parameters.AddWithValue("$id", id);
-            await delete.ExecuteNonQueryAsync(cancellationToken);
+            delete.CommandText = """
+                DELETE FROM raw_blobs
+                WHERE id IN (
+                    SELECT id FROM raw_blobs
+                    ORDER BY captured_utc ASC, id ASC
+                    LIMIT $deleteCount
+                );
+                """;
+            delete.Parameters.AddWithValue("$deleteCount", deleteCount);
+            if (await delete.ExecuteNonQueryAsync(cancellationToken) == 0)
+            {
+                break;
+            }
+        }
+    }
+
+    private static async Task<int> GetRawTrimCountAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long bytesToFree,
+        int batchSize,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT size_bytes FROM raw_blobs
+            ORDER BY captured_utc ASC, id ASC
+            LIMIT $batchSize;
+            """;
+        command.Parameters.AddWithValue("$batchSize", batchSize);
+        long accumulated = 0;
+        var count = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            accumulated += reader.GetInt64(0);
+            count++;
+            if (accumulated >= bytesToFree)
+            {
+                break;
+            }
+        }
+        return count;
+    }
+
+    private static async Task<long> GetRawBytesAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT total_bytes FROM raw_storage_stats WHERE singleton=1;";
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+    }
+
+    private void ThrowIfWritesBlocked()
+    {
+        if (_integrityErrorCode is not null || _schemaVersion != CurrentSchemaVersion)
+        {
+            throw new AgentOperationException(AgentErrorCodes.StorageWriteFailed,
+                "Agent storage writes are paused until integrity is restored.", 503);
         }
     }
 
@@ -1152,6 +1556,61 @@ public sealed class SqliteAgentStore(AgentOptions options, ILogger<SqliteAgentSt
         command.CommandText = "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         return connection;
+    }
+
+    private async Task<long> CountActiveTokensAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT COUNT(*) FROM api_tokens
+            WHERE revoked_utc IS NULL
+              AND created_utc > $absoluteCutoff
+              AND COALESCE(last_used_utc, created_utc) > $idleCutoff;
+            """;
+        command.Parameters.AddWithValue("$absoluteCutoff",
+            Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
+        command.Parameters.AddWithValue("$idleCutoff",
+            Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task InsertTokenCoreAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string hash,
+        DateTimeOffset created,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO api_tokens(token_hash, created_utc, last_used_utc, revoked_utc)
+            VALUES($hash, $created, NULL, NULL);
+            """;
+        command.Parameters.AddWithValue("$hash", hash);
+        command.Parameters.AddWithValue("$created", Format(created));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static string TokenId(string hash) => hash[..Math.Min(16, hash.Length)].ToUpperInvariant();
+
+    private int MaximumActiveTokens => Math.Clamp(
+        options.Tokens.MaximumActiveTokens,
+        1,
+        TokenOptions.MaximumActiveTokenLimit);
+
+    private static void ValidateTokenId(string tokenId)
+    {
+        if (tokenId.Length != 16 || tokenId.Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new AgentOperationException(AgentErrorCodes.TokenNotFound,
+                "The Viewer token id was not found.", 404);
+        }
     }
 
     private static string Format(DateTimeOffset value) => value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);

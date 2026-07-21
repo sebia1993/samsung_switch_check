@@ -15,6 +15,7 @@ public enum DeviceHealth
 public enum AgentConnectionState
 {
     Connecting,
+    Reconnecting,
     Connected,
     Offline,
     Stale,
@@ -22,7 +23,28 @@ public enum AgentConnectionState
     Demo
 }
 
+public enum EventFilter
+{
+    All,
+    Unacknowledged,
+    NewLog,
+    Critical,
+    Recovered
+}
+
 public sealed record DeviceMetricDto(string Label, string Value, DeviceHealth Health = DeviceHealth.Normal);
+
+public sealed record CollectorCapabilityDto(
+    string CommandId,
+    bool Supported,
+    string State,
+    string? ErrorCode = null);
+
+public sealed record OperationalStatusDto(
+    string Code,
+    string Title,
+    string Detail,
+    DeviceHealth Health);
 
 public sealed record DeviceSnapshotDto(
     string Id,
@@ -33,7 +55,10 @@ public sealed record DeviceSnapshotDto(
     DateTimeOffset LastCheckedAt,
     string Summary,
     string Uptime,
-    IReadOnlyList<DeviceMetricDto>? Metrics = null);
+    IReadOnlyList<DeviceMetricDto>? Metrics = null,
+    IReadOnlyList<CollectorCapabilityDto>? Capabilities = null,
+    string CollectionState = "Initializing",
+    string? CollectionErrorCode = null);
 
 public sealed record SwitchEventDto(
     long Sequence,
@@ -48,7 +73,9 @@ public sealed record SwitchEventDto(
     bool Acknowledged = false,
     bool Recovered = false,
     string? ConditionKey = null,
-    bool IsActiveCondition = false);
+    bool IsActiveCondition = false,
+    DateTimeOffset? RecoveredAt = null,
+    string? NavigationEventId = null);
 
 public sealed record AgentEventChangeDto(
     long ChangeSequence,
@@ -72,7 +99,16 @@ public sealed record AgentSnapshotDto(
     string CollectorSummary,
     string AgentId = "agent",
     bool Ready = true,
-    string ReadinessCode = "READY")
+    string ReadinessCode = "READY",
+    long? AuthoritativeUnacknowledged = null,
+    int ApiVersion = 2,
+    string AgentChannelStatus = "unknown",
+    string ApiChannelStatus = "unknown",
+    string RealtimeChannelStatus = "unknown",
+    string CertificateStatus = "configured",
+    DateTimeOffset? CertificateExpiresAt = null,
+    IReadOnlyList<OperationalStatusDto>? OperationalStatuses = null,
+    int MaxConcurrentDevices = 1)
 {
     public long HighWatermark => LastEventSequence;
 }
@@ -85,6 +121,8 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
     private DateTimeOffset _lastCheckedAt;
     private string _summary;
     private string _uptime;
+    private string _collectionState;
+    private string? _collectionErrorCode;
 
     public DeviceViewModel(DeviceSnapshotDto source)
     {
@@ -96,7 +134,10 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         _lastCheckedAt = source.LastCheckedAt;
         _summary = source.Summary;
         _uptime = source.Uptime;
+        _collectionState = source.CollectionState;
+        _collectionErrorCode = source.CollectionErrorCode;
         Metrics = new ObservableCollection<DeviceMetricDto>(source.Metrics ?? []);
+        Capabilities = new ObservableCollection<CollectorCapabilityDto>(source.Capabilities ?? []);
     }
 
     public string Id { get; }
@@ -104,6 +145,34 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
     public string Model { get; }
     public string AddressLabel { get; }
     public ObservableCollection<DeviceMetricDto> Metrics { get; }
+    public ObservableCollection<CollectorCapabilityDto> Capabilities { get; }
+    public int SupportedCapabilityCount => Capabilities.Count(item => item.Supported);
+    public int CapabilityCount => Capabilities.Count;
+    public string CapabilityText => CapabilityCount == 0
+        ? "기능 확인 중"
+        : $"수집 기능 {SupportedCapabilityCount}/{CapabilityCount}";
+
+    public string CollectionState
+    {
+        get => _collectionState;
+        private set
+        {
+            if (SetProperty(ref _collectionState, value)) OnPropertyChanged(nameof(CollectionStatusText));
+        }
+    }
+
+    public string? CollectionErrorCode
+    {
+        get => _collectionErrorCode;
+        private set
+        {
+            if (SetProperty(ref _collectionErrorCode, value)) OnPropertyChanged(nameof(CollectionStatusText));
+        }
+    }
+
+    public string CollectionStatusText => string.IsNullOrWhiteSpace(CollectionErrorCode)
+        ? CollectionState
+        : $"{CollectionState} · {CollectionErrorCode}";
 
     public DeviceHealth Health
     {
@@ -143,11 +212,18 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         LastCheckedAt = source.LastCheckedAt;
         Summary = source.Summary;
         Uptime = source.Uptime;
+        CollectionState = source.CollectionState;
+        CollectionErrorCode = source.CollectionErrorCode;
         Metrics.Clear();
         foreach (var metric in source.Metrics ?? [])
         {
             Metrics.Add(metric);
         }
+        Capabilities.Clear();
+        foreach (var capability in source.Capabilities ?? []) Capabilities.Add(capability);
+        OnPropertyChanged(nameof(SupportedCapabilityCount));
+        OnPropertyChanged(nameof(CapabilityCount));
+        OnPropertyChanged(nameof(CapabilityText));
     }
 }
 
@@ -158,6 +234,7 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
     private DeviceHealth _severity;
     private string _title;
     private string _detail;
+    private DateTimeOffset? _recoveredAt;
 
     public EventViewModel(SwitchEventDto source)
     {
@@ -172,7 +249,11 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
         _detail = source.Detail;
         _acknowledged = source.Acknowledged;
         _recovered = source.Recovered;
+        _recoveredAt = source.RecoveredAt;
         ConditionKey = source.ConditionKey;
+        NavigationEventId = string.IsNullOrWhiteSpace(source.NavigationEventId)
+            ? source.AgentEventId
+            : source.NavigationEventId;
     }
 
     public long Sequence { get; }
@@ -194,20 +275,53 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
     public string Detail
     {
         get => _detail;
-        private set => SetProperty(ref _detail, value);
+        private set
+        {
+            if (SetProperty(ref _detail, value)) OnPropertyChanged(nameof(AlertDetail));
+        }
     }
     public bool Recovered
     {
         get => _recovered;
-        private set => SetProperty(ref _recovered, value);
+        private set
+        {
+            if (SetProperty(ref _recovered, value)) OnPropertyChanged(nameof(AlertDetail));
+        }
     }
     public string? ConditionKey { get; }
+    public string NavigationEventId { get; }
     public string TimeText => OccurredAt.LocalDateTime.ToString("MM-dd HH:mm:ss");
+    public bool IsLogEvent => Kind.Contains("로그", StringComparison.Ordinal)
+                              || Kind.Contains("log", StringComparison.OrdinalIgnoreCase);
+    public string StatusText => Recovered ? "복구됨" : Acknowledged ? "확인됨" : "미확인";
+    public DateTimeOffset? RecoveredAt
+    {
+        get => _recoveredAt;
+        private set
+        {
+            if (SetProperty(ref _recoveredAt, value))
+            {
+                OnPropertyChanged(nameof(RecoveryDuration));
+                OnPropertyChanged(nameof(AlertDetail));
+            }
+        }
+    }
+
+    public TimeSpan? RecoveryDuration => RecoveredAt is { } recoveredAt && recoveredAt >= OccurredAt
+        ? recoveredAt - OccurredAt
+        : null;
+
+    public string AlertDetail => Recovered && RecoveryDuration is { } duration
+        ? $"{Detail} · 장애 지속 {FormatDuration(duration)}"
+        : Detail;
 
     public bool Acknowledged
     {
         get => _acknowledged;
-        set => SetProperty(ref _acknowledged, value);
+        set
+        {
+            if (SetProperty(ref _acknowledged, value)) OnPropertyChanged(nameof(StatusText));
+        }
     }
 
     public void Update(SwitchEventDto source)
@@ -218,5 +332,14 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
         Detail = source.Detail;
         Acknowledged = source.Acknowledged;
         Recovered = source.Recovered;
+        RecoveredAt = source.RecoveredAt;
+        OnPropertyChanged(nameof(AlertDetail));
+        OnPropertyChanged(nameof(StatusText));
     }
+
+    private static string FormatDuration(TimeSpan value) => value.TotalHours >= 1
+        ? $"{(int)value.TotalHours}시간 {value.Minutes}분"
+        : value.TotalMinutes >= 1
+            ? $"{(int)value.TotalMinutes}분 {value.Seconds}초"
+            : $"{Math.Max(0, (int)value.TotalSeconds)}초";
 }

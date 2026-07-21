@@ -15,7 +15,16 @@ public static partial class LogOutputParser
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n');
 
-        if (string.IsNullOrWhiteSpace(normalized) || EmptyLogRegex().IsMatch(normalized.Trim()))
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return ParseResult<LogSnapshot>.Failure(
+                ErrorCodes.IncompleteOutput,
+                "parse-log-ram",
+                "The RAM log response was empty before an explicit empty-log marker was received.",
+                true);
+        }
+
+        if (EmptyLogRegex().IsMatch(normalized.Trim()))
         {
             return ParseResult<LogSnapshot>.Success(new LogSnapshot([]));
         }
