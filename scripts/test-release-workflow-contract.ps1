@@ -34,11 +34,16 @@ Assert-Pattern $workflow '--source-ref' 'Attestation verification must constrain
 Assert-Pattern $workflow '\$expected\s*=\s*@\(' 'The exact six-file release set must be enumerated.'
 Assert-Pattern $workflow 'Exact release notes are missing' 'Publishing must require exact-version release notes.'
 Assert-Pattern $workflow 'gh release create @arguments' 'Release assets must be staged through the GitHub CLI.'
+Assert-Pattern $workflow '\$draftCreateOutput\s*=\s*@\(gh release create @arguments\)' 'Draft creation output must be captured without retrying creation.'
 Assert-Pattern $workflow "'--verify-tag',\s*'--draft'" 'Assets must be staged in a draft before immutable publication.'
+Assert-Pattern $workflow 'foreach\s*\(\$draftLookupAttempt\s+in\s+1\.\.12\)' 'Draft discovery must use a bounded eventual-consistency retry.'
+Assert-Pattern $workflow 'Created release draft was not discoverable within the bounded lookup window' 'Draft discovery must fail closed when the retry budget is exhausted.'
+Assert-Pattern $workflow '\[string\]\$candidate\.html_url\s+-ne\s+\$draftUrl' 'Draft discovery must bind the candidate to the URL returned by creation.'
+Assert-Pattern $workflow 'Created release draft identity changed before asset verification' 'The selected draft must be revalidated by numeric release ID.'
 Assert-Pattern $workflow 'Uploaded draft digest or size differs' 'GitHub draft asset digests and sizes must be compared locally.'
 Assert-Pattern $workflow 'gh release verify\s+\$tag' 'The immutable GitHub release attestation must be verified.'
 Assert-Pattern $workflow 'gh release verify-asset\s+\$tag' 'Every published release asset must be verified against the release attestation.'
-Assert-Pattern $workflow 'gh release delete\s+\$tag' 'A mutable release or draft must be cleaned up after verification failure.'
+Assert-Pattern $workflow '--method DELETE\s+`?\s*\r?\n\s*"repos/\$\(\$env:SSW_REPOSITORY\)/releases/\$releaseId"' 'Pre-publication cleanup must delete only the confirmed numeric release ID.'
 Assert-Pattern $workflow '\$draftCreated\s+-and\s+-not\s+\$publishAttempted' 'Automatic cleanup must be limited to failures before publication is attempted.'
 Assert-Pattern $workflow '-ExpectedSourceCommit\s+\$env:SSW_SOURCE_COMMIT' 'Published package validation must bind the manifest to the workflow commit.'
 
@@ -47,6 +52,9 @@ if ($workflow -match "(?m)^\s*\`$arguments\s*=\s*@\('-Version'") {
 }
 if ($workflow -match 'gh release view') {
     throw 'gh release view exit code 1 is ambiguous and must not be used as a not-found check.'
+}
+if ($workflow -match 'gh release delete') {
+    throw 'Release cleanup must use a confirmed numeric release ID, never a tag lookup.'
 }
 if ($workflow -match 'immutable-releases') {
     throw 'The default GITHUB_TOKEN cannot call the repository Administration immutable-settings endpoint.'
@@ -117,11 +125,16 @@ if ($verifyIndex -lt 0 -or $createIndex -lt 0 -or $verifyIndex -gt $createIndex)
     throw 'Contract and provenance verification must finish before release creation.'
 }
 $draftDigestIndex = $workflow.IndexOf('Uploaded draft digest or size differs', [StringComparison]::Ordinal)
+$draftCreateOutputIndex = $workflow.IndexOf('$draftCreateOutput = @(gh release create @arguments)', [StringComparison]::Ordinal)
+$draftLookupRetryIndex = $workflow.IndexOf('foreach ($draftLookupAttempt in 1..12)', [StringComparison]::Ordinal)
+$draftIdentityIndex = $workflow.IndexOf('Created release draft identity changed before asset verification', [StringComparison]::Ordinal)
 $finalTagCheckIndex = $workflow.IndexOf('# The active v* tag ruleset closes the remaining fetch-to-publish race.', [StringComparison]::Ordinal)
 $publishIndex = $workflow.IndexOf('--method PATCH', [StringComparison]::Ordinal)
-if ($draftDigestIndex -lt $createIndex -or $finalTagCheckIndex -lt $draftDigestIndex -or
+if ($draftCreateOutputIndex -lt $createIndex -or $draftLookupRetryIndex -lt $draftCreateOutputIndex -or
+    $draftIdentityIndex -lt $draftLookupRetryIndex -or $draftDigestIndex -lt $draftIdentityIndex -or
+    $finalTagCheckIndex -lt $draftDigestIndex -or
     $publishIndex -lt $finalTagCheckIndex) {
-    throw 'Draft digest and final tag verification must finish immediately before publication.'
+    throw 'Draft creation, bounded discovery, ID verification, digest verification, and final tag verification must remain ordered before publication.'
 }
 
 Assert-Pattern $buildScript 'RELEASE_NOTES_\$\{releaseNotesToken\}_KO\.md' 'Build must select only exact-version release notes.'

@@ -294,6 +294,7 @@ jobs:
           }
 
           $releaseId = $null
+          $draftUrl = $null
           $draftCreated = $false
           $publishAttempted = $false
           $publicationCompleted = $false
@@ -306,20 +307,70 @@ jobs:
               '--repo', $env:SSW_REPOSITORY, '--notes-file', $notes
             )
             if ($version -match '-') { $arguments += '--prerelease' }
-            gh release create @arguments
-            if ($LASTEXITCODE -ne 0) { throw 'GitHub release draft creation failed.' }
+            $draftCreateOutput = @(gh release create @arguments)
+            $draftCreateExitCode = $LASTEXITCODE
+            if ($draftCreateExitCode -ne 0) { throw 'GitHub release draft creation failed.' }
+            $draftOutputLines = @($draftCreateOutput | ForEach-Object { ([string]$_).Trim() } |
+              Where-Object { $_.Length -gt 0 })
+            if ($draftOutputLines.Count -eq 0) { throw 'GitHub release draft URL was not returned.' }
+            $draftUrl = [string]$draftOutputLines[-1]
+            $expectedDraftUrlPrefix = "https://github.com/$($env:SSW_REPOSITORY)/releases/tag/untagged-"
+            if (-not $draftUrl.StartsWith($expectedDraftUrlPrefix, [StringComparison]::Ordinal)) {
+              throw 'GitHub release draft returned an unexpected URL.'
+            }
             $draftCreated = $true
 
-            $pagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
-              "repos/$($env:SSW_REPOSITORY)/releases?per_page=100"
-            if ($LASTEXITCODE -ne 0) { throw 'Created release draft lookup failed.' }
-            $pages = ($pagesJson -join "`n") | ConvertFrom-Json
-            $matching = @($pages | ForEach-Object { $_ } | Where-Object { $_.tag_name -eq $tag })
-            if ($matching.Count -ne 1 -or -not $matching[0].draft) {
-              throw 'Exactly one matching release draft was not found.'
+            # GitHub can acknowledge draft creation before the releases list is consistent.
+            # Never retry creation; retry only discovery, then bind every mutation to one numeric ID.
+            $draft = $null
+            foreach ($draftLookupAttempt in 1..12) {
+              $oldPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              try {
+                $pagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
+                  "repos/$($env:SSW_REPOSITORY)/releases?per_page=100" 2>$null
+                $draftLookupExitCode = $LASTEXITCODE
+              }
+              finally { $ErrorActionPreference = $oldPreference }
+
+              if ($draftLookupExitCode -eq 0) {
+                try { $pages = ($pagesJson -join "`n") | ConvertFrom-Json }
+                catch { throw 'Created release draft lookup returned invalid JSON.' }
+                $allReleases = @()
+                foreach ($page in @($pages)) {
+                  foreach ($release in @($page)) { $allReleases += $release }
+                }
+                $matching = @($allReleases | Where-Object { $_.tag_name -eq $tag })
+                if ($matching.Count -gt 1) {
+                  throw 'More than one matching release was found; automatic publication is forbidden.'
+                }
+                if ($matching.Count -eq 1) {
+                  $candidate = $matching[0]
+                  if (-not $candidate.draft -or $candidate.immutable) {
+                    throw 'Matching release is not a mutable draft; automatic publication is forbidden.'
+                  }
+                  if ([string]$candidate.html_url -ne $draftUrl) {
+                    throw 'Matching release URL differs from the draft created by this run.'
+                  }
+                  $draft = $candidate
+                  break
+                }
+              }
+              if ($draftLookupAttempt -lt 12) { Start-Sleep -Seconds 5 }
             }
-            $draft = $matching[0]
+            if ($null -eq $draft) {
+              throw 'Created release draft was not discoverable within the bounded lookup window.'
+            }
+
             $releaseId = [long]$draft.id
+            $draftJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+              "repos/$($env:SSW_REPOSITORY)/releases/$releaseId"
+            if ($LASTEXITCODE -ne 0) { throw 'Created release draft lookup by ID failed.' }
+            $draft = ($draftJson -join "`n") | ConvertFrom-Json
+            if ([long]$draft.id -ne $releaseId -or $draft.tag_name -ne $tag -or
+                [string]$draft.html_url -ne $draftUrl -or -not $draft.draft -or $draft.immutable) {
+              throw 'Created release draft identity changed before asset verification.'
+            }
             $remoteNames = @($draft.assets | ForEach-Object { [string]$_.name } | Sort-Object)
             if (($remoteNames -join '|') -ne ($expected -join '|')) {
               throw 'Uploaded draft asset set differs from the immutable contract.'
@@ -401,27 +452,39 @@ jobs:
             $oldPreference = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             try {
-              if ($draftCreated -and -not $publishAttempted) {
-                $cleanupPagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
-                  "repos/$($env:SSW_REPOSITORY)/releases?per_page=100" 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                  $cleanupPages = ($cleanupPagesJson -join "`n") | ConvertFrom-Json
-                  $cleanupMatches = @($cleanupPages | ForEach-Object { $_ } |
-                    Where-Object { $_.tag_name -eq $tag })
-                  $cleanupAllowed = $cleanupMatches.Count -eq 1 -and [bool]$cleanupMatches[0].draft
+              if ($draftCreated -and -not $publishAttempted -and
+                  $null -ne $releaseId -and $null -ne $draftUrl) {
+                $cleanupJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+                  "repos/$($env:SSW_REPOSITORY)/releases/$releaseId" 2>$null
+                if ($LASTEXITCODE -eq 0 -and $cleanupJson) {
+                  try {
+                    $cleanupRelease = ($cleanupJson -join "`n") | ConvertFrom-Json
+                    $cleanupAllowed = [long]$cleanupRelease.id -eq $releaseId -and
+                      $cleanupRelease.tag_name -eq $tag -and
+                      [string]$cleanupRelease.html_url -eq $draftUrl -and
+                      [bool]$cleanupRelease.draft -and -not [bool]$cleanupRelease.immutable
+                  }
+                  catch { $cleanupAllowed = $false }
                 }
               }
               if ($cleanupAllowed) {
-                gh release delete $tag --repo $env:SSW_REPOSITORY --yes *> $null
+                gh api -H 'X-GitHub-Api-Version: 2026-03-10' --method DELETE `
+                  "repos/$($env:SSW_REPOSITORY)/releases/$releaseId" *> $null
                 if ($LASTEXITCODE -eq 0) {
-                  Write-Warning 'A non-immutable release or draft was removed after verification failure.'
+                  Write-Warning 'The exact unpublished draft was removed by release ID after verification failure.'
                 }
                 else {
                   Write-Warning 'Automatic draft cleanup failed; inspect the matching release before retrying.'
                 }
               }
-              elseif ($draftCreated) {
+              elseif ($publishAttempted) {
                 Write-Warning 'Publication was attempted; automatic deletion was intentionally skipped regardless of observed state.'
+              }
+              elseif ($draftCreated -and $null -eq $releaseId) {
+                Write-Warning 'A draft was created but its exact release ID was not confirmed; automatic deletion was skipped.'
+              }
+              elseif ($draftCreated) {
+                Write-Warning 'The exact draft state could not be reconfirmed by release ID; automatic deletion was skipped.'
               }
             }
             finally { $ErrorActionPreference = $oldPreference }
