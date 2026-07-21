@@ -8,7 +8,7 @@ on:
       version:
         description: Build-only semantic version (manual runs never publish)
         required: true
-        default: 0.4.0-poc
+        default: 0.4.1-poc
         type: string
 
 permissions:
@@ -27,59 +27,76 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       artifact-name: ${{ steps.version.outputs.artifact-name }}
+      source-commit: ${{ github.sha }}
+      tag-object: ${{ steps.source.outputs.tag-object }}
     steps:
       - name: Resolve build version
         id: version
         shell: powershell
+        env:
+          SSW_EVENT_NAME: ${{ github.event_name }}
+          SSW_REF_NAME: ${{ github.ref_name }}
+          SSW_INPUT_VERSION: ${{ inputs.version }}
+          SSW_SOURCE_SHA: ${{ github.sha }}
         run: |
-          if ('${{ github.event_name }}' -eq 'push') {
-            $tag = '${{ github.ref_name }}'
+          if ($env:SSW_EVENT_NAME -eq 'push') {
+            $tag = $env:SSW_REF_NAME
             if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') { throw "Invalid release tag: $tag" }
             $version = $Matches.version
           }
           else {
             $tag = ''
-            $version = '${{ inputs.version }}'
+            $version = $env:SSW_INPUT_VERSION
             if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw "Invalid build-only version: $version" }
           }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "artifact-name=samsung-switch-watch-$version-${{ github.sha }}" >> $env:GITHUB_OUTPUT
+          @(
+            "tag=$tag"
+            "version=$version"
+            "artifact-name=samsung-switch-watch-$version-$($env:SSW_SOURCE_SHA)"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Abort existing immutable release before build
         if: github.event_name == 'push'
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          SSW_RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          SSW_REPOSITORY: ${{ github.repository }}
         run: |
-          $oldPreference = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          try {
-            gh release view '${{ steps.version.outputs.tag }}' --repo '${{ github.repository }}' *> $null
-            $lookupExitCode = $LASTEXITCODE
-          }
-          finally { $ErrorActionPreference = $oldPreference }
-          if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; rebuilding or replacing its assets is forbidden.' }
-          if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
-          # actions/runner appends `exit $LASTEXITCODE` for Windows PowerShell.
-          # A handled not-found lookup must therefore clear the native exit code.
-          $global:LASTEXITCODE = 0
+          $pagesJson = gh api --paginate --slurp "repos/$($env:SSW_REPOSITORY)/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release preflight lookup failed.' }
+          $pages = ($pagesJson -join "`n") | ConvertFrom-Json
+          $matching = @($pages | ForEach-Object { $_ } | Where-Object { $_.tag_name -eq $env:SSW_RELEASE_TAG })
+          if ($matching.Count -gt 0) { throw 'Immutable release or draft already exists; rebuilding or replacing its assets is forbidden.' }
 
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'push' && github.ref_name || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Verify tag target
+        id: source
         if: github.event_name == 'push'
         shell: powershell
+        env:
+          SSW_RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          SSW_SOURCE_SHA: ${{ github.sha }}
         run: |
-          if ((git rev-parse HEAD).Trim() -ne '${{ github.sha }}') { throw 'Checked out commit does not match the tag event SHA.' }
-          if ((git cat-file -t 'refs/tags/${{ steps.version.outputs.tag }}').Trim() -ne 'tag') { throw 'Release tags must be annotated.' }
-          git merge-base --is-ancestor '${{ github.sha }}' 'origin/main'
+          $head = (git rev-parse HEAD).Trim()
+          $tagObject = (git rev-parse "refs/tags/$($env:SSW_RELEASE_TAG)").Trim()
+          $peeledCommit = (git rev-parse "refs/tags/$($env:SSW_RELEASE_TAG)^{}").Trim()
+          if ($head -ne $env:SSW_SOURCE_SHA -or $peeledCommit -ne $env:SSW_SOURCE_SHA) {
+            throw 'Checked out commit does not match the tag event SHA.'
+          }
+          if ((git cat-file -t "refs/tags/$($env:SSW_RELEASE_TAG)").Trim() -ne 'tag') { throw 'Release tags must be annotated.' }
+          git merge-base --is-ancestor $env:SSW_SOURCE_SHA 'origin/main'
           if ($LASTEXITCODE -ne 0) { throw 'Release tag target must be reachable from origin/main.' }
+          @(
+            "source-commit=$head"
+            "tag-object=$tagObject"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Install exact .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -94,30 +111,34 @@ jobs:
           SSW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SSW_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SSW_SIGNING_PFX_BASE64)) {
-            'certificate=' >> $env:GITHUB_OUTPUT
+            'certificate=' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             Write-Host 'No signing secret supplied; build is restricted to a -poc prerelease.'
             exit 0
           }
           if ([string]::IsNullOrWhiteSpace($env:SSW_SIGNING_CERTIFICATE_PASSWORD)) { throw 'Signing certificate password secret is missing.' }
           $certificate = Join-Path $env:RUNNER_TEMP 'ssw-release-signing.pfx'
           [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:SSW_SIGNING_PFX_BASE64))
-          "certificate=$certificate" >> $env:GITHUB_OUTPUT
+          "certificate=$certificate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Validate and package
         shell: powershell
         env:
           SSW_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.SSW_SIGNING_CERTIFICATE_PASSWORD }}
+          SSW_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          SSW_SIGNING_CERTIFICATE_PATH: ${{ steps.signing.outputs.certificate }}
         run: |
-          $arguments = @('-Version', '${{ steps.version.outputs.version }}')
-          if (-not [string]::IsNullOrWhiteSpace('${{ steps.signing.outputs.certificate }}')) {
-            $arguments += @('-SigningCertificatePath', '${{ steps.signing.outputs.certificate }}')
+          $buildParameters = @{ Version = $env:SSW_RELEASE_VERSION }
+          if (-not [string]::IsNullOrWhiteSpace($env:SSW_SIGNING_CERTIFICATE_PATH)) {
+            $buildParameters.SigningCertificatePath = $env:SSW_SIGNING_CERTIFICATE_PATH
           }
-          .\scripts\build-release.ps1 @arguments
+          .\scripts\build-release.ps1 @buildParameters
 
       - name: Remove temporary signing certificate
         if: always() && steps.signing.outputs.certificate != ''
         shell: powershell
-        run: Remove-Item -LiteralPath '${{ steps.signing.outputs.certificate }}' -Force -ErrorAction SilentlyContinue
+        env:
+          SSW_SIGNING_CERTIFICATE_PATH: ${{ steps.signing.outputs.certificate }}
+        run: Remove-Item -LiteralPath $env:SSW_SIGNING_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue
 
       - name: Upload build artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -135,6 +156,7 @@ jobs:
       - name: Checkout verification scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.package.outputs.source-commit }}
           persist-credentials: false
       - name: Download packaged artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -143,13 +165,16 @@ jobs:
           path: artifacts/release
       - name: Verify downloaded digest and contract
         shell: powershell
-        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version '${{ needs.package.outputs.version }}'
+        env:
+          SSW_RELEASE_VERSION: ${{ needs.package.outputs.version }}
+          SSW_EXPECTED_SOURCE_COMMIT: ${{ needs.package.outputs.source-commit }}
+        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version $env:SSW_RELEASE_VERSION -ExpectedSourceCommit $env:SSW_EXPECTED_SOURCE_COMMIT
 
   publish:
     if: github.event_name == 'push'
     needs: [package, verify-download]
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: write
       id-token: write
@@ -158,7 +183,8 @@ jobs:
       - name: Checkout release notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.package.outputs.tag }}
+          ref: ${{ needs.package.outputs.source-commit }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Download verified artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -169,56 +195,236 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          SSW_RELEASE_TAG: ${{ needs.package.outputs.tag }}
+          SSW_REPOSITORY: ${{ github.repository }}
         run: |
-          $oldPreference = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          try {
-            gh release view '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' *> $null
-            $lookupExitCode = $LASTEXITCODE
-          }
-          finally { $ErrorActionPreference = $oldPreference }
-          if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; assets will not be overwritten.' }
-          if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
-          $global:LASTEXITCODE = 0
+          $pagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
+            "repos/$($env:SSW_REPOSITORY)/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release preflight lookup failed.' }
+          $pages = ($pagesJson -join "`n") | ConvertFrom-Json
+          $matching = @($pages | ForEach-Object { $_ } | Where-Object { $_.tag_name -eq $env:SSW_RELEASE_TAG })
+          if ($matching.Count -gt 0) { throw 'Immutable release or draft already exists; assets will not be overwritten.' }
+
       - name: Attest release assets
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           subject-path: artifacts/release/*
-      - name: Create release exactly once
+
+      - name: Verify release contract and provenance before publishing
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          SSW_RELEASE_VERSION: ${{ needs.package.outputs.version }}
+          SSW_RELEASE_TAG: ${{ needs.package.outputs.tag }}
+          SSW_REPOSITORY: ${{ github.repository }}
+          SSW_SOURCE_COMMIT: ${{ needs.package.outputs.source-commit }}
         run: |
-          $version = '${{ needs.package.outputs.version }}'
-          $tag = '${{ needs.package.outputs.tag }}'
-          $assets = @(Get-ChildItem -LiteralPath 'artifacts/release' -File | ForEach-Object { $_.FullName })
+          .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release `
+            -Version $env:SSW_RELEASE_VERSION -ExpectedSourceCommit $env:SSW_SOURCE_COMMIT
+          $expected = @(
+            "SamsungSwitchWatch-Agent-$($env:SSW_RELEASE_VERSION)-win-x64.zip"
+            "SamsungSwitchWatch-Viewer-$($env:SSW_RELEASE_VERSION)-win-x64.zip"
+            'BUILD-MANIFEST.json'
+            'SBOM.spdx.json'
+            'SBOM.cdx.json'
+            'SHA256SUMS.txt'
+          ) | Sort-Object
+          $actual = @(Get-ChildItem -LiteralPath 'artifacts/release' -File | ForEach-Object { $_.Name } | Sort-Object)
+          if (($actual -join '|') -ne ($expected -join '|')) { throw 'Release asset set differs from the immutable contract.' }
+
+          foreach ($name in $expected) {
+            $path = Join-Path 'artifacts/release' $name
+            $verified = $false
+            foreach ($attempt in 1..5) {
+              $oldPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              try {
+                gh attestation verify $path --repo $env:SSW_REPOSITORY `
+                  --signer-workflow "$($env:SSW_REPOSITORY)/.github/workflows/release.yml" `
+                  --source-digest $env:SSW_SOURCE_COMMIT --source-ref "refs/tags/$($env:SSW_RELEASE_TAG)" `
+                  --deny-self-hosted-runners *> $null
+                $verificationExitCode = $LASTEXITCODE
+              }
+              finally { $ErrorActionPreference = $oldPreference }
+              if ($verificationExitCode -eq 0) { $verified = $true; break }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+            if (-not $verified) { throw "Artifact attestation verification failed: $name" }
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Stage, verify, and publish immutable release exactly once
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SSW_RELEASE_VERSION: ${{ needs.package.outputs.version }}
+          SSW_RELEASE_TAG: ${{ needs.package.outputs.tag }}
+          SSW_REPOSITORY: ${{ github.repository }}
+          SSW_EXPECTED_TAG_OBJECT: ${{ needs.package.outputs.tag-object }}
+          SSW_EXPECTED_SOURCE_COMMIT: ${{ needs.package.outputs.source-commit }}
+        run: |
+          $version = $env:SSW_RELEASE_VERSION
+          $tag = $env:SSW_RELEASE_TAG
           $expected = @(
             "SamsungSwitchWatch-Agent-$version-win-x64.zip",
             "SamsungSwitchWatch-Viewer-$version-win-x64.zip",
             'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json', 'SHA256SUMS.txt'
           ) | Sort-Object
+          $assets = @(Get-ChildItem -LiteralPath 'artifacts/release' -File | ForEach-Object { $_.FullName })
           if ((@($assets | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object) -join '|') -ne ($expected -join '|')) {
             throw 'Release asset set differs from the immutable contract.'
           }
-          $arguments = @($tag) + $assets + @('--verify-tag', '--title', "Samsung Switch Watch $version", '--repo', '${{ github.repository }}')
-          if ($version -match '-') { $arguments += '--prerelease' }
+
           $releaseNotesToken = $version.Replace('-', '_').ToUpperInvariant()
-          $notes = @("docs/RELEASE_NOTES_${releaseNotesToken}_KO.md", 'docs/RELEASE_NOTES_0.4.0_POC_KO.md', 'docs/RELEASE_NOTES_0.2.0_POC_KO.md') |
-            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-          if ($notes) { $arguments += @('--notes-file', $notes) } else { $arguments += '--generate-notes' }
-          gh release create @arguments
-          if ($LASTEXITCODE -ne 0) { throw 'Immutable GitHub release creation failed.' }
-      - name: Download release again and verify digests and attestations
-        shell: powershell
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $download = Join-Path $env:RUNNER_TEMP 'published-release'
-          New-Item -ItemType Directory -Path $download | Out-Null
-          gh release download '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' --dir $download
-          if ($LASTEXITCODE -ne 0) { throw 'Post-publish release download failed.' }
-          .\scripts\test-package-contract.ps1 -ReleaseDirectory $download -Version '${{ needs.package.outputs.version }}'
-          foreach ($zip in Get-ChildItem -LiteralPath $download -Filter '*.zip') {
-            gh attestation verify $zip.FullName --repo '${{ github.repository }}'
-            if ($LASTEXITCODE -ne 0) { throw "Artifact attestation verification failed: $($zip.Name)" }
+          $notes = "docs/RELEASE_NOTES_${releaseNotesToken}_KO.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) { throw "Exact release notes are missing: $notes" }
+
+          function Assert-ReleaseTag {
+            git fetch --force --no-tags origin `
+              "+refs/tags/$($env:SSW_RELEASE_TAG):refs/tags/$($env:SSW_RELEASE_TAG)"
+            if ($LASTEXITCODE -ne 0) { throw 'Release tag refresh failed.' }
+            $tagObject = (git rev-parse "refs/tags/$($env:SSW_RELEASE_TAG)").Trim()
+            $peeledCommit = (git rev-parse "refs/tags/$($env:SSW_RELEASE_TAG)^{}").Trim()
+            if ((git cat-file -t "refs/tags/$($env:SSW_RELEASE_TAG)").Trim() -ne 'tag') {
+              throw 'Release tag is no longer annotated.'
+            }
+            if ($tagObject -ne $env:SSW_EXPECTED_TAG_OBJECT -or $peeledCommit -ne $env:SSW_EXPECTED_SOURCE_COMMIT) {
+              throw 'Release tag moved after packaging; publishing is forbidden.'
+            }
+          }
+
+          $releaseId = $null
+          $draftCreated = $false
+          $publishAttempted = $false
+          $publicationCompleted = $false
+          $serverConfirmedMutable = $false
+          $serverConfirmedImmutable = $false
+          try {
+            Assert-ReleaseTag
+            $arguments = @($tag) + $assets + @(
+              '--verify-tag', '--draft', '--title', "Samsung Switch Watch $version",
+              '--repo', $env:SSW_REPOSITORY, '--notes-file', $notes
+            )
+            if ($version -match '-') { $arguments += '--prerelease' }
+            gh release create @arguments
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub release draft creation failed.' }
+            $draftCreated = $true
+
+            $pagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
+              "repos/$($env:SSW_REPOSITORY)/releases?per_page=100"
+            if ($LASTEXITCODE -ne 0) { throw 'Created release draft lookup failed.' }
+            $pages = ($pagesJson -join "`n") | ConvertFrom-Json
+            $matching = @($pages | ForEach-Object { $_ } | Where-Object { $_.tag_name -eq $tag })
+            if ($matching.Count -ne 1 -or -not $matching[0].draft) {
+              throw 'Exactly one matching release draft was not found.'
+            }
+            $draft = $matching[0]
+            $releaseId = [long]$draft.id
+            $remoteNames = @($draft.assets | ForEach-Object { [string]$_.name } | Sort-Object)
+            if (($remoteNames -join '|') -ne ($expected -join '|')) {
+              throw 'Uploaded draft asset set differs from the immutable contract.'
+            }
+            foreach ($name in $expected) {
+              $localPath = Join-Path 'artifacts/release' $name
+              $localHash = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              $remote = @($draft.assets | Where-Object { $_.name -eq $name })
+              if ($remote.Count -ne 1 -or $remote[0].state -ne 'uploaded' -or
+                  [string]$remote[0].digest -ne "sha256:$localHash" -or
+                  [long]$remote[0].size -ne (Get-Item -LiteralPath $localPath).Length) {
+                throw "Uploaded draft digest or size differs from the local artifact: $name"
+              }
+            }
+
+            # The active v* tag ruleset closes the remaining fetch-to-publish race.
+            Assert-ReleaseTag
+            $publishAttempted = $true
+            $publishJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --method PATCH `
+              "repos/$($env:SSW_REPOSITORY)/releases/$releaseId" -F draft=false
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub release draft publication failed.' }
+            $publishedRelease = ($publishJson -join "`n") | ConvertFrom-Json
+            if ($publishedRelease.draft) { throw 'GitHub release remained a draft after publication.' }
+            $publicationCompleted = $true
+            $serverConfirmedImmutable = [bool]$publishedRelease.immutable
+
+            $releaseAttestationVerified = $false
+            $mutableObservations = 0
+            foreach ($attempt in 1..8) {
+              $releaseJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+                "repos/$($env:SSW_REPOSITORY)/releases/tags/$tag" 2>$null
+              $releaseLookupExitCode = $LASTEXITCODE
+              if ($releaseLookupExitCode -eq 0) {
+                $release = ($releaseJson -join "`n") | ConvertFrom-Json
+                if ($release.draft) { throw 'Published release unexpectedly returned to draft state.' }
+                if ($release.immutable) {
+                  $serverConfirmedImmutable = $true
+                  $mutableObservations = 0
+                }
+                else {
+                  $mutableObservations++
+                }
+              }
+
+              $assetVerificationSucceeded = $serverConfirmedImmutable
+              if ($serverConfirmedImmutable) {
+                gh release verify $tag --repo $env:SSW_REPOSITORY *> $null
+                $assetVerificationSucceeded = $LASTEXITCODE -eq 0
+                if ($assetVerificationSucceeded) {
+                  foreach ($name in $expected) {
+                    gh release verify-asset $tag (Join-Path 'artifacts/release' $name) `
+                      --repo $env:SSW_REPOSITORY *> $null
+                    if ($LASTEXITCODE -ne 0) { $assetVerificationSucceeded = $false; break }
+                  }
+                }
+              }
+              if ($serverConfirmedImmutable -and $assetVerificationSucceeded) {
+                $releaseAttestationVerified = $true
+                break
+              }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+            if (-not $serverConfirmedImmutable) {
+              $serverConfirmedMutable = $mutableObservations -ge 3
+              if ($serverConfirmedMutable) {
+                throw 'GitHub repeatedly confirmed immutable=false for the published release.'
+              }
+              throw 'Published release immutability could not be confirmed; automatic deletion is forbidden.'
+            }
+            if (-not $releaseAttestationVerified) {
+              throw 'GitHub release attestation or published asset verification failed.'
+            }
+            Assert-ReleaseTag
+            $global:LASTEXITCODE = 0
+          }
+          catch {
+            $failure = $_
+            $cleanupAllowed = $false
+            $oldPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+              if ($draftCreated -and -not $publishAttempted) {
+                $cleanupPagesJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' --paginate --slurp `
+                  "repos/$($env:SSW_REPOSITORY)/releases?per_page=100" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                  $cleanupPages = ($cleanupPagesJson -join "`n") | ConvertFrom-Json
+                  $cleanupMatches = @($cleanupPages | ForEach-Object { $_ } |
+                    Where-Object { $_.tag_name -eq $tag })
+                  $cleanupAllowed = $cleanupMatches.Count -eq 1 -and [bool]$cleanupMatches[0].draft
+                }
+              }
+              if ($cleanupAllowed) {
+                gh release delete $tag --repo $env:SSW_REPOSITORY --yes *> $null
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Warning 'A non-immutable release or draft was removed after verification failure.'
+                }
+                else {
+                  Write-Warning 'Automatic draft cleanup failed; inspect the matching release before retrying.'
+                }
+              }
+              elseif ($draftCreated) {
+                Write-Warning 'Publication was attempted; automatic deletion was intentionally skipped regardless of observed state.'
+              }
+            }
+            finally { $ErrorActionPreference = $oldPreference }
+            $global:LASTEXITCODE = 0
+            throw $failure
           }

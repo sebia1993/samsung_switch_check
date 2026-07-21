@@ -11,7 +11,7 @@
                                   SamsungSwitchWatch.Viewer
 ```
 
-현재 버전은 `v0.4.0-poc`입니다. 실제 펌웨어 3종을 회사망에서 검증하기 전까지는
+현재 버전은 `v0.4.1-poc`입니다. 실제 펌웨어 3종을 회사망에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ## 핵심 기능
@@ -45,13 +45,13 @@ Viewer는 설정이 없으면 민감정보가 없는 데모 경로로 실행할 
 깨끗한 Git 작업 트리에서 다음 명령을 실행합니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.4.0-poc
+.\scripts\build-release.ps1 -Version 0.4.1-poc
 ```
 
 `artifacts\release`에 다음 파일이 만들어집니다.
 
-- `SamsungSwitchWatch-Agent-0.4.0-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.4.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.4.1-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.4.1-poc-win-x64.zip`
 - `BUILD-MANIFEST.json`
 - `SBOM.spdx.json`, `SBOM.cdx.json`
 - `SHA256SUMS.txt`
@@ -60,7 +60,7 @@ Agent ZIP 루트에는 다중 장비 등록용 `switches.example.json` 예제가
 
 배포본은 Windows x64 self-contained 단일 실행 파일이므로 대상 PC에 .NET이나 Python을
 별도로 설치하지 않습니다. `-poc` 산출물은 서명 인증서가 없으면 서명되지 않으므로
-공식 GitHub Release의 SHA-256과 provenance를 반드시 확인하십시오.
+공식 GitHub Release의 SHA-256, build provenance와 release attestation을 반드시 확인하십시오.
 
 ## 문서
 
@@ -69,7 +69,7 @@ Agent ZIP 루트에는 다중 장비 등록용 `switches.example.json` 예제가
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.4.0-poc 릴리스 노트](docs/RELEASE_NOTES_0.4.0_POC_KO.md)
+- [0.4.1-poc 릴리스 노트](docs/RELEASE_NOTES_0.4.1_POC_KO.md)
 - [Figma handoff](docs/figma/README.md)
 
 ## 보안 경계

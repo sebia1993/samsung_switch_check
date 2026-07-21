@@ -1,6 +1,9 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$ReleaseDirectory,
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$ExpectedSourceCommit
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -17,6 +20,7 @@ $hashFile = Join-Path $release 'SHA256SUMS.txt'
 $rootManifestPath = Join-Path $release 'BUILD-MANIFEST.json'
 $spdxPath = Join-Path $release 'SBOM.spdx.json'
 $cyclonePath = Join-Path $release 'SBOM.cdx.json'
+$releaseNotesName = "RELEASE_NOTES_$($Version.Replace('-', '_').ToUpperInvariant())_KO.md"
 $hashedReleaseFiles = @($agentZip, $viewerZip, $rootManifestPath, $spdxPath, $cyclonePath)
 foreach ($required in @($hashedReleaseFiles + $hashFile)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "필수 릴리스 파일이 없습니다: $required" }
@@ -44,6 +48,9 @@ catch { throw "루트 BUILD-MANIFEST.json을 읽지 못했습니다: $($_.Except
 if ($rootManifest.manifestVersion -ne 1 -or $rootManifest.version -ne $Version -or
     $rootManifest.sourceCommit -notmatch '^[0-9a-f]{40}$' -or $rootManifest.dotnetSdk -ne '10.0.302') {
     throw '루트 빌드 매니페스트의 버전/커밋/SDK 계약이 올바르지 않습니다.'
+}
+if ([string]$rootManifest.sourceCommit -ne $ExpectedSourceCommit.ToLowerInvariant()) {
+    throw '루트 빌드 매니페스트의 소스 커밋이 기대한 워크플로 커밋과 다릅니다.'
 }
 if ($rootManifest.signing.status -eq 'unsigned-poc' -and $Version -notmatch '-poc(?:[.-]|$)') {
     throw '서명되지 않은 비 POC 릴리스는 허용하지 않습니다.'
@@ -94,7 +101,7 @@ try {
             Installer = 'install-agent.ps1'
             Required = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'set-switch-credential.ps1',
                 'new-pairing-code.ps1', 'new-agent-certificate.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
-                'switches.example.json', 'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json')
+                'switches.example.json', $releaseNotesName, 'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json')
         },
         [pscustomobject]@{
             Name = 'Viewer'
@@ -102,7 +109,7 @@ try {
             Exe = 'SamsungSwitchWatch.Viewer.exe'
             Installer = 'install-viewer.ps1'
             Required = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1', 'pair-viewer.ps1',
-                'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md', 'BUILD-MANIFEST.json',
+                'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md', $releaseNotesName, 'BUILD-MANIFEST.json',
                 'SBOM.spdx.json', 'SBOM.cdx.json')
         }
     )
@@ -131,8 +138,9 @@ try {
                 throw "$($package.Name) ZIP 필수 파일이 없습니다: $requiredName"
             }
         }
-        if (@(Get-ChildItem -LiteralPath $expanded -Filter 'RELEASE_NOTES_*_KO.md' -File).Count -lt 1) {
-            throw "$($package.Name) ZIP에 릴리스 노트가 없습니다."
+        $packagedReleaseNotes = @(Get-ChildItem -LiteralPath $expanded -Filter 'RELEASE_NOTES_*_KO.md' -File)
+        if ($packagedReleaseNotes.Count -ne 1 -or $packagedReleaseNotes[0].Name -ne $releaseNotesName) {
+            throw "$($package.Name) ZIP의 릴리스 노트가 현재 버전과 정확히 일치하지 않습니다: $releaseNotesName"
         }
         try { $packageManifest = Get-Content -LiteralPath (Join-Path $expanded 'BUILD-MANIFEST.json') -Raw -Encoding UTF8 | ConvertFrom-Json }
         catch { throw "$($package.Name) BUILD-MANIFEST.json을 읽지 못했습니다: $($_.Exception.Message)" }

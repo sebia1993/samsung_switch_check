@@ -283,10 +283,17 @@ public sealed class CollectorSafetyTests
     {
         var collector = new ConcurrentBatchCollector(expectedDevices: 3);
         await using var host = await TestAgentHost.StartAsync(collector, MultiDeviceOverrides());
-        var options = host.Services.GetRequiredService<AgentOptions>();
-        options.EnablePolling = true;
-        options.MaxConcurrentDevices = 2;
-        var scheduler = new PollSchedulerService(options,
+        var hostOptions = host.Services.GetRequiredService<AgentOptions>();
+        // Keep the host-owned scheduler disabled. Mutating its shared options during startup can race
+        // this test-owned scheduler and make two independent loops poll the same fixture.
+        var schedulerOptions = new AgentOptions
+        {
+            EnablePolling = true,
+            MaxConcurrentDevices = 2,
+            SchedulerTickSeconds = hostOptions.SchedulerTickSeconds,
+            Switches = hostOptions.Switches.ToList()
+        };
+        var scheduler = new PollSchedulerService(schedulerOptions,
             host.Services.GetRequiredService<CommandExecutionService>(),
             host.Services.GetRequiredService<AgentRuntimeState>(),
             host.Services.GetRequiredService<SqliteAgentStore>(),

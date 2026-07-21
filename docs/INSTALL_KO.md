@@ -2,7 +2,7 @@
 
 ## 1. 배포 파일 검증
 
-공식 GitHub `v0.4.0-poc` Release에서 Agent·Viewer ZIP과 다음 파일을 같은 폴더에
+공식 GitHub `v0.4.1-poc` Release에서 Agent·Viewer ZIP과 다음 파일을 같은 폴더에
 내려받습니다.
 
 - `BUILD-MANIFEST.json`
@@ -10,11 +10,39 @@
 - `SHA256SUMS.txt`
 
 ```powershell
-Get-FileHash .\SamsungSwitchWatch-*-0.4.0-poc-win-x64.zip -Algorithm SHA256
-.\scripts\test-package-contract.ps1 -ReleaseDirectory . -Version 0.4.0-poc
+$releaseFiles = @(
+  'SamsungSwitchWatch-Agent-0.4.1-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.4.1-poc-win-x64.zip',
+  'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json', 'SHA256SUMS.txt'
+)
+$declared = @{}
+Get-Content .\SHA256SUMS.txt | ForEach-Object {
+  if ($_ -notmatch '^([0-9a-fA-F]{64})\s{2}(.+)$') { throw "잘못된 SHA256SUMS 줄: $_" }
+  $declared[$Matches[2]] = $Matches[1].ToLowerInvariant()
+}
+foreach ($name in $releaseFiles | Where-Object { $_ -ne 'SHA256SUMS.txt' }) {
+  $actual = (Get-FileHash -LiteralPath ".\$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne $declared[$name]) { throw "SHA-256 불일치: $name" }
+}
+$manifest = Get-Content .\BUILD-MANIFEST.json -Raw | ConvertFrom-Json
+if ([string]$manifest.sourceCommit -notmatch '^[0-9a-f]{40}$') { throw '잘못된 소스 커밋' }
+foreach ($name in $releaseFiles) {
+  gh attestation verify ".\$name" --repo sebia1993/samsung_switch_check `
+    --signer-workflow sebia1993/samsung_switch_check/.github/workflows/release.yml `
+    --source-digest $manifest.sourceCommit --source-ref refs/tags/v0.4.1-poc `
+    --deny-self-hosted-runners
+  if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance 불일치: $name" }
+}
+gh release verify v0.4.1-poc --repo sebia1993/samsung_switch_check
+if ($LASTEXITCODE -ne 0) { throw 'GitHub release attestation 불일치' }
+foreach ($name in $releaseFiles) {
+  gh release verify-asset v0.4.1-poc ".\$name" --repo sebia1993/samsung_switch_check
+  if ($LASTEXITCODE -ne 0) { throw "GitHub release attestation 불일치: $name" }
+}
 ```
 
-GitHub의 SHA-256 및 provenance와 일치하지 않으면 설치하지 마십시오. ZIP은 최종 설치
+위 명령은 GitHub CLI 2.95 이상에서 실행합니다. SHA-256, release attestation 또는
+provenance가 일치하지 않으면 설치하지 마십시오. ZIP은 최종 설치
 폴더 바깥의 임시 폴더에 각각 압축 해제합니다.
 
 ## 2. Agent PC 준비
