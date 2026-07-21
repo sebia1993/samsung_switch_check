@@ -39,12 +39,17 @@ git push origin v0.4.1-poc
 각 ZIP에도 실행 파일과 스크립트의 SHA-256, 소스 커밋, SDK, 서명 상태가 기록된 빌드 매니페스트와 두 SBOM이 포함됩니다. 업로드 전 계약 검사를 수행하고, Actions artifact를 다시 다운로드해 digest와 기대한 소스 커밋을 재검증합니다. 태그 릴리스에서는 GitHub build provenance attestation을 만든 뒤 6개 자산 모두의 signer workflow, source commit, source tag를 검증합니다.
 
 검증된 파일은 먼저 draft에 업로드하고 GitHub가 계산한 6개 자산의 digest·크기와 로컬
-파일을 대조합니다. 그 뒤 태그 객체와 peeled commit을 다시 확인하고 draft를 게시합니다.
+파일을 대조합니다. draft 생성 직후 목록 API 반영이 늦을 수 있으므로 생성 자체는 다시
+시도하지 않고, 생성 시 반환된 URL과 일치하는 항목의 조회만 제한된 시간 동안 재시도합니다.
+찾은 draft는 숫자 release ID로 다시 조회해 태그·URL·draft 상태를 고정한 뒤 모든 후속
+검증과 게시에 같은 ID만 사용합니다. 그 뒤 태그 객체와 peeled commit을 다시 확인하고
+draft를 게시합니다.
 마지막으로 `immutable=true`, GitHub release attestation, 6개 `verify-asset` 결과와 게시 후
-태그를 확인합니다. 게시를 시도하기 전에 실패한 경우에는 정확히 일치하는 draft만 자동
-삭제합니다. 게시 API를 시도한 뒤에는 응답이나 조회 상태가 불확실해도 자동 삭제하지
-않습니다. 실패 뒤 release 또는 draft가 남았다면 불변성과 attestation을 관리자 권한으로
-먼저 확인하고, 삭제 가능 여부와 관계없이 원인을 수정한 새 버전 태그를 사용합니다.
+태그를 확인합니다. 게시를 시도하기 전에 실패한 경우에도 숫자 ID·태그·생성 URL·draft
+상태가 모두 다시 일치할 때만 그 ID를 자동 삭제합니다. 정확한 ID를 확정하지 못했거나 게시
+API를 시도한 뒤에는 응답이나 조회 상태가 불확실해도 자동 삭제하지 않습니다. 실패 뒤
+release 또는 draft가 남았다면 불변성과 attestation을 관리자 권한으로 먼저 확인하고, 삭제
+가능 여부와 관계없이 원인을 수정한 새 버전 태그를 사용합니다.
 
 ## 사용자 검증
 
