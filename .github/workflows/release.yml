@@ -52,9 +52,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view '${{ steps.version.outputs.tag }}' --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -eq 0) { throw 'Immutable release already exists; rebuilding or replacing its assets is forbidden.' }
-          if ($LASTEXITCODE -ne 1) { throw 'GitHub release preflight lookup failed.' }
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            gh release view '${{ steps.version.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+            $lookupExitCode = $LASTEXITCODE
+          }
+          finally { $ErrorActionPreference = $oldPreference }
+          if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; rebuilding or replacing its assets is forbidden.' }
+          if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
 
       - name: Checkout exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,6 +75,8 @@ jobs:
         run: |
           if ((git rev-parse HEAD).Trim() -ne '${{ github.sha }}') { throw 'Checked out commit does not match the tag event SHA.' }
           if ((git cat-file -t 'refs/tags/${{ steps.version.outputs.tag }}').Trim() -ne 'tag') { throw 'Release tags must be annotated.' }
+          git merge-base --is-ancestor '${{ github.sha }}' 'origin/main'
+          if ($LASTEXITCODE -ne 0) { throw 'Release tag target must be reachable from origin/main.' }
 
       - name: Install exact .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -159,9 +167,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' *> $null
-          if ($LASTEXITCODE -eq 0) { throw 'Immutable release already exists; assets will not be overwritten.' }
-          if ($LASTEXITCODE -ne 1) { throw 'GitHub release preflight lookup failed.' }
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            gh release view '${{ needs.package.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+            $lookupExitCode = $LASTEXITCODE
+          }
+          finally { $ErrorActionPreference = $oldPreference }
+          if ($lookupExitCode -eq 0) { throw 'Immutable release already exists; assets will not be overwritten.' }
+          if ($lookupExitCode -ne 1) { throw 'GitHub release preflight lookup failed.' }
       - name: Attest release assets
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
