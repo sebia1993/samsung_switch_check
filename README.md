@@ -6,29 +6,31 @@
 
 ```text
 삼성 스위치 여러 대 ── Telnet/23 ──> SamsungSwitchWatch.Agent
-                                          │ HTTPS/18443 + SignalR
+                                          │ HTTP/18443 + SignalR
+                                          │ (암호화·인증 없음, 고정 IP 방화벽 제한)
                                           ▼
                                   SamsungSwitchWatch.Viewer
 ```
 
-현재 버전은 `v0.5.1-poc`입니다. 실제 펌웨어 3종을 회사망에서 검증하기 전까지는
+현재 버전은 `v0.6.0-poc`입니다. 실제 펌웨어 3종을 회사망에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ## 핵심 기능
 
 - Agent 하나에 최대 256개 스위치 등록, 기본 최대 4개 장비 병렬 점검
 - 장비별 Telnet 세션 1개와 등록된 `show` 명령 ID만 실행
-- `show port status`, `show syslog tail num 100` 우선 실행과 모델별 자동 대체 명령
+- `show port status`, `show syslog tail num 100` 우선 실행과 현장 `show sylog tail num 100` 표기 및 모델별 자동 대체 명령
 - 짧은 VTY 유지시간을 고려한 세션 분할, 완료 결과 보존과 남은 명령 1회 재접속
 - 신규 로그, 상태 변경, 장애 지속, 복구, 재시작과 로그 기준선 초기화 감지
 - 모델·펌웨어별 미지원 명령을 장비 장애와 분리한 capability 상태
 - API v3 cursor catch-up과 SignalR 실시간 이벤트, v1/v2 호환 유지
-- Agent/API/실시간/DB/인증서/수집기 상태를 구분한 Figma 기반 대시보드
+- Agent/API/실시간/DB/수집기 상태를 구분한 Figma 기반 대시보드
 - 항상 위 미니 창, 시스템 트레이, Critical 우선 Windows 알림과 인앱 fallback
 - 검색 및 전체·미확인·새 로그·장애·복구 필터
 - IP·호스트·사용자·MAC·원문을 제외하고 장비 ID를 익명화한 CSV·JSON 내보내기
-- DPAPI 자격 증명·원문 보호, 토큰 수명/폐기/교체, 인증서 만료·dual-pin 관리
-- `SSW1:` 연결 문자열 한 번으로 주소·인증서 검증·일회용 페어링을 끝내는 Viewer 마법사
+- DPAPI 스위치 자격 증명·Telnet 원문 보호
+- Agent 주소와 포트만 입력하는 간단한 Viewer 연결 화면
+- 1~32개 고정 Viewer IPv4만 허용하는 Windows 방화벽과 원자적 허용 목록 갱신
 - 설치 receipt, 작업 journal, rollback, 패키지 매니페스트, SBOM과 SHA-256 검증
 
 ## 개발과 검증
@@ -48,13 +50,13 @@ Viewer는 설정이 없으면 민감정보가 없는 데모 경로로 실행할 
 깨끗한 Git 작업 트리에서 다음 명령을 실행합니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.5.1-poc
+.\scripts\build-release.ps1 -Version 0.6.0-poc
 ```
 
 `artifacts\release`에는 패키지와 내부 검증 파일 6개가 만들어집니다.
 
-- `SamsungSwitchWatch-Agent-0.5.1-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.5.1-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.6.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.6.0-poc-win-x64.zip`
 - `BUILD-MANIFEST.json`
 - `SBOM.spdx.json`, `SBOM.cdx.json`
 - `SHA256SUMS.txt`
@@ -70,19 +72,20 @@ Viewer는 설정이 없으면 민감정보가 없는 데모 경로로 실행할 
 
 ## 문서
 
-- [설치·복구·페어링](docs/INSTALL_KO.md)
+- [설치·복구·Viewer 연결](docs/INSTALL_KO.md)
 - [아키텍처와 API](docs/ARCHITECTURE.md)
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.5.1-poc 릴리스 노트](docs/RELEASE_NOTES_0.5.1_POC_KO.md)
+- [0.6.0-poc 릴리스 노트](docs/RELEASE_NOTES_0.6.0_POC_KO.md)
 - [Figma handoff](docs/figma/README.md)
 
 ## 보안 경계
 
-Telnet 자체는 암호화되지 않습니다. Agent와 스위치는 격리된 관리망에 두고 스위치 ACL로
-Agent IPv4 주소만 TCP/23 접근을 허용하십시오. 비밀번호, 토큰, 인증서 개인키, 실제 IP,
-호스트명, MAC, 시리얼과 회사 로그를 저장소·이슈·외부 진단 자료에 넣지 마십시오.
+Telnet과 Agent–Viewer HTTP는 모두 암호화되지 않습니다. Agent API에는 사용자 인증도 없습니다.
+두 경로를 격리된 사내 관리망에만 두고, 설치 시 등록한 고정 Viewer IPv4 방화벽 범위를 유일한
+접근 통제로 유지하십시오. 비밀번호, 실제 IP, 호스트명, MAC, 시리얼과 회사 로그를 저장소·이슈·
+외부 진단 자료에 넣지 마십시오.
 
 Viewer는 임의 CLI 문자열이나 Telnet 자격 증명을 받지 않으며, Telnet 원문은 Agent PC
 밖으로 전송하지 않습니다. 실제 스위치 설정 변경·재부팅·로그 삭제 기능은 포함하지 않습니다.

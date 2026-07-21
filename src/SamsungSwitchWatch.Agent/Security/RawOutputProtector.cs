@@ -105,24 +105,8 @@ public sealed class RawOutputProtector(AgentOptions options) : IRawOutputProtect
         }
     }
 
-    private byte[] DeriveMockKey()
-    {
-        const string purpose = "raw-output-test-envelope";
-        var pepperLength = Encoding.UTF8.GetByteCount(options.TokenPepper);
-        var purposeLength = Encoding.UTF8.GetByteCount(purpose);
-        var material = new byte[pepperLength + 1 + purposeLength];
-        try
-        {
-            Encoding.UTF8.GetBytes(options.TokenPepper.AsSpan(), material.AsSpan(0, pepperLength));
-            material[pepperLength] = 0;
-            Encoding.UTF8.GetBytes(purpose.AsSpan(), material.AsSpan(pepperLength + 1, purposeLength));
-            return SHA256.HashData(material);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(material);
-        }
-    }
+    private static byte[] DeriveMockKey() =>
+        SHA256.HashData("SamsungSwitchWatch.Agent.RawOutput.MockOnly.v1"u8);
 
     private void EnsureMockMode()
     {

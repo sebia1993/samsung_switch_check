@@ -14,7 +14,7 @@ public sealed class SqliteAgentStore(
     ILogger<SqliteAgentStore> logger,
     IRawOutputProtector? rawOutputProtector = null)
 {
-    private const int CurrentSchemaVersion = 4;
+    private const int CurrentSchemaVersion = 5;
     private const int CurrentRawProtectionVersion = 1;
     private const string EventColumns = "sequence, event_id, device_id, severity, type, title, message, state, occurred_utc, acknowledged_utc, recovered_utc, condition_key, details_json, is_active_condition";
     private const string EventColumnsWithAlias = "e.sequence, e.event_id, e.device_id, e.severity, e.type, e.title, e.message, e.state, e.occurred_utc, e.acknowledged_utc, e.recovered_utc, e.condition_key, e.details_json, e.is_active_condition";
@@ -587,213 +587,6 @@ public sealed class SqliteAgentStore(
         return changes;
     }
 
-    public async Task StorePairingCodeAsync(string hash, DateTimeOffset created, DateTimeOffset expires, CancellationToken cancellationToken = default)
-    {
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO pairing_codes(code_hash, created_utc, expires_utc, used_utc)
-                VALUES($hash, $created, $expires, NULL)
-                ON CONFLICT(code_hash) DO UPDATE SET created_utc=$created, expires_utc=$expires, used_utc=NULL;
-                """;
-            command.Parameters.AddWithValue("$hash", hash);
-            command.Parameters.AddWithValue("$created", Format(created));
-            command.Parameters.AddWithValue("$expires", Format(expires));
-            await command.ExecuteNonQueryAsync(cancellationToken);
-        }, cancellationToken);
-    }
-
-    public async Task<bool> ConsumePairingCodeAsync(string hash, DateTimeOffset now, CancellationToken cancellationToken = default)
-    {
-        var consumed = false;
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.Transaction = (SqliteTransaction)transaction;
-            command.CommandText = """
-                UPDATE pairing_codes SET used_utc=$now
-                WHERE code_hash=$hash AND used_utc IS NULL AND expires_utc >= $now;
-                """;
-            command.Parameters.AddWithValue("$now", Format(now));
-            command.Parameters.AddWithValue("$hash", hash);
-            consumed = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
-            await transaction.CommitAsync(cancellationToken);
-        }, cancellationToken);
-        return consumed;
-    }
-
-    public async Task StoreTokenAsync(string hash, DateTimeOffset created, CancellationToken cancellationToken = default)
-    {
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-            if (await CountActiveTokensAsync(connection, transaction, created, cancellationToken) >=
-                MaximumActiveTokens)
-            {
-                throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
-                    "The maximum number of paired Viewer tokens has been reached.", 409);
-            }
-
-            await InsertTokenCoreAsync(connection, transaction, hash, created, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }, cancellationToken);
-    }
-
-    public async Task<bool> ConsumePairingCodeAndStoreTokenAsync(
-        string codeHash,
-        string tokenHash,
-        DateTimeOffset now,
-        CancellationToken cancellationToken = default)
-    {
-        var consumed = false;
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-            await using (var consume = connection.CreateCommand())
-            {
-                consume.Transaction = transaction;
-                consume.CommandText = """
-                    UPDATE pairing_codes SET used_utc=$now
-                    WHERE code_hash=$hash AND used_utc IS NULL AND expires_utc >= $now;
-                    """;
-                consume.Parameters.AddWithValue("$now", Format(now));
-                consume.Parameters.AddWithValue("$hash", codeHash);
-                consumed = await consume.ExecuteNonQueryAsync(cancellationToken) == 1;
-            }
-
-            if (!consumed)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                return;
-            }
-
-            if (await CountActiveTokensAsync(connection, transaction, now, cancellationToken) >=
-                MaximumActiveTokens)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
-                    "The maximum number of paired Viewer tokens has been reached.", 409);
-            }
-
-            await InsertTokenCoreAsync(connection, transaction, tokenHash, now, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-        }, cancellationToken);
-        return consumed;
-    }
-
-    public async Task<bool> ValidateAndTouchTokenAsync(string hash, DateTimeOffset now, CancellationToken cancellationToken = default)
-    {
-        var valid = false;
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                UPDATE api_tokens SET last_used_utc=$now
-                WHERE token_hash=$hash AND revoked_utc IS NULL
-                  AND created_utc > $absoluteCutoff
-                  AND COALESCE(last_used_utc, created_utc) > $idleCutoff;
-                """;
-            command.Parameters.AddWithValue("$now", Format(now));
-            command.Parameters.AddWithValue("$hash", hash);
-            command.Parameters.AddWithValue("$absoluteCutoff",
-                Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
-            command.Parameters.AddWithValue("$idleCutoff",
-                Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
-            valid = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
-        }, cancellationToken);
-        return valid;
-    }
-
-    public async Task<IReadOnlyList<ApiTokenInfo>> GetApiTokensAsync(
-        DateTimeOffset now,
-        CancellationToken cancellationToken = default)
-    {
-        await EnsureInitializedAsync(cancellationToken);
-        await using var connection = await OpenAsync(cancellationToken);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT token_hash, created_utc, last_used_utc, revoked_utc
-            FROM api_tokens ORDER BY created_utc DESC;
-            """;
-        var result = new List<ApiTokenInfo>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var hash = reader.GetString(0);
-            var created = Parse(reader.GetString(1));
-            DateTimeOffset? lastUsed = reader.IsDBNull(2) ? null : Parse(reader.GetString(2));
-            DateTimeOffset? revoked = reader.IsDBNull(3) ? null : Parse(reader.GetString(3));
-            var absoluteExpires = created.AddDays(options.Tokens.AbsoluteLifetimeDays);
-            var idleExpires = (lastUsed ?? created).AddDays(options.Tokens.IdleLifetimeDays);
-            result.Add(new ApiTokenInfo(
-                TokenId(hash), created, lastUsed, revoked, absoluteExpires, idleExpires,
-                revoked is not null || now >= absoluteExpires || now >= idleExpires));
-        }
-        return result;
-    }
-
-    public async Task<bool> RevokeTokenAsync(
-        string tokenId,
-        DateTimeOffset revokedUtc,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateTokenId(tokenId);
-        var revoked = false;
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                UPDATE api_tokens SET revoked_utc=$revoked
-                WHERE substr(token_hash, 1, 16)=$id AND revoked_utc IS NULL;
-                """;
-            command.Parameters.AddWithValue("$revoked", Format(revokedUtc));
-            command.Parameters.AddWithValue("$id", tokenId.ToUpperInvariant());
-            revoked = await command.ExecuteNonQueryAsync(cancellationToken) == 1;
-        }, cancellationToken);
-        return revoked;
-    }
-
-    public async Task<bool> RotateTokenAsync(
-        string tokenId,
-        string replacementHash,
-        DateTimeOffset now,
-        CancellationToken cancellationToken = default)
-    {
-        ValidateTokenId(tokenId);
-        var rotated = false;
-        await ExecuteWriteAsync(async connection =>
-        {
-            await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
-            await using (var revoke = connection.CreateCommand())
-            {
-                revoke.Transaction = transaction;
-                revoke.CommandText = """
-                    UPDATE api_tokens SET revoked_utc=$now
-                    WHERE substr(token_hash, 1, 16)=$id AND revoked_utc IS NULL;
-                    """;
-                revoke.Parameters.AddWithValue("$now", Format(now));
-                revoke.Parameters.AddWithValue("$id", tokenId.ToUpperInvariant());
-                rotated = await revoke.ExecuteNonQueryAsync(cancellationToken) == 1;
-            }
-
-            if (rotated)
-            {
-                if (await CountActiveTokensAsync(connection, transaction, now, cancellationToken) >=
-                    MaximumActiveTokens)
-                {
-                    await transaction.RollbackAsync(cancellationToken);
-                    throw new AgentOperationException(AgentErrorCodes.TokenLimitReached,
-                        "The maximum number of paired Viewer tokens has been reached.", 409);
-                }
-                await InsertTokenCoreAsync(connection, transaction, replacementHash, now, cancellationToken);
-            }
-            await transaction.CommitAsync(cancellationToken);
-        }, cancellationToken);
-        return rotated;
-    }
-
     public async Task RunRetentionAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         await ExecuteWriteAsync(async connection =>
@@ -805,22 +598,10 @@ public sealed class SqliteAgentStore(
                 WHERE occurred_utc < $eventCutoff
                   AND NOT (is_active_condition = 1 AND recovered_utc IS NULL);
                 DELETE FROM audit WHERE occurred_utc < $auditCutoff;
-                DELETE FROM pairing_codes WHERE expires_utc < $pairingCutoff;
-                DELETE FROM api_tokens
-                WHERE (revoked_utc IS NOT NULL AND revoked_utc < $tokenHistoryCutoff)
-                   OR (created_utc < $tokenAbsoluteCutoff
-                       AND COALESCE(last_used_utc, created_utc) < $tokenIdleCutoff);
                 """;
             command.Parameters.AddWithValue("$rawCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.RawDays))));
             command.Parameters.AddWithValue("$eventCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.EventDays))));
             command.Parameters.AddWithValue("$auditCutoff", Format(now.AddDays(-Math.Max(0, options.Retention.AuditDays))));
-            command.Parameters.AddWithValue("$pairingCutoff", Format(now.AddDays(-1)));
-            command.Parameters.AddWithValue("$tokenHistoryCutoff",
-                Format(now.AddDays(-Math.Max(30, options.Retention.AuditDays))));
-            command.Parameters.AddWithValue("$tokenAbsoluteCutoff",
-                Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
-            command.Parameters.AddWithValue("$tokenIdleCutoff",
-                Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await EnforceRawLimitAsync(connection, cancellationToken);
@@ -1181,12 +962,6 @@ public sealed class SqliteAgentStore(
                     command_id TEXT NOT NULL, captured_utc TEXT NOT NULL,
                     content BLOB NOT NULL, size_bytes INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS ix_raw_captured ON raw_blobs(captured_utc);
-                CREATE TABLE IF NOT EXISTS pairing_codes (
-                    code_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
-                    expires_utc TEXT NOT NULL, used_utc TEXT NULL);
-                CREATE TABLE IF NOT EXISTS api_tokens (
-                    token_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
-                    last_used_utc TEXT NULL, revoked_utc TEXT NULL);
                 """, cancellationToken);
             version = 1;
         }
@@ -1269,6 +1044,16 @@ public sealed class SqliteAgentStore(
                     UPDATE raw_storage_stats SET total_bytes=MAX(0, total_bytes - OLD.size_bytes)
                     WHERE singleton=1;
                 END;
+                """, cancellationToken);
+            version = 4;
+        }
+
+        if (version < 5)
+        {
+            await ApplyMigrationAsync(connection, 5, """
+                PRAGMA secure_delete=ON;
+                DROP TABLE IF EXISTS pairing_codes;
+                DROP TABLE IF EXISTS api_tokens;
                 """, cancellationToken);
         }
     }
@@ -1556,61 +1341,6 @@ public sealed class SqliteAgentStore(
         command.CommandText = "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         return connection;
-    }
-
-    private async Task<long> CountActiveTokensAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT COUNT(*) FROM api_tokens
-            WHERE revoked_utc IS NULL
-              AND created_utc > $absoluteCutoff
-              AND COALESCE(last_used_utc, created_utc) > $idleCutoff;
-            """;
-        command.Parameters.AddWithValue("$absoluteCutoff",
-            Format(now.AddDays(-options.Tokens.AbsoluteLifetimeDays)));
-        command.Parameters.AddWithValue("$idleCutoff",
-            Format(now.AddDays(-options.Tokens.IdleLifetimeDays)));
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
-    }
-
-    private static async Task InsertTokenCoreAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        string hash,
-        DateTimeOffset created,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            INSERT INTO api_tokens(token_hash, created_utc, last_used_utc, revoked_utc)
-            VALUES($hash, $created, NULL, NULL);
-            """;
-        command.Parameters.AddWithValue("$hash", hash);
-        command.Parameters.AddWithValue("$created", Format(created));
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static string TokenId(string hash) => hash[..Math.Min(16, hash.Length)].ToUpperInvariant();
-
-    private int MaximumActiveTokens => Math.Clamp(
-        options.Tokens.MaximumActiveTokens,
-        1,
-        TokenOptions.MaximumActiveTokenLimit);
-
-    private static void ValidateTokenId(string tokenId)
-    {
-        if (tokenId.Length != 16 || tokenId.Any(character => !Uri.IsHexDigit(character)))
-        {
-            throw new AgentOperationException(AgentErrorCodes.TokenNotFound,
-                "The Viewer token id was not found.", 404);
-        }
     }
 
     private static string Format(DateTimeOffset value) => value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);

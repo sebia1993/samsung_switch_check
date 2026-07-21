@@ -9,7 +9,8 @@
   IES4226XP ─┘                ├─ 모델 프로파일 + capability 확인
                               ├─ 명령별 구조화·변경 감지
                               ├─ SQLite + DPAPI 원문 보관
-                              ├─ HTTPS API v1/v2/v3
+                              ├─ HTTP API v1/v2/v3
+                              │  (암호화·인증 없음, 고정 IP 방화벽)
                               └─ SignalR eventChanged
                                       │
                                       ▼
@@ -32,8 +33,8 @@ Agent PC 밖으로 전송하지 않습니다.
 |---|---|---:|---|
 | `version` | `show version` | 1시간 | 선택 |
 | `system` | `show system` | 1분 | 선택 |
-| `log_ram` | `show log ram` | 1분 | 필수 |
-| `interface_status` | `show interfaces status` | 1분 | 필수 |
+| `log_ram` | `show syslog tail num 100` 우선, `show sylog tail num 100` 및 모델별 대체 | 1분 | 필수 |
+| `interface_status` | `show port status` 우선, 모델별 대체 | 1분 | 필수 |
 
 Agent는 같은 장비의 due 명령을 한 Telnet 세션에서 실행합니다. 장비별 semaphore로 동시
 세션을 하나로 제한하고, 다른 장비는 `MaxConcurrentDevices`(기본 4, 최대 16) 범위에서
@@ -61,14 +62,14 @@ Agent 전용 원문을 한 트랜잭션으로 커밋합니다.
 - 원문: DPAPI LocalMachine 보호, 기본 7일·500MB, 256개 단위 trim
 - 이벤트: 기본 90일, 미복구 활성 condition은 보존
 - 감사 이력: 기본 180일
-- schema v4: 기존 평문 가능 원문을 폐기하고 보호 버전을 명시
+- schema v5: snapshot/event/raw/audit는 보존하고 제거된 pairing/token 테이블만 폐기
 
 설치 스크립트는 서비스 계정과 관리자만 데이터에 접근하도록 ACL을 설정합니다.
 
 ## API v3
 
 - `GET /health/live`: Agent 프로세스 응답
-- `GET /health/ready`: DB·스키마·인증서·자격 증명·스케줄러·필수 수집기 상태
+- `GET /health/ready`: DB·스키마·자격 증명·스케줄러·필수 수집기 상태
 - `GET /api/v3/snapshot`: authoritative counts, high-watermark, 장비·capability·채널 상태
 - `GET /api/v3/events/recent?limit=500`: 최신 이벤트 snapshot
 - `GET /api/v3/events/changes?after={cursor}&limit=500`: 불변 변경 이력 page
@@ -77,6 +78,9 @@ Agent 전용 원문을 한 트랜잭션으로 커밋합니다.
 
 기존 `/api/v1`, `/api/v2`는 v1.0 전까지 읽기 호환 경로로 유지합니다. Viewer는 v3를
 우선 사용하고 404에서만 v2로 fallback합니다.
+
+v0.6 API와 SignalR에는 애플리케이션 인증이 없습니다. Agent는 `0.0.0.0:18443`에서
+수신하고 Windows 방화벽이 설치 때 지정한 1~32개의 고정 Viewer IPv4만 허용합니다.
 
 ## Viewer 동기화
 

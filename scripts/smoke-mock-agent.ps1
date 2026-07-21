@@ -40,24 +40,17 @@ try {
     }
     if (-not $ready) { throw '모의 Agent가 제한 시간 안에 시작되지 않았습니다.' }
 
-    $pairing = Invoke-RestMethod -Uri "$baseUri/api/v1/pairing/bootstrap" -Method Post `
-        -ContentType 'application/json' -Body '{}'
-    $exchangeBody = @{ code = $pairing.code } | ConvertTo-Json -Compress
-    $exchange = Invoke-RestMethod -Uri "$baseUri/api/v1/pairing/exchange" -Method Post `
-        -ContentType 'application/json' -Body $exchangeBody
-    $headers = @{ Authorization = ('Bearer {0}' -f $exchange.token) }
-
-    $status = Invoke-RestMethod -Uri "$baseUri/api/v1/status" -Headers $headers
-    $devices = @(Invoke-RestMethod -Uri "$baseUri/api/v1/devices" -Headers $headers)
+    $status = Invoke-RestMethod -Uri "$baseUri/api/v1/status"
+    $devices = @(Invoke-RestMethod -Uri "$baseUri/api/v1/devices")
     $command = Invoke-RestMethod -Uri "$baseUri/api/v1/commands/TEST-SW-01/interface_status" `
-        -Method Post -Headers $headers -ContentType 'application/json' -Body '{}'
+        -Method Post -ContentType 'application/json' -Body '{}'
     $null = Invoke-RestMethod -Uri "$baseUri/api/dev/simulate/TEST-SW-01/down" `
-        -Method Post -Headers $headers -ContentType 'application/json' -Body '{}'
-    $events = @(Invoke-RestMethod -Uri "$baseUri/api/v1/events?after=0" -Headers $headers)
+        -Method Post -ContentType 'application/json' -Body '{}'
+    $events = @(Invoke-RestMethod -Uri "$baseUri/api/v1/events?after=0")
     $event = $events | Select-Object -Last 1
     if (-not $event) { throw '모의 이벤트가 생성되지 않았습니다.' }
     $acknowledged = Invoke-RestMethod -Uri ("$baseUri/api/v1/events/{0}/ack" -f $event.id) `
-        -Method Post -Headers $headers -ContentType 'application/json' -Body '{}'
+        -Method Post -ContentType 'application/json' -Body '{}'
 
     $apiJson = @($status, $devices, $command, $events, $acknowledged) | ConvertTo-Json -Depth 20
     if ($apiJson -match 'rawOutput') { throw 'API 응답에서 금지된 원문 필드가 발견되었습니다.' }
@@ -81,5 +74,4 @@ finally {
     $env:Agent__ListenUrl = $oldListen
     $env:Agent__DataDirectory = $oldData
     $env:Agent__EnablePolling = $oldPolling
-    Remove-Variable exchange, headers -ErrorAction SilentlyContinue
 }

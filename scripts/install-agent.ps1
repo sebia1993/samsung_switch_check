@@ -11,23 +11,20 @@
     [string]$CredentialId = 'samsung-switch-readonly',
     [string]$UplinkPort = '24',
     [string]$SwitchesJsonPath,
-    [ValidateRange(1, 65535)][int]$HttpsPort = 18443,
-    [string]$ViewerRemoteAddress,
+    [ValidateRange(1, 65535)][int]$HttpPort = 18443,
+    [ValidateCount(1, 32)][string[]]$ViewerRemoteAddress,
     [switch]$MockMode,
-    [switch]$SkipFirewall,
     [switch]$DoNotStart,
     [switch]$Preflight,
     [switch]$Repair,
-    [switch]$ReuseData,
-    [switch]$RotateCertificate,
-    [string]$RotationCertificateThumbprint,
-    [ValidateRange(1, 14)][int]$CertificateOverlapDays = 7
+    [switch]$ReuseData
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $serviceName = Get-SswAgentServiceName
-$firewallRuleName = 'Samsung Switch Watch Agent HTTPS'
+$firewallRuleName = 'Samsung Switch Watch Agent HTTP'
+$legacyFirewallRuleName = 'Samsung Switch Watch Agent HTTPS'
 $source = [IO.Path]::GetFullPath($SourceDirectory)
 $install = [IO.Path]::GetFullPath($InstallDirectory)
 $data = [IO.Path]::GetFullPath($DataDirectory)
@@ -35,20 +32,14 @@ $sourceExe = Join-Path $source 'SamsungSwitchWatch.Agent.exe'
 $sourceManifestPath = Join-Path $source 'BUILD-MANIFEST.json'
 $serviceExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
 $productionConfig = Join-Path $install 'appsettings.Production.json'
-$certificatePath = Join-Path $install 'certs\agent.pfx'
+$receiptPath = Join-Path $data 'install-receipt.json'
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $existingFirewallRule = Get-SswAgentFirewallSnapshot -DisplayName $firewallRuleName
-$receiptPath = Join-Path $data 'install-receipt.json'
-$existingCertificatePassword = $null
-$existingStoreThumbprint = $null
-$existingCertificateFingerprint = $null
-$newStoreCertificate = $null
-$newStoreCertificateCreated = $false
-$existingCertificateOwnedByInstaller = $false
-$activeCertificateFingerprint = $null
-$activeStoreThumbprint = $null
-$activeCertificateOwnedByInstaller = $false
-$grantActiveCertificateKey = $false
+$legacyFirewallRule = Get-SswAgentFirewallSnapshot -DisplayName $legacyFirewallRuleName
+$existingReceipt = $null
+$existingReceiptVersion = 0
+$installedEnvironment = @()
+$legacyOwnedCertificateThumbprints = @()
 
 function ConvertTo-SswValidatedSwitch {
     param([Parameter(Mandatory = $true)][object]$InputSwitch)
@@ -83,23 +74,62 @@ function ConvertTo-SswValidatedSwitch {
     if ([string]::IsNullOrWhiteSpace($uplink) -or $uplink.Length -gt 32 -or $uplink -notmatch '^[A-Za-z0-9._/-]+$') {
         throw "각 UplinkPort는 32자 이하의 안전한 포트 식별자여야 합니다: $id"
     }
-    return [ordered]@{ Id = $id; DisplayName = $displayName; Model = $model; Host = $hostAddress; Port = $portValue; CredentialId = $credential; UplinkPort = $uplink }
+    return [ordered]@{ Id = $id; DisplayName = $displayName; Model = $model; Host = $parsedAddress.ToString(); Port = $portValue; CredentialId = $credential; UplinkPort = $uplink }
 }
 
-function Get-SswSwitchInventoryHash {
-    param([Parameter(Mandatory = $true)][object[]]$Switches)
-    $canonical = $Switches | ConvertTo-Json -Depth 6 -Compress
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical)))).Replace('-', '') }
-    finally { $sha.Dispose() }
+function Get-SswLegacyHttpPort {
+    param([Parameter(Mandatory = $true)][object]$Config)
+    $https = $Config.Agent.PSObject.Properties['Https']
+    if ($https -and $https.Value) { return [int]$https.Value.Port }
+    $listen = [string]$Config.Agent.ListenUrl
+    $uri = $null
+    if ([Uri]::TryCreate($listen, [UriKind]::Absolute, [ref]$uri)) { return $uri.Port }
+    return 18443
+}
+
+function New-SswProductionConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Switches,
+        [AllowNull()][object]$ExistingConfig
+    )
+
+    if ($ExistingConfig) {
+        $migrated = $ExistingConfig | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        foreach ($removedProperty in @('Https', 'PairingCodeLifetimeMinutes', 'TokenPepper', 'Tokens')) {
+            $migrated.Agent.PSObject.Properties.Remove($removedProperty)
+        }
+        $migrated.Agent | Add-Member -NotePropertyName AgentId -NotePropertyValue $AgentId -Force
+        $migrated.Agent | Add-Member -NotePropertyName ListenUrl -NotePropertyValue "http://0.0.0.0:$HttpPort" -Force
+        $migrated.Agent | Add-Member -NotePropertyName DataDirectory -NotePropertyValue $data -Force
+        $migrated.Agent | Add-Member -NotePropertyName MockMode -NotePropertyValue ([bool]$MockMode) -Force
+        $migrated.Agent | Add-Member -NotePropertyName EnableSimulator -NotePropertyValue ([bool]$MockMode) -Force
+        $migrated.Agent | Add-Member -NotePropertyName Switches -NotePropertyValue $Switches -Force
+        return $migrated
+    }
+    return [ordered]@{
+        Agent = [ordered]@{
+            AgentId = $AgentId
+            ListenUrl = "http://0.0.0.0:$HttpPort"
+            DataDirectory = $data
+            MockMode = [bool]$MockMode
+            EnablePolling = $true
+            EnableSimulator = [bool]$MockMode
+            SchedulerTickSeconds = 1
+            Retention = [ordered]@{ RawDays = 7; RawMaxMegabytes = 500; EventDays = 90; AuditDays = 180 }
+            Switches = $Switches
+        }
+        Logging = [ordered]@{ LogLevel = [ordered]@{ Default = 'Information'; 'Microsoft.AspNetCore' = 'Warning' } }
+        AllowedHosts = '*'
+    }
 }
 
 Write-SswStep '설치 전 검사'
 if ($env:OS -ne 'Windows_NT') { throw 'Agent는 Windows x64에서만 설치할 수 있습니다.' }
-if (-not (Test-SswAdministrator)) { throw '관리자 권한 PowerShell에서 실행해야 합니다.' }
+Assert-SswAdministrator
 if ([string]::IsNullOrWhiteSpace($AgentId) -or $AgentId.Length -gt 64 -or $AgentId -notmatch '^[A-Za-z0-9_-]+$') {
     throw 'AgentId는 64자 이하의 영문자, 숫자, 하이픈, 밑줄만 사용할 수 있습니다.'
 }
+$viewerRemoteAddresses = @()
 $singleSwitchParameters = @('SwitchId', 'SwitchDisplayName', 'SwitchHost', 'SwitchPort', 'SwitchModel', 'CredentialId', 'UplinkPort')
 if (-not [string]::IsNullOrWhiteSpace($SwitchesJsonPath) -and @($singleSwitchParameters | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0) {
     throw '-SwitchesJsonPath는 단일 스위치 파라미터와 함께 사용할 수 없습니다.'
@@ -111,9 +141,7 @@ if (-not [string]::IsNullOrWhiteSpace($SwitchesJsonPath)) {
     if (-not (Test-Path -LiteralPath $switchListPath -PathType Leaf)) { throw "스위치 목록 JSON을 찾지 못했습니다: $switchListPath" }
     if ((Get-Item -LiteralPath $switchListPath).Length -gt 1MB) { throw '스위치 목록 JSON은 1MB를 초과할 수 없습니다.' }
     $switchJson = Get-Content -LiteralPath $switchListPath -Raw -Encoding UTF8
-    if (-not $switchJson.TrimStart().StartsWith('[') -or -not $switchJson.TrimEnd().EndsWith(']')) {
-        throw '스위치 목록 JSON의 최상위 값은 배열이어야 합니다.'
-    }
+    if (-not $switchJson.TrimStart().StartsWith('[') -or -not $switchJson.TrimEnd().EndsWith(']')) { throw '스위치 목록 JSON의 최상위 값은 배열이어야 합니다.' }
     try { $switchInput = @($switchJson | ConvertFrom-Json) }
     catch { throw "스위치 목록 JSON을 읽지 못했습니다: $($_.Exception.Message)" }
     if ($switchInput.Count -lt 1 -or $switchInput.Count -gt 256) { throw '스위치 목록은 1~256대여야 합니다.' }
@@ -123,161 +151,108 @@ else {
     $singleSwitch = [pscustomobject]@{ Id = $SwitchId; DisplayName = $SwitchDisplayName; Model = $SwitchModel; Host = $SwitchHost; Port = $SwitchPort; CredentialId = $CredentialId; UplinkPort = $UplinkPort }
     $switchConfigurations = @((ConvertTo-SswValidatedSwitch -InputSwitch $singleSwitch))
 }
+
 $duplicateSwitchId = $switchConfigurations | Group-Object { ([string]$_.Id).ToUpperInvariant() } | Where-Object Count -gt 1 | Select-Object -First 1
 if ($duplicateSwitchId) { throw "중복 Switch Id가 있습니다: $($duplicateSwitchId.Name)" }
 $switchInventoryHash = Get-SswSwitchInventoryHash -Switches $switchConfigurations
 $SwitchId = [string]$switchConfigurations[0].Id
 $CredentialId = [string]$switchConfigurations[0].CredentialId
-if (-not $SkipFirewall -and -not [string]::IsNullOrWhiteSpace($ViewerRemoteAddress)) {
-    $viewerAddress = $null
-    if (-not [Net.IPAddress]::TryParse($ViewerRemoteAddress, [ref]$viewerAddress) -or
-        $viewerAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-        throw 'ViewerRemoteAddress는 방화벽에서 허용할 단일 IPv4 주소여야 합니다.'
-    }
-}
+
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "Agent 배포 파일을 찾지 못했습니다: $sourceExe" }
 if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) { throw "패키지 빌드 매니페스트를 찾지 못했습니다: $sourceManifestPath" }
 try { $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json }
 catch { throw "패키지 빌드 매니페스트를 읽지 못했습니다: $($_.Exception.Message)" }
-if ($sourceManifest.packageKind -ne 'Agent' -or $sourceManifest.executable.name -ne 'SamsungSwitchWatch.Agent.exe') {
-    throw 'Agent 패키지 매니페스트 형식이 올바르지 않습니다.'
-}
+if ($sourceManifest.packageKind -ne 'Agent' -or $sourceManifest.executable.name -ne 'SamsungSwitchWatch.Agent.exe') { throw 'Agent 패키지 매니페스트 형식이 올바르지 않습니다.' }
 $sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($sourceExeHash -ne ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) {
-    throw 'Agent 실행 파일이 빌드 매니페스트의 SHA-256과 일치하지 않습니다.'
-}
+if ($sourceExeHash -ne ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) { throw 'Agent 실행 파일이 빌드 매니페스트의 SHA-256과 일치하지 않습니다.' }
 if ($source.TrimEnd('\') -eq $install.TrimEnd('\')) { throw '배포 ZIP을 설치 대상 폴더 밖에서 실행하세요.' }
 Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
 Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+
 if ($Repair -and -not $existingService) { throw "복구할 서비스가 없습니다: $serviceName" }
-if ($RotateCertificate -and -not $Repair) { throw '-RotateCertificate는 기존 Agent의 -Repair 설치에서만 사용할 수 있습니다.' }
-if ($RotateCertificate -and ([string]$RotationCertificateThumbprint).Replace(' ', '') -notmatch '^[0-9A-Fa-f]{40}$') {
-    throw '-RotateCertificate에는 new-agent-certificate.ps1로 미리 준비한 -RotationCertificateThumbprint가 필요합니다.'
-}
-if (-not $RotateCertificate -and -not [string]::IsNullOrWhiteSpace($RotationCertificateThumbprint)) {
-    throw '-RotationCertificateThumbprint는 -RotateCertificate와 함께 사용해야 합니다.'
-}
 if (-not $Repair -and $existingService) { throw "서비스가 이미 설치되어 있습니다. 복구 설치에는 -Repair를 사용하세요: $serviceName" }
-if (-not $Repair -and (Test-Path -LiteralPath $install)) {
-    throw "설치 폴더가 이미 있습니다. 흔적을 확인하거나 제거 후 다시 시도하세요: $install"
-}
-$existingDataEntries = if (Test-Path -LiteralPath $data -PathType Container) {
-    @(Get-ChildItem -LiteralPath $data -Force)
-} else { @() }
+if (-not $Repair -and (Test-Path -LiteralPath $install)) { throw "설치 폴더가 이미 있습니다. 흔적을 확인하거나 제거 후 다시 시도하세요: $install" }
+if ($existingFirewallRule -and -not (Test-SswOwnedAgentFirewallRule -Snapshot $existingFirewallRule)) { throw '동일한 HTTP 방화벽 규칙에 제품 소유권 표식이 없어 자동 변경하지 않습니다.' }
+if ($legacyFirewallRule -and -not (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $legacyFirewallRule)) { throw '동일한 기존 HTTPS 방화벽 규칙에 제품 소유권 표식이 없어 자동 변경하지 않습니다.' }
+if (-not $Repair -and ($existingFirewallRule -or $legacyFirewallRule)) { throw '동일한 제품 방화벽 규칙이 이미 있습니다. 기존 설치 흔적을 확인하세요.' }
+
+$existingDataEntries = if (Test-Path -LiteralPath $data -PathType Container) { @(Get-ChildItem -LiteralPath $data -Force) } else { @() }
 if (-not $Repair -and $existingDataEntries.Count -gt 0) {
-    if (-not $ReuseData) {
-        throw "비어 있지 않은 기존 데이터 폴더는 명시적인 -ReuseData와 유효한 설치 영수증이 필요합니다: $data"
-    }
-    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
-        throw '기존 데이터의 install-receipt.json이 없어 안전하게 재사용할 수 없습니다.'
-    }
+    if (-not $ReuseData) { throw "비어 있지 않은 기존 데이터 폴더는 명시적인 -ReuseData와 유효한 설치 영수증이 필요합니다: $data" }
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw '기존 데이터의 install-receipt.json이 없어 안전하게 재사용할 수 없습니다.' }
     try { $existingReceipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "기존 데이터 설치 영수증을 읽지 못했습니다: $($_.Exception.Message)" }
-    $receiptInventoryProperty = $existingReceipt.PSObject.Properties['switchInventoryHash']
-    $receiptInventoryMatches = if ($receiptInventoryProperty -and -not [string]::IsNullOrWhiteSpace([string]$receiptInventoryProperty.Value)) {
-        [string]$receiptInventoryProperty.Value -eq $switchInventoryHash
-    }
-    else {
-        $switchConfigurations.Count -eq 1 -and $existingReceipt.switchId -eq $SwitchId -and $existingReceipt.credentialId -eq $CredentialId
-    }
-    if ($existingReceipt.product -ne 'SamsungSwitchWatchAgent' -or $existingReceipt.receiptVersion -ne 1 -or
-        $existingReceipt.agentId -ne $AgentId -or -not $receiptInventoryMatches) {
-        throw '기존 데이터 설치 영수증이 요청한 Agent/스위치 인벤토리와 일치하지 않습니다.'
-    }
+    $existingReceiptVersion = Assert-SswAgentInstallReceipt -Receipt $existingReceipt -AgentId $AgentId `
+        -SwitchInventoryHash $switchInventoryHash -SwitchCount $switchConfigurations.Count
 }
-elseif (-not $Repair -and $ReuseData -and $existingDataEntries.Count -eq 0) {
-    Write-Host '기존 데이터가 비어 있어 -ReuseData 확인은 필요하지 않습니다.'
-}
-if (-not $MockMode -and -not $Repair -and @($switchConfigurations | Where-Object { $_.Host -eq '192.0.2.10' }).Count -gt 0) {
-    throw '실환경 설치에는 -SwitchHost로 실제 관리 주소를 지정해야 합니다.'
-}
-if (-not $SkipFirewall -and -not $existingFirewallRule -and [string]::IsNullOrWhiteSpace($ViewerRemoteAddress)) {
-    throw '방화벽을 열 Viewer PC 주소를 -ViewerRemoteAddress로 지정하거나 -SkipFirewall을 사용하세요.'
-}
-if (-not $Repair -and $existingFirewallRule) {
-    throw "동일한 방화벽 규칙이 이미 있습니다. 기존 설치 흔적을 확인하세요: $firewallRuleName"
-}
+elseif (-not $Repair -and $ReuseData -and $existingDataEntries.Count -eq 0) { Write-Host '기존 데이터가 비어 있어 -ReuseData 확인은 필요하지 않습니다.' }
+
+$installedConfig = $null
 if ($Repair) {
     if (-not (Test-Path -LiteralPath $productionConfig -PathType Leaf)) { throw "설치 설정을 찾지 못했습니다: $productionConfig" }
     try { $installedConfig = Get-Content -LiteralPath $productionConfig -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "설치 설정을 읽지 못했습니다: $($_.Exception.Message)" }
-    $HttpsPort = [int]$installedConfig.Agent.Https.Port
+    $installedDataDirectory = [IO.Path]::GetFullPath([string]$installedConfig.Agent.DataDirectory)
+    Assert-SswProductPath -Path $installedDataDirectory -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+    if ($PSBoundParameters.ContainsKey('DataDirectory') -and
+        -not $data.Equals($installedDataDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '-Repair의 DataDirectory는 기존 설치 설정과 정확히 일치해야 합니다.'
+    }
+    $data = $installedDataDirectory
+    $receiptPath = Join-Path $data 'install-receipt.json'
+    if (-not $PSBoundParameters.ContainsKey('HttpPort')) { $HttpPort = Get-SswLegacyHttpPort -Config $installedConfig }
     $AgentId = [string]$installedConfig.Agent.AgentId
     $switchConfigurations = @(@($installedConfig.Agent.Switches) | ForEach-Object { ConvertTo-SswValidatedSwitch -InputSwitch $_ })
     $switchInventoryHash = Get-SswSwitchInventoryHash -Switches $switchConfigurations
-    $installedSwitch = $switchConfigurations[0]
-    if ($installedSwitch) {
-        $SwitchId = [string]$installedSwitch.Id
-        $CredentialId = [string]$installedSwitch.CredentialId
+    $SwitchId = [string]$switchConfigurations[0].Id
+    $CredentialId = [string]$switchConfigurations[0].CredentialId
+    $mockProperty = $installedConfig.Agent.PSObject.Properties['MockMode']
+    if (-not $PSBoundParameters.ContainsKey('MockMode') -and $mockProperty) { $MockMode = [bool]$mockProperty.Value }
+    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
+        throw "기존 설치 영수증을 찾지 못했습니다: $receiptPath"
     }
-    $serviceProperties = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" `
-        -Name Environment -ErrorAction SilentlyContinue
-    $installedEnvironment = if ($serviceProperties) { $serviceProperties.Environment } else { @() }
-    $storeThumbprintProperty = $installedConfig.Agent.Https.PSObject.Properties['CertificateStoreThumbprint']
-    $existingStoreThumbprint = if ($storeThumbprintProperty) { ([string]$storeThumbprintProperty.Value).Replace(' ', '').ToUpperInvariant() } else { '' }
-    if (-not [string]::IsNullOrWhiteSpace($existingStoreThumbprint)) {
-        $store = [Security.Cryptography.X509Certificates.X509Store]::new(
-            [Security.Cryptography.X509Certificates.StoreName]::My,
-            [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-        try {
-            $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-            $matches = $store.Certificates.Find([Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-                $existingStoreThumbprint, $false)
-            if ($matches.Count -ne 1 -or -not $matches[0].HasPrivateKey) { throw '기존 LocalMachine 인증서를 찾지 못했거나 개인 키가 없습니다.' }
-            $existingCertificateOwnedByInstaller = $matches[0].FriendlyName -like 'Samsung Switch Watch Agent *'
-            $sha256 = [Security.Cryptography.SHA256]::Create()
-            try { $existingCertificateFingerprint = ([BitConverter]::ToString($sha256.ComputeHash($matches[0].RawData))).Replace('-', '') }
-            finally { $sha256.Dispose() }
+    try { $existingReceipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "기존 설치 영수증을 읽지 못했습니다: $($_.Exception.Message)" }
+    $existingReceiptVersion = Assert-SswAgentInstallReceipt -Receipt $existingReceipt -AgentId $AgentId `
+        -SwitchInventoryHash $switchInventoryHash -SwitchCount $switchConfigurations.Count
+    if (-not $PSBoundParameters.ContainsKey('ViewerRemoteAddress')) {
+        $receiptAddresses = if ($existingReceiptVersion -eq 2 -and $existingReceipt.PSObject.Properties['viewerRemoteAddresses']) {
+            @($existingReceipt.viewerRemoteAddresses)
         }
-        finally { $store.Dispose() }
+        else { @() }
+        if ($receiptAddresses.Count -gt 0) { $ViewerRemoteAddress = $receiptAddresses }
+        elseif ($existingFirewallRule) { $ViewerRemoteAddress = @($existingFirewallRule.RemoteAddress) }
+        elseif ($legacyFirewallRule) { $ViewerRemoteAddress = @($legacyFirewallRule.RemoteAddress) }
     }
-    else {
-        if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf)) { throw "기존 PFX 인증서를 찾지 못했습니다: $certificatePath" }
-        $certificateEnvironmentLine = $installedEnvironment | Where-Object { $_ -like 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD=*' } | Select-Object -First 1
-        if (-not $certificateEnvironmentLine) {
-            throw '기존 PFX 인증서 암호 환경 변수가 없습니다. 자동 복구 설치를 중단합니다.'
-        }
-        $existingCertificatePassword = ([string]$certificateEnvironmentLine).Substring('SAMSUNG_SWITCH_WATCH_CERT_PASSWORD='.Length)
-        $legacyCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2 `
-            -ArgumentList $certificatePath, $existingCertificatePassword
-        try {
-            $sha256 = [Security.Cryptography.SHA256]::Create()
-            try { $existingCertificateFingerprint = ([BitConverter]::ToString($sha256.ComputeHash($legacyCertificate.RawData))).Replace('-', '') }
-            finally { $sha256.Dispose() }
-        }
-        finally { $legacyCertificate.Dispose() }
-    }
-    if (-not $SkipFirewall -and $existingFirewallRule) {
-        $legacyOwned = $existingFirewallRule.Name -ne 'SamsungSwitchWatchAgent-Https' -and
-            [string]::IsNullOrWhiteSpace([string]$existingFirewallRule.Group) -and
-            [string]::IsNullOrWhiteSpace([string]$existingFirewallRule.Description)
-        if (-not (Test-SswOwnedAgentFirewallRule -Snapshot $existingFirewallRule) -and -not $legacyOwned) {
-            throw '동일 표시 이름의 방화벽 규칙에 제품 소유권 표식이 없어 자동 변경하지 않습니다.'
-        }
-        if ([string]::IsNullOrWhiteSpace($ViewerRemoteAddress) -and $existingFirewallRule.RemoteAddress.Count -eq 1) {
-            $ViewerRemoteAddress = [string]$existingFirewallRule.RemoteAddress[0]
-        }
-        if ([string]::IsNullOrWhiteSpace($ViewerRemoteAddress)) {
-            throw '방화벽 규칙 복구에는 허용할 단일 Viewer IPv4 주소가 필요합니다.'
-        }
+    $serviceProperties = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name Environment -ErrorAction SilentlyContinue
+    $installedEnvironment = if ($serviceProperties) { @($serviceProperties.Environment) } else { @() }
+
+    if ($existingReceiptVersion -eq 1) {
+        $legacyOwnedCertificateThumbprints = @(Get-SswLegacyOwnedAgentCertificateThumbprints `
+            -Receipt $existingReceipt -Configuration $installedConfig)
     }
 }
-elseif (-not (Test-SswTcpPortAvailable -Port $HttpsPort)) {
-    throw "Agent HTTPS 포트를 이미 다른 프로세스가 사용하고 있습니다: $HttpsPort"
+elseif (-not (Test-SswTcpPortAvailable -Port $HttpPort)) { throw "Agent HTTP 포트를 이미 다른 프로세스가 사용하고 있습니다: $HttpPort" }
+
+if ($null -eq $ViewerRemoteAddress -or @($ViewerRemoteAddress).Count -eq 0) {
+    throw '방화벽에서 허용할 Viewer PC 고정 IPv4 주소를 -ViewerRemoteAddress로 1~32개 지정해야 합니다.'
 }
-if (-not $SkipFirewall) {
-    $validatedViewerAddress = $null
-    if (-not [Net.IPAddress]::TryParse($ViewerRemoteAddress, [ref]$validatedViewerAddress) -or
-        $validatedViewerAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-        throw '방화벽 규칙에는 단일 Viewer IPv4 주소가 필요합니다.'
-    }
+$viewerRemoteAddresses = @(ConvertTo-SswViewerRemoteAddresses -Address $ViewerRemoteAddress)
+if ($existingFirewallRule -and $legacyFirewallRule) {
+    throw 'HTTP와 기존 HTTPS 제품 방화벽 규칙이 동시에 존재합니다. 중복 규칙을 먼저 점검하세요.'
+}
+Assert-SswAgentFirewallGateReady -Port $HttpPort -AgentExecutablePath $serviceExe
+
+if (-not $MockMode -and -not $Repair -and @($switchConfigurations | Where-Object { $_.Host -eq '192.0.2.10' }).Count -gt 0) {
+    throw '실환경 설치에는 -SwitchHost로 실제 관리 주소를 지정해야 합니다.'
 }
 
 Write-Host "  source  : $source"
 Write-Host "  install : $install"
 Write-Host "  data    : $data"
 Write-Host "  service : $serviceName (고정)"
-Write-Host "  HTTPS   : TCP/$HttpsPort"
+Write-Host "  HTTP    : TCP/$HttpPort (암호화·인증 없음)"
+Write-Host "  Viewer  : $($viewerRemoteAddresses -join ', ')"
 if ($Preflight) {
     Write-SswStep '사전 검사를 통과했습니다. 시스템은 변경되지 않았습니다.'
     return
@@ -291,11 +266,11 @@ $operationRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
 $journalPath = Join-Path $operationRoot 'agent-install.json'
 $transactionDataBackup = Join-Path $operationRoot "transactions\$transactionId"
 $serviceCreated = $false
+$serviceEnvironmentChanged = $false
 $firewallChanged = $false
 $dataCreated = $false
 $installSwapped = $false
 $previousServiceWasRunning = $existingService -and $existingService.Status -eq 'Running'
-$pfxPasswordText = $existingCertificatePassword
 $dataAclSnapshot = @()
 $dataAclChanged = $false
 $databaseSnapshotTaken = $false
@@ -306,121 +281,30 @@ $receiptExistedBefore = Test-Path -LiteralPath $receiptPath -PathType Leaf
 $receiptBackupPath = Join-Path $transactionDataBackup 'install-receipt.json'
 $receiptTemporary = "$receiptPath.$transactionId.tmp"
 $receiptReplaceBackup = "$receiptPath.$transactionId.replace.bak"
+$transactionCommitted = $false
 
 Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
     -Stage 'prepared' -Status 'running' -Version ([string]$sourceManifest.version)
-
-function New-RandomBase64([int]$ByteCount) {
-    $bytes = New-Object byte[] $ByteCount
-    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $rng.GetBytes($bytes)
-        return [Convert]::ToBase64String($bytes)
-    }
-    finally {
-        $rng.Dispose()
-        [Array]::Clear($bytes, 0, $bytes.Length)
-    }
-}
 
 try {
     Write-SswStep '검증된 임시 폴더에 배포 파일 준비'
     New-Item -ItemType Directory -Path $installParent, $staging -Force | Out-Null
     Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('data', 'certs') } |
         Copy-Item -Destination $staging -Recurse -Force
-    if (-not (Test-Path -LiteralPath (Join-Path $staging 'SamsungSwitchWatch.Agent.exe') -PathType Leaf)) {
-        throw '임시 폴더의 Agent 실행 파일 검증에 실패했습니다.'
-    }
-
-    if ($Repair) {
-        $stagingConfigPath = Join-Path $staging 'appsettings.Production.json'
-        Copy-Item -LiteralPath $productionConfig -Destination $stagingConfigPath -Force
-        if (Test-Path -LiteralPath (Join-Path $install 'certs') -PathType Container) {
-            Copy-Item -LiteralPath (Join-Path $install 'certs') -Destination $staging -Recurse -Force
-        }
-        $activeCertificateFingerprint = $existingCertificateFingerprint
-        $activeStoreThumbprint = $existingStoreThumbprint
-        $activeCertificateOwnedByInstaller = $existingCertificateOwnedByInstaller
-        if ($RotateCertificate) {
-            $rotationThumbprint = $RotationCertificateThumbprint.Replace(' ', '').ToUpperInvariant()
-            $rotationStore = [Security.Cryptography.X509Certificates.X509Store]::new(
-                [Security.Cryptography.X509Certificates.StoreName]::My,
-                [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
-            try {
-                $rotationStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-                $rotationMatches = $rotationStore.Certificates.Find(
-                    [Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $rotationThumbprint, $false)
-                if ($rotationMatches.Count -ne 1 -or -not $rotationMatches[0].HasPrivateKey -or $rotationMatches[0].NotAfter -le (Get-Date)) {
-                    throw '미리 준비한 회전 인증서를 찾지 못했거나 개인 키/유효기간이 올바르지 않습니다.'
-                }
-                $newStoreCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($rotationMatches[0])
-            }
-            finally { $rotationStore.Dispose() }
-            $grantActiveCertificateKey = $true
-            $activeStoreThumbprint = $newStoreCertificate.Thumbprint
-            $activeCertificateOwnedByInstaller = $newStoreCertificate.FriendlyName -like 'Samsung Switch Watch Agent *'
-            $sha256 = [Security.Cryptography.SHA256]::Create()
-            try { $activeCertificateFingerprint = ([BitConverter]::ToString($sha256.ComputeHash($newStoreCertificate.RawData))).Replace('-', '') }
-            finally { $sha256.Dispose() }
-            $rotatedConfig = Get-Content -LiteralPath $stagingConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $rotatedConfig.Agent.Https | Add-Member -NotePropertyName CertificateStoreThumbprint -NotePropertyValue $activeStoreThumbprint -Force
-            $rotatedConfig.Agent.Https | Add-Member -NotePropertyName PreviousCertificateSha256Fingerprint -NotePropertyValue $existingCertificateFingerprint -Force
-            $rotatedConfig.Agent.Https | Add-Member -NotePropertyName PreviousCertificateAcceptUntilUtc `
-                -NotePropertyValue ([DateTimeOffset]::UtcNow.AddDays($CertificateOverlapDays).ToString('O')) -Force
-            [IO.File]::WriteAllText($stagingConfigPath, ($rotatedConfig | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
-        }
-    }
-    else {
-        $newStoreCertificate = New-AgentStoreCertificate
-        $newStoreCertificateCreated = $true
-        $grantActiveCertificateKey = $true
-        $activeStoreThumbprint = $newStoreCertificate.Thumbprint
-        $activeCertificateOwnedByInstaller = $true
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        try { $activeCertificateFingerprint = ([BitConverter]::ToString($sha256.ComputeHash($newStoreCertificate.RawData))).Replace('-', '') }
-        finally { $sha256.Dispose() }
-        $tokenPepper = New-RandomBase64 48
-        $configuration = [ordered]@{
-            Agent = [ordered]@{
-                AgentId = $AgentId
-                ListenUrl = "http://127.0.0.1:$HttpsPort"
-                DataDirectory = $data
-                MockMode = [bool]$MockMode
-                EnablePolling = $true
-                EnableSimulator = [bool]$MockMode
-                SchedulerTickSeconds = 1
-                PairingCodeLifetimeMinutes = 10
-                TokenPepper = $tokenPepper
-                Retention = [ordered]@{ RawDays = 7; RawMaxMegabytes = 500; EventDays = 90; AuditDays = 180 }
-                Https = [ordered]@{
-                    Enabled = $true
-                    Port = $HttpsPort
-                    CertificatePath = (Join-Path $install 'certs\agent.pfx')
-                    CertificatePasswordEnvironmentVariable = 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD'
-                    CertificateStoreThumbprint = $activeStoreThumbprint
-                    PreviousCertificateSha256Fingerprint = $null
-                    PreviousCertificateAcceptUntilUtc = $null
-                }
-                Switches = $switchConfigurations
-            }
-            Logging = [ordered]@{ LogLevel = [ordered]@{ Default = 'Information'; 'Microsoft.AspNetCore' = 'Warning' } }
-            AllowedHosts = '*'
-        }
-        [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
-            ($configuration | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
-    }
+    if (-not (Test-Path -LiteralPath (Join-Path $staging 'SamsungSwitchWatch.Agent.exe') -PathType Leaf)) { throw '임시 폴더의 Agent 실행 파일 검증에 실패했습니다.' }
+    $configuration = New-SswProductionConfiguration -Switches $switchConfigurations -ExistingConfig $installedConfig
+    [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
+        ($configuration | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
 
     if (-not (Test-Path -LiteralPath $data)) {
         New-Item -ItemType Directory -Path $data -Force | Out-Null
         $dataCreated = $true
     }
-
     if ($Repair -and $previousServiceWasRunning) {
         Write-SswStep '기존 Agent 서비스 정지'
         Stop-Service -Name $serviceName -Force
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
     }
-
     if ($Repair -or $ReuseData) {
         Write-SswStep '데이터베이스 트랜잭션 파일 및 설치 영수증 백업'
         New-Item -ItemType Directory -Path $transactionDataBackup -Force | Out-Null
@@ -428,28 +312,20 @@ try {
         foreach ($databaseFile in $databaseFiles) {
             $databasePath = Join-Path $data $databaseFile
             $databaseExistence[$databaseFile] = Test-Path -LiteralPath $databasePath -PathType Leaf
-            if ($databaseExistence[$databaseFile]) {
-                Copy-Item -LiteralPath $databasePath -Destination (Join-Path $transactionDataBackup $databaseFile) -Force
-            }
+            if ($databaseExistence[$databaseFile]) { Copy-Item -LiteralPath $databasePath -Destination (Join-Path $transactionDataBackup $databaseFile) -Force }
         }
-        $schemaBackupsBefore = @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.FullName })
+        $schemaBackupsBefore = @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
         if ($receiptExistedBefore) { Copy-Item -LiteralPath $receiptPath -Destination $receiptBackupPath -Force }
         $databaseSnapshotTaken = $true
         Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
             -Stage 'data-backed-up' -Status 'running' -Version ([string]$sourceManifest.version)
     }
-
-    if (-not $dataCreated) {
-        $dataAclSnapshot = @(Get-SswDirectoryAclSnapshot -Path $data)
-    }
+    if (-not $dataCreated) { $dataAclSnapshot = @(Get-SswDirectoryAclSnapshot -Path $data) }
 
     Write-SswStep 'Agent 프로그램 폴더 원자적 교체'
     if (Test-Path -LiteralPath $install) { Move-Item -LiteralPath $install -Destination $backup }
     Move-Item -LiteralPath $staging -Destination $install
     $installSwapped = $true
-    Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
-        -Stage 'program-swapped' -Status 'running' -Version ([string]$sourceManifest.version)
 
     if (-not $Repair) {
         Write-SswStep 'Windows 서비스 등록'
@@ -462,17 +338,20 @@ try {
         & sc.exe config $serviceName "binPath= `"$serviceExe`"" 'start= auto' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 실행 경로 갱신에 실패했습니다.' }
     }
-    & sc.exe description $serviceName 'Samsung IES4224GP read-only monitoring Agent' | Out-Null
+    & sc.exe description $serviceName 'Samsung iES read-only monitoring Agent' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 설명 설정에 실패했습니다.' }
     & sc.exe failure $serviceName 'reset= 86400' 'actions= restart/5000/restart/15000/restart/60000' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 복구 정책 설정에 실패했습니다.' }
     & sc.exe sidtype $serviceName unrestricted | Out-Null
     if ($LASTEXITCODE -ne 0) { throw '서비스 SID 활성화에 실패했습니다.' }
 
+    $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+    $nextEnvironment = @($installedEnvironment | Where-Object {
+        $_ -notlike 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD=*' -and $_ -notlike 'DOTNET_ENVIRONMENT=*'
+    }) + @('DOTNET_ENVIRONMENT=Production')
     if (-not $Repair) {
-        $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-        New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Force `
-            -Value @('DOTNET_ENVIRONMENT=Production') | Out-Null
+        New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Force -Value $nextEnvironment | Out-Null
+        $serviceEnvironmentChanged = $true
     }
 
     Write-SswStep '서비스 SID 기준 최소 폴더 권한 설정'
@@ -480,55 +359,65 @@ try {
     Set-SswRestrictedDirectoryAcl -Path $install -ServiceSid $serviceSid -ServiceRights ReadAndExecute
     $dataAclChanged = $true
     Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid -ServiceRights Modify
-    if ($grantActiveCertificateKey) {
-        Grant-SswCertificatePrivateKeyRead -Certificate $newStoreCertificate -ServiceSid $serviceSid
+
+    $firewallIsExact = $existingFirewallRule -and
+        (Test-SswAgentFirewallRuleExact -Snapshot $existingFirewallRule -Port $HttpPort -RemoteAddress $viewerRemoteAddresses)
+    if (-not $firewallIsExact) {
+        Write-SswStep '허용 Viewer IPv4만 받는 HTTP 방화벽 규칙 적용'
+        $firewallChanged = $true
+        if ($existingFirewallRule) { Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' }
+        New-SswAgentFirewallRule -Port $HttpPort -RemoteAddress $viewerRemoteAddresses
+    }
+    if ($legacyFirewallRule) {
+        $firewallChanged = $true
+        Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Https'
+    }
+    Assert-SswAgentFirewallGateReady -Port $HttpPort -AgentExecutablePath $serviceExe
+    $appliedFirewallRule = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
+    if (-not $appliedFirewallRule -or
+        -not (Test-SswAgentFirewallRuleExact -Snapshot $appliedFirewallRule -Port $HttpPort `
+            -RemoteAddress $viewerRemoteAddresses)) {
+        throw '적용된 Agent HTTP 방화벽 규칙이 설치 요청과 정확히 일치하지 않습니다.'
     }
 
-    if (-not $SkipFirewall) {
-        $firewallIsExact = $existingFirewallRule -and
-            (Test-SswAgentFirewallRuleExact -Snapshot $existingFirewallRule -Port $HttpsPort -RemoteAddress $ViewerRemoteAddress)
-        if (-not $firewallIsExact) {
-            Write-SswStep '제품 소유권과 정확한 범위를 가진 인바운드 방화벽 규칙 적용'
-            if ($existingFirewallRule) {
-                Get-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction Stop | Remove-NetFirewallRule
-            }
-            New-SswAgentFirewallRule -Port $HttpsPort -RemoteAddress $ViewerRemoteAddress
-            $firewallChanged = $true
-        }
-    }
-
-    $shouldStart = -not $DoNotStart -and ($MockMode -or ($Repair -and $previousServiceWasRunning))
+    # Repair는 이전 실행 상태와 -DoNotStart 여부와 관계없이 새 바이너리와 DB schema를 검증합니다.
+    $shouldStart = $Repair -or (-not $DoNotStart -and $MockMode)
     if ($shouldStart) {
-        Write-SswStep 'Agent 서비스 시작 및 readiness 확인'
+        Write-SswStep 'Agent 서비스 시작 및 HTTP readiness 확인'
         Start-Service -Name $serviceName
         $readinessTimeoutSeconds = if ($MockMode) { 45 } else { 210 }
-        $healthStatus = Invoke-SswLocalHealthProbe -Port $HttpsPort -TimeoutSeconds $readinessTimeoutSeconds
+        $healthStatus = Invoke-SswLocalHealthProbe -Port $HttpPort -TimeoutSeconds $readinessTimeoutSeconds
         Write-Host "  readiness: $healthStatus"
+        if ($Repair) {
+            Stop-Service -Name $serviceName -Force
+            (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+            Write-SswStep '검증 성공 후 구 인증서 서비스 secret 제거'
+            New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Force -Value $nextEnvironment | Out-Null
+            $serviceEnvironmentChanged = $true
+            if ($previousServiceWasRunning -and -not $DoNotStart) {
+                Start-Service -Name $serviceName
+                $healthStatus = Invoke-SswLocalHealthProbe -Port $HttpPort -TimeoutSeconds $readinessTimeoutSeconds
+                Write-Host "  readiness (clean environment): $healthStatus"
+            }
+            else { Write-Host '  service  : 검증 후 이전 중지 상태로 복원' }
+        }
     }
-    elseif (-not $Repair -and -not $MockMode) {
-        Write-Host '실환경 Agent는 자격 증명 저장 전까지 시작하지 않습니다.'
-    }
+    elseif (-not $Repair -and -not $MockMode) { Write-Host '실환경 Agent는 자격 증명 저장 전까지 시작하지 않습니다.' }
 
     $receipt = [ordered]@{
-        receiptVersion = 1
+        receiptVersion = 2
         product = 'SamsungSwitchWatchAgent'
         agentId = $AgentId
         switchId = $SwitchId
         credentialId = $CredentialId
         switchCount = $switchConfigurations.Count
         switchInventoryHash = $switchInventoryHash
-        httpsPort = $HttpsPort
-        certificateSha256 = $activeCertificateFingerprint
-        certificateStoreThumbprint = $activeStoreThumbprint
-        certificateOwnedByInstaller = $activeCertificateOwnedByInstaller
-        previousCertificateSha256 = if ($RotateCertificate) { $existingCertificateFingerprint } else { $null }
-        previousCertificateStoreThumbprint = if ($RotateCertificate) { $existingStoreThumbprint } else { $null }
-        previousCertificateOwnedByInstaller = if ($RotateCertificate) { $existingCertificateOwnedByInstaller } else { $false }
-        previousCertificateAcceptUntilUtc = if ($RotateCertificate) { [DateTimeOffset]::UtcNow.AddDays($CertificateOverlapDays).ToString('O') } else { $null }
+        httpPort = $HttpPort
+        viewerRemoteAddresses = $viewerRemoteAddresses
         installedVersion = [string]$sourceManifest.version
         sourceCommit = [string]$sourceManifest.sourceCommit
         updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
-    } | ConvertTo-Json -Depth 5
+    } | ConvertTo-Json -Depth 6
     [IO.File]::WriteAllText($receiptTemporary, $receipt, (New-Object Text.UTF8Encoding($false)))
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
         [IO.File]::Replace($receiptTemporary, $receiptPath, $receiptReplaceBackup, $true)
@@ -536,21 +425,41 @@ try {
     }
     else { Move-Item -LiteralPath $receiptTemporary -Destination $receiptPath }
 
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-    if (Test-Path -LiteralPath $transactionDataBackup) { Remove-Item -LiteralPath $transactionDataBackup -Recurse -Force }
     Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
         -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
+    $transactionCommitted = $true
+
+    # 인증서는 서비스, HTTP listener, DB migration, receipt가 모두 검증된 뒤 마지막으로 제거합니다.
+    foreach ($legacyOwnedCertificateThumbprint in $legacyOwnedCertificateThumbprints) {
+        $legacyCertificatePath = "Cert:\LocalMachine\My\$legacyOwnedCertificateThumbprint"
+        if (Test-Path -LiteralPath $legacyCertificatePath) {
+            try { Remove-Item -LiteralPath $legacyCertificatePath -Force -ErrorAction Stop }
+            catch {
+                # 비내보내기 개인 키는 rollback할 수 없으므로 commit 뒤 정리 실패가 설치 rollback을 유발하면 안 됩니다.
+                Write-Warning "설치는 완료됐지만 구 설치기 소유 인증서를 제거하지 못했습니다: $legacyOwnedCertificateThumbprint" `
+                    -WarningAction Continue
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $transactionDataBackup) { Remove-Item -LiteralPath $transactionDataBackup -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host ''
     Write-Host '설치가 완료되었습니다.' -ForegroundColor Green
+    Write-Warning 'Agent API는 암호화·인증이 없습니다. 위 고정 Viewer IPv4 방화벽 범위를 유지하십시오.' `
+        -WarningAction Continue
     if (-not $Repair) {
-        Write-Host "인증서 SHA-256 지문: $activeCertificateFingerprint"
         Write-Host "자격 증명 ID: $CredentialId"
         if (-not $MockMode) { Write-Host '다음 단계: 관리자 PowerShell에서 set-switch-credential.ps1을 실행하세요.' }
     }
 }
 catch {
     $failure = $_
-    Write-Warning '설치 실패를 감지해 변경 사항을 복구합니다.'
+    if ($transactionCommitted) {
+        Write-Warning "설치는 이미 commit됐으며 post-commit 정리 중 오류가 발생했습니다. 자동 rollback하지 않습니다: $($failure.Exception.Message)" `
+            -WarningAction Continue
+        return
+    }
+    Write-Warning '설치 실패를 감지해 변경 사항을 복구합니다.' -WarningAction Continue
     $rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'stop-new-service'; Action = {
             $currentService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -566,10 +475,10 @@ catch {
                 Wait-SswServiceDeleted -Name $serviceName -TimeoutSeconds 20
             }
         } },
-        [pscustomobject]@{ Name = 'remove-new-certificate'; Action = {
-            if ($newStoreCertificateCreated -and $newStoreCertificate) {
-                $newCertificatePath = "Cert:\LocalMachine\My\$($newStoreCertificate.Thumbprint)"
-                if (Test-Path -LiteralPath $newCertificatePath) { Remove-Item -LiteralPath $newCertificatePath -Force }
+        [pscustomobject]@{ Name = 'restore-service-environment'; Action = {
+            if ($serviceEnvironmentChanged -and -not $serviceCreated) {
+                New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name Environment `
+                    -PropertyType MultiString -Force -Value @($installedEnvironment) | Out-Null
             }
         } },
         [pscustomobject]@{ Name = 'restore-database'; Action = {
@@ -577,9 +486,7 @@ catch {
                 foreach ($databaseFile in $databaseFiles) {
                     $databasePath = Join-Path $data $databaseFile
                     if (Test-Path -LiteralPath $databasePath -PathType Leaf) { Remove-Item -LiteralPath $databasePath -Force }
-                    if ([bool]$databaseExistence[$databaseFile]) {
-                        Copy-Item -LiteralPath (Join-Path $transactionDataBackup $databaseFile) -Destination $databasePath -Force
-                    }
+                    if ([bool]$databaseExistence[$databaseFile]) { Copy-Item -LiteralPath (Join-Path $transactionDataBackup $databaseFile) -Destination $databasePath -Force }
                 }
                 foreach ($schemaBackup in @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue)) {
                     if ($schemaBackup.FullName -notin $schemaBackupsBefore) { Remove-Item -LiteralPath $schemaBackup.FullName -Force }
@@ -594,7 +501,10 @@ catch {
             if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
         } },
         [pscustomobject]@{ Name = 'restore-firewall'; Action = {
-            if ($firewallChanged) { Restore-SswAgentFirewallSnapshot -Snapshot $existingFirewallRule }
+            if ($firewallChanged) {
+                Restore-SswAgentFirewallSnapshot -Snapshot $existingFirewallRule
+                if ($legacyFirewallRule) { Restore-SswAgentFirewallSnapshot -Snapshot $legacyFirewallRule }
+            }
         } },
         [pscustomobject]@{ Name = 'restore-data'; Action = {
             if ($dataCreated -and (Test-Path -LiteralPath $data)) { Remove-Item -LiteralPath $data -Recurse -Force }
@@ -605,29 +515,13 @@ catch {
             if (Test-Path -LiteralPath $transactionDataBackup) { Remove-Item -LiteralPath $transactionDataBackup -Recurse -Force }
         } },
         [pscustomobject]@{ Name = 'restart-previous-service'; Action = {
-            if ($Repair -and $previousServiceWasRunning -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-                Start-Service -Name $serviceName
-            }
+            if ($Repair -and $previousServiceWasRunning -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { Start-Service -Name $serviceName }
         } }
     ))
     Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
         -Stage 'rollback-completed' -Status 'failed' -Version ([string]$sourceManifest.version) -ErrorCodes $rollbackErrors
     if ($rollbackErrors.Count -gt 0) {
-        Write-Warning ("일부 자동 복구 단계가 실패했습니다: {0}" -f ($rollbackErrors -join ', '))
+        Write-Warning ("일부 자동 복구 단계가 실패했습니다: {0}" -f ($rollbackErrors -join ', ')) -WarningAction Continue
     }
     throw $failure
-}
-
-function New-AgentStoreCertificate {
-    Write-SswStep 'LocalMachine 인증서 저장소에 비내보내기 HTTPS 인증서 생성'
-    $dnsNames = @($env:COMPUTERNAME, 'localhost') | Select-Object -Unique
-    $created = New-SelfSignedCertificate -DnsName $dnsNames -CertStoreLocation 'Cert:\LocalMachine\My' `
-        -FriendlyName "Samsung Switch Watch Agent $AgentId" -KeyAlgorithm RSA -KeyLength 3072 `
-        -HashAlgorithm SHA256 -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddYears(3)
-    if (-not $created.HasPrivateKey) { throw '새 HTTPS 인증서의 개인 키를 만들지 못했습니다.' }
-    return $created
-}
-finally {
-    $pfxPasswordText = $null
-    if ($newStoreCertificate) { $newStoreCertificate.Dispose() }
 }

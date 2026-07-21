@@ -1,5 +1,4 @@
 using System.Text.Json.Serialization;
-using Microsoft.Extensions.Logging.Abstractions;
 using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
@@ -32,16 +31,7 @@ public static class AgentApplication
         var options = builder.Configuration.GetSection(AgentOptions.SectionName).Get<AgentOptions>() ?? new AgentOptions();
         AgentOptionsValidator.ValidateAndNormalize(options, builder.Environment.ContentRootPath);
 
-        if (options.Https.Enabled)
-        {
-            builder.WebHost.ConfigureKestrel(server => server.ListenAnyIP(options.Https.Port,
-                listen => listen.UseHttps(AgentCertificateLoader.Load(options.Https,
-                    builder.Environment.ContentRootPath))));
-        }
-        else
-        {
-            builder.WebHost.UseUrls(options.ListenUrl);
-        }
+        builder.WebHost.UseUrls(options.ListenUrl);
 
         builder.Services.ConfigureHttpJsonOptions(json =>
         {
@@ -56,10 +46,6 @@ public static class AgentApplication
         builder.Services.AddSingleton<ICredentialProtector, DpapiCredentialProtector>();
         builder.Services.AddSingleton<IRawOutputProtector, RawOutputProtector>();
         builder.Services.AddSingleton<ICredentialVault, FileCredentialVault>();
-        builder.Services.AddSingleton<PairingService>();
-        builder.Services.AddSingleton<PairingAttemptLimiter>();
-        builder.Services.AddSingleton<CertificateStatusService>();
-        builder.Services.AddHostedService(service => service.GetRequiredService<CertificateStatusService>());
         builder.Services.AddSingleton(new DeviceProfileRegistry(
         [
             Ies4224GpProfile.Create(),
@@ -89,7 +75,6 @@ public static class AgentApplication
 
         var app = builder.Build();
         app.UseMiddleware<ErrorHandlingMiddleware>();
-        app.UseMiddleware<BearerTokenMiddleware>();
         app.MapAgentEndpoints(options);
         return app;
     }
@@ -153,72 +138,6 @@ internal static class AgentMaintenanceCommands
             return true;
         }
 
-        if (args.Length is 2 or 3 && string.Equals(args[0], "pairing", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(args[1], "create", StringComparison.OrdinalIgnoreCase) &&
-            (args.Length == 2 || string.Equals(args[2], "--json", StringComparison.OrdinalIgnoreCase)))
-        {
-            var options = AgentMaintenanceBootstrap.LoadOptions();
-            var created = await AgentMaintenanceBootstrap.CreatePairingCodeAsync(options);
-            if (args.Length == 3)
-            {
-                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    code = created.Code,
-                    expiresUtc = created.ExpiresUtc
-                }, JsonDefaults.Serializer));
-            }
-            else
-            {
-                Console.WriteLine($"One-time pairing code: {created.Code}");
-                Console.WriteLine($"Expires (UTC): {created.ExpiresUtc:O}");
-            }
-            return true;
-        }
-
-        if (args.Length == 2 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(args[1], "list", StringComparison.OrdinalIgnoreCase))
-        {
-            await using var app = AgentApplication.Build([]);
-            var store = app.Services.GetRequiredService<SqliteAgentStore>();
-            await store.InitializeAsync();
-            var pairing = app.Services.GetRequiredService<PairingService>();
-            var tokens = await pairing.ListTokensAsync();
-            if (tokens.Count == 0)
-            {
-                Console.WriteLine("No Viewer tokens are registered.");
-                return true;
-            }
-            foreach (var token in tokens)
-            {
-                var state = token.RevokedUtc is not null ? "revoked" : token.Expired ? "expired" : "active";
-                Console.WriteLine($"{token.Id}  {state}  created={token.CreatedUtc:O}  last-used={token.LastUsedUtc:O}");
-            }
-            return true;
-        }
-
-        if (args.Length == 3 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(args[1], "revoke", StringComparison.OrdinalIgnoreCase))
-        {
-            await using var app = AgentApplication.Build([]);
-            var store = app.Services.GetRequiredService<SqliteAgentStore>();
-            await store.InitializeAsync();
-            await app.Services.GetRequiredService<PairingService>().RevokeTokenAsync(args[2]);
-            Console.WriteLine($"Viewer token {args[2].ToUpperInvariant()} was revoked.");
-            return true;
-        }
-
-        if (args.Length == 3 && string.Equals(args[0], "token", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(args[1], "rotate", StringComparison.OrdinalIgnoreCase))
-        {
-            await using var app = AgentApplication.Build([]);
-            var store = app.Services.GetRequiredService<SqliteAgentStore>();
-            await store.InitializeAsync();
-            var replacement = await app.Services.GetRequiredService<PairingService>().RotateTokenAsync(args[2]);
-            Console.WriteLine("Replacement Viewer token (shown once):");
-            Console.WriteLine(replacement);
-            return true;
-        }
-
         return false;
     }
 
@@ -247,47 +166,5 @@ internal static class AgentMaintenanceCommands
                 value.Append(key.KeyChar);
             }
         }
-    }
-}
-
-internal static class AgentMaintenanceBootstrap
-{
-    public static AgentOptions LoadOptions(
-        string? contentRootPath = null,
-        string? environmentName = null)
-    {
-        var contentRoot = Path.GetFullPath(contentRootPath ?? AppContext.BaseDirectory);
-        var environment = string.IsNullOrWhiteSpace(environmentName)
-            ? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
-              ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
-              ?? Environments.Production
-            : environmentName.Trim();
-
-        if (environment.Length > 64 ||
-            environment.Any(character => !char.IsLetterOrDigit(character) && character is not '-' and not '_'))
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Agent environment name is invalid.");
-        }
-
-        var configuration = new ConfigurationBuilder()
-            .SetBasePath(contentRoot)
-            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
-            .AddJsonFile($"appsettings.{environment}.json", optional: true, reloadOnChange: false)
-            .AddEnvironmentVariables()
-            .Build();
-        var options = configuration.GetSection(AgentOptions.SectionName).Get<AgentOptions>() ?? new AgentOptions();
-        AgentOptionsValidator.ValidateAndNormalize(options, contentRoot);
-        return options;
-    }
-
-    public static async Task<(string Code, DateTimeOffset ExpiresUtc)> CreatePairingCodeAsync(
-        AgentOptions options,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        var store = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
-        await store.InitializeAsync(cancellationToken);
-        var pairing = new PairingService(options, store);
-        return await pairing.CreateCodeAsync(cancellationToken);
     }
 }

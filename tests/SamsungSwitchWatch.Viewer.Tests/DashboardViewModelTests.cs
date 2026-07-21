@@ -96,6 +96,52 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
+    public async Task InitializeAsync_MigratedLegacyPinCursorUsesNewIdentityHighWatermarkBaseline()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, highWatermark: 25, []);
+        fixture.Client.Changes.Add(Change(24, Event(24, DateTimeOffset.UtcNow.AddMinutes(-1))));
+        var settings = new ViewerSettings
+        {
+            DemoMode = true,
+            AgentUri = "http://agent.example.test:18443",
+            LastEventSequence = 24,
+            EventCursors = new Dictionary<string, long> { ["LEGACY-URI-PIN-IDENTITY"] = 24 }
+        };
+        var viewModel = fixture.CreateViewModel(settings);
+        var alerts = 0;
+        viewModel.AlertRaised += (_, _) => alerts++;
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(25, viewModel.AppliedChangeCursor);
+        Assert.True(viewModel.CurrentSettings.TryGetEventCursor("fake-agent", out var migratedCursor));
+        Assert.Equal(25, migratedCursor);
+        Assert.Equal(0, alerts);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DemoOperationalStatus_ContainsSingleHttpUnprotectedWarning()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []) with
+        {
+            OperationalStatuses =
+            [
+                new("HTTP_UNPROTECTED", "통신 보호", "사내 관리망 전용", DeviceHealth.Warning)
+            ]
+        };
+        var viewModel = fixture.CreateViewModel(new ViewerSettings { DemoMode = true });
+
+        await viewModel.InitializeAsync();
+
+        Assert.Single(viewModel.OperationalStatuses, status =>
+            status.Code == "HTTP_UNPROTECTED");
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Catchup_PagesMoreThan1200ChangesWithoutAdvancingAcrossGap()
     {
         using var fixture = new ViewModelFixture();
@@ -327,22 +373,22 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
-    public async Task PairingFailure_TransitionsToNeedsPairingWithStableSafeCode()
+    public async Task ConnectionConfigurationFailure_TransitionsToNeedsConnectionWithStableSafeCode()
     {
         using var fixture = new ViewModelFixture();
         fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []);
         fixture.Client.StartException = new AgentClientException(
-            "VIEWER_PAIRING_REQUIRED",
-            AgentConnectionState.NeedsPairing,
+            "VIEWER_CONNECTION_REQUIRED",
+            AgentConnectionState.NeedsConnection,
             new HttpRequestException("sensitive endpoint"));
         var viewModel = fixture.CreateViewModel(CursorSettings(0));
 
         await viewModel.InitializeAsync();
 
-        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.ConnectionState);
-        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.HttpConnectionState);
-        Assert.Equal(AgentConnectionState.NeedsPairing, viewModel.RealtimeConnectionState);
-        Assert.Contains("VIEWER_PAIRING_REQUIRED", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.Equal(AgentConnectionState.NeedsConnection, viewModel.ConnectionState);
+        Assert.Equal(AgentConnectionState.NeedsConnection, viewModel.HttpConnectionState);
+        Assert.Equal(AgentConnectionState.NeedsConnection, viewModel.RealtimeConnectionState);
+        Assert.Contains("VIEWER_CONNECTION_REQUIRED", viewModel.OperationMessage, StringComparison.Ordinal);
         Assert.DoesNotContain("sensitive", viewModel.OperationMessage, StringComparison.OrdinalIgnoreCase);
         await viewModel.DisposeAsync();
     }
@@ -486,15 +532,15 @@ public sealed class DashboardViewModelTests
         {
             var original = new FakeAgentClient();
             var replacement = new FakeAgentClient { StartException = new HttpRequestException("hub unavailable") };
-            var originalSettings = new ViewerSettings { DemoMode = true, AgentUri = "https://original.example.test:18443" };
+            var originalSettings = new ViewerSettings { DemoMode = true, AgentUri = "http://original.example.test:18443" };
             var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
             var viewModel = new DashboardViewModel(originalSettings, store, new QueueFactory(original, replacement));
             await viewModel.InitializeAsync();
-            var candidate = new ViewerSettings { DemoMode = true, AgentUri = "https://replacement.example.test:18443" };
+            var candidate = new ViewerSettings { DemoMode = true, AgentUri = "http://replacement.example.test:18443" };
 
             await Assert.ThrowsAsync<HttpRequestException>(() => viewModel.SwitchClientAsync(candidate));
 
-            Assert.Equal("https://original.example.test:18443", viewModel.CurrentSettings.AgentUri);
+            Assert.Equal("http://original.example.test:18443", viewModel.CurrentSettings.AgentUri);
             Assert.False(original.DisposeCalled);
             Assert.True(replacement.DisposeCalled);
             await viewModel.DisposeAsync();
@@ -519,15 +565,15 @@ public sealed class DashboardViewModelTests
                 ChangeExceptionAfterCalls = 1,
                 ChangeException = new HttpRequestException("catchup interrupted")
             };
-            var originalSettings = new ViewerSettings { DemoMode = true, AgentUri = "https://original.example.test:18443" };
+            var originalSettings = new ViewerSettings { DemoMode = true, AgentUri = "http://original.example.test:18443" };
             var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
             var viewModel = new DashboardViewModel(originalSettings, store, new QueueFactory(original, replacement));
             await viewModel.InitializeAsync();
-            var candidate = new ViewerSettings { DemoMode = true, AgentUri = "https://replacement.example.test:18443" };
+            var candidate = new ViewerSettings { DemoMode = true, AgentUri = "http://replacement.example.test:18443" };
 
             await viewModel.SwitchClientAsync(candidate);
 
-            Assert.Equal("https://replacement.example.test:18443", viewModel.CurrentSettings.AgentUri);
+            Assert.Equal("http://replacement.example.test:18443", viewModel.CurrentSettings.AgentUri);
             Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
             Assert.True(original.DisposeCalled);
             Assert.False(replacement.DisposeCalled);
@@ -561,7 +607,7 @@ public sealed class DashboardViewModelTests
             var switching = viewModel.SwitchClientAsync(new ViewerSettings
             {
                 DemoMode = true,
-                AgentUri = "https://replacement.example.test:18443"
+                AgentUri = "http://replacement.example.test:18443"
             });
             await Task.Delay(100);
             Assert.False(replacement.SnapshotStarted.Task.IsCompleted);
@@ -607,7 +653,7 @@ public sealed class DashboardViewModelTests
             await viewModel.SwitchClientAsync(new ViewerSettings
             {
                 DemoMode = true,
-                AgentUri = "https://replacement.example.test:18443"
+                AgentUri = "http://replacement.example.test:18443"
             });
             original.ReleaseSnapshot.TrySetResult();
             await WaitUntilAsync(() => !viewModel.IsBusy);

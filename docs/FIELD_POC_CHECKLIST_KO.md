@@ -1,7 +1,7 @@
 # 현장 POC 체크리스트
 
 이 체크리스트는 회사망에서만 수행합니다. 실제 IP, 호스트명, 사용자명, MAC, 시리얼,
-Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
+Telnet 원문과 자격 증명을 외부로 반출하지 않습니다.
 
 ## A. 설치와 복구
 
@@ -11,8 +11,10 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 - [ ] Agent 신규 설치 후 서비스 자동 시작
 - [ ] RDP 로그오프 후에도 수집 지속
 - [ ] `-Preflight`가 시스템을 변경하지 않음
-- [ ] `-Repair -ReuseData` 후 DB·WAL/SHM·자격 증명·설정·인증서 보존
-- [ ] fault injection 실패 뒤 서비스·파일·DB·방화벽·인증서 rollback
+- [ ] `-Repair -ReuseData` 후 DB·WAL/SHM·자격 증명·장비 설정 보존과 schema v5 전환
+- [ ] 기존 서비스 stopped 및 `-DoNotStart` Repair도 임시 readiness/schema 검증 후 stopped 복원
+- [ ] 성공한 v0.5 Repair만 현재·rotation 이전 설치기 소유 인증서와 구 서비스 secret 제거, 사용자 소유 인증서 보존
+- [ ] fault injection 실패 뒤 서비스 상태·환경·파일·DB·방화벽 rollback
 - [ ] Viewer 실패 설치 뒤 기존 EXE와 바로가기 복구
 - [ ] 재부팅 뒤 Agent 자동 복구와 Viewer 자동 시작 정책 확인
 - [ ] 기본 제거가 데이터를 보존하고 `-RemoveData`만 명시 삭제
@@ -21,23 +23,24 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 
 - [ ] Agent → 각 스위치 TCP/23만 허용
 - [ ] Viewer → Agent TCP/18443만 허용
-- [ ] Agent 방화벽 rule remote address가 Viewer IPv4로 제한
+- [ ] Agent HTTP 방화벽 RemoteAddress가 1~32개 고정 Viewer IPv4와 정확히 일치
+- [ ] CIDR·서브넷·DNS·축약형·16진수·선행 0 IPv4 입력 거부, 중복 주소 제거와 숫자 정렬
+- [ ] MpsSvc와 Domain/Private/Public 프로필 활성화, 기본 인바운드 Allow 및 외부 중첩 Allow 규칙 거부
+- [ ] `set-viewer-access.ps1` 실패 시 방화벽과 receipt 모두 이전 상태로 복구
 - [ ] 스위치 계정이 조회 전용이며 설정 명령이 거부됨
 - [ ] Telnet 경로가 격리 관리망 밖으로 나가지 않음
 - [ ] 자격 증명·DB·원문 파일 ACL이 서비스 SID와 관리자만 허용
 - [ ] SQLite raw blob에서 실제 명령 원문 평문 검색 불가
-- [ ] Viewer 토큰 파일이 현재 사용자 DPAPI로 보호됨
-- [ ] 토큰 최대 5개, 180일 절대·60일 idle 만료, 폐기 즉시 401
-- [ ] 인증서 현재/예정 pin 2개 전환 후 오래된 pin 제거
-- [ ] 만료 60/30/7일 상태와 만료 readiness 실패 확인
-- [ ] `new-viewer-pairing.ps1`의 `SSW1:` 문자열 한 번으로 Viewer 최초 연결 성공
-- [ ] 만료·재사용 문자열 거부, 인증서 불일치 `TLS_PIN_MISMATCH`, 최종 토큰 화면 미표시
+- [ ] Viewer가 Agent 주소(IP 또는 DNS)와 포트만으로 연결·저장
+- [ ] UI에 `사내 관리망 전용 · 암호화/인증 없음` 경고 표시
+- [ ] 허용되지 않은 Viewer IPv4에서 HTTP/18443 연결이 방화벽으로 차단
+- [ ] 허용된 Viewer IPv4에서는 상태·SignalR·수동 점검·확인 API 동작
 
 ## C. 모델별 Telnet 수집
 
 아래 항목을 각 모델과 실제 펌웨어 조합별로 따로 기록합니다.
 
-| 모델 | 펌웨어 | 로그인 | `show port status` | 포트 대체 명령 | `show syslog tail num 100` | 로그 대체 명령 | 페이징 | 결과 |
+| 모델 | 펌웨어 | 로그인 | `show port status` | 포트 대체 명령 | `show syslog tail num 100` / `show sylog tail num 100` | 로그 대체 명령 | 페이징 | 결과 |
 |---|---|---|---|---|---|---|---|---|
 | IES4224GP |  |  |  |  |  |  |  |  |
 | IES4028XP |  |  |  |  |  |  |  |  |
@@ -91,7 +94,7 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 - [ ] Agent PC 재부팅
 - [ ] Viewer PC 절전·복귀
 - [ ] 스위치 TCP timeout·연결 거부·인증 실패 구분
-- [ ] Agent 인증서 불일치가 `TLS_PIN_MISMATCH`로 차단
+- [ ] Agent HTTP 경로가 일반 사용자망·인터넷으로 라우팅되지 않음
 - [ ] DB read-only·디스크 부족·integrity 실패에서 수집 쓰기 중단
 - [ ] DB 실패 중 `/health/live`는 유지, `/health/ready`는 실패
 - [ ] DB 복구 후 수집 재개와 이벤트 cursor 연속성
@@ -101,5 +104,5 @@ Telnet 원문, 토큰과 인증서를 외부로 반출하지 않습니다.
 ## 완료 판정
 
 세 모델의 실제 펌웨어 행이 모두 채워지고, Critical/복구·오프라인 catch-up·설치 rollback·
-장시간 soak·사내 인증서·코드 서명까지 승인되어야 v1 운영 후보로 승격할 수 있습니다.
+장시간 soak·방화벽 경계·코드 서명까지 승인되어야 v1 운영 후보로 승격할 수 있습니다.
 로컬 합성 테스트 통과만으로 이 표를 완료 처리하지 않습니다.

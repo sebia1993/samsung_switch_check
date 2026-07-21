@@ -45,7 +45,6 @@ public sealed class CollectorSafetyTests
     {
         var collector = new UnsupportedStatusCollector();
         await using var host = await TestAgentHost.StartAsync(collector);
-        await host.PairAsync();
         var store = host.Services.GetRequiredService<SamsungSwitchWatch.Agent.Persistence.SqliteAgentStore>();
         var baseline = new DeviceSnapshot("TEST-SW-01", "version", DateTimeOffset.UtcNow.AddMinutes(-1),
             new JsonObject { ["softwareVersion"] = "LAST-GOOD" });
@@ -157,7 +156,7 @@ public sealed class CollectorSafetyTests
     }
 
     [Fact]
-    public async Task CoreCollectorFallsBackForSyslogAndReusesWorkingCommandForDevice()
+    public async Task CoreCollectorUsesSylogVariantAndReusesWorkingCommandForDevice()
     {
         var telnet = new LogCapabilityFallbackTelnetClient();
         var collector = new CoreTelnetDeviceCollector(
@@ -171,10 +170,10 @@ public sealed class CollectorSafetyTests
         var second = Assert.Single(await collector.CollectBatchAsync(device, commands, CancellationToken.None));
 
         Assert.Equal("OK", first.CollectorStatus);
-        Assert.Equal("show log ram", first.Structured["collectorCli"]?.GetValue<string>());
+        Assert.Equal("show sylog tail num 100", first.Structured["collectorCli"]?.GetValue<string>());
         Assert.Equal("OK", second.CollectorStatus);
         Assert.Equal(
-            ["show syslog tail num 100", "show log ram", "show log ram"],
+            ["show syslog tail num 100", "show sylog tail num 100", "show sylog tail num 100"],
             telnet.Commands);
     }
 
@@ -198,12 +197,13 @@ public sealed class CollectorSafetyTests
             CancellationToken.None);
 
         Assert.All(outputs, output => Assert.Equal("OK", output.CollectorStatus));
-        Assert.Equal(3, telnet.Batches.Count);
+        Assert.Equal(4, telnet.Batches.Count);
         Assert.Equal(
             ["show port status", "show syslog tail num 100"],
             telnet.Batches[0]);
         Assert.Equal(["show interfaces status"], telnet.Batches[1]);
-        Assert.Equal(["show log ram"], telnet.Batches[2]);
+        Assert.Equal(["show sylog tail num 100"], telnet.Batches[2]);
+        Assert.Equal(["show log ram"], telnet.Batches[3]);
     }
 
     [Fact]
@@ -419,7 +419,7 @@ public sealed class CollectorSafetyTests
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=5;";
             Assert.Equal(1, await command.ExecuteNonQueryAsync());
         }
         Assert.False(await store.RefreshIntegrityStatusAsync());

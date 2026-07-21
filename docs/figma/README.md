@@ -7,7 +7,7 @@
 - Popup: 360x150 content frame
 - Popup state strip: node `15:129`
 - Operational and security state gallery: node `15:148`
-- Single-string pairing wizard: node `20:129`
+- Historical v3 single-string pairing wizard: node `20:129`
 - Command capability and automatic fallback: node `22:131`
 - Figma font: Noto Sans KR
 - Windows implementation font: Segoe UI
@@ -27,7 +27,16 @@ certificate, real-time channel, and database-integrity states. All text nodes us
 Noto Sans KR (Roboto Mono is allowed for code-only content), no text overflows its
 parent bounds, and the screens reuse the tracked local variables and components.
 
-The v3 handoff replaces manual fingerprint/token entry with one `SSW1:` pairing string
-and documents preferred, fallback, and unsupported command states. The WPF connection
-window and collector-health tab implement those operator flows while preserving the
-manual fields as an advanced recovery path.
+The v3 handoff replaced manual fingerprint/token entry with one `SSW1:` pairing string
+and documented preferred, fallback, and unsupported command states.
+
+The user-approved v4 implementation removes the certificate fingerprint, pairing code,
+`SSW1:` string, and Bearer token. The WPF connection window now contains only an Agent
+IPv4/DNS field, an HTTP port field (default `18443`), and the explicit warning
+`사내 관리망 전용 · 암호화/인증 없음`. The command-capability screen remains valid.
+
+The Figma write connection was unavailable during the v0.6.0-poc implementation, so the
+actual v4 HTTP connection frame has not been written to the Figma file yet. Node `20:129`
+is historical and must not be used as the current connection-flow source. Until the Figma
+frame is synchronized, the user-confirmed v4 flow above and the WPF implementation are the
+approved exception recorded by this handoff.

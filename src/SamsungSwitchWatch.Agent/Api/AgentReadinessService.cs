@@ -11,7 +11,6 @@ namespace SamsungSwitchWatch.Agent.Api;
 public sealed class AgentReadinessService(
     AgentOptions options,
     SqliteAgentStore store,
-    CertificateStatusService certificates,
     ICredentialVault credentials,
     AgentRuntimeState runtime,
     ILogger<AgentReadinessService> logger)
@@ -26,18 +25,6 @@ public sealed class AgentReadinessService(
         if (!storage.Ready)
         {
             return NotReady(storage.ErrorCode ?? AgentErrorCodes.StorageWriteFailed, storage.SchemaVersion, now);
-        }
-
-        if (options.Https.Enabled &&
-            (!certificates.Status.HttpsEnabled ||
-             string.Equals(certificates.Status.State, "unavailable", StringComparison.Ordinal)))
-        {
-            return NotReady(AgentErrorCodes.CertificateUnavailable, storage.SchemaVersion, now);
-        }
-        if (options.Https.Enabled &&
-            string.Equals(certificates.Status.State, "expired", StringComparison.Ordinal))
-        {
-            return NotReady(AgentErrorCodes.CertificateExpired, storage.SchemaVersion, now);
         }
 
         if (!options.MockMode)

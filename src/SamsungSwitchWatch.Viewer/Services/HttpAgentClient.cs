@@ -1,9 +1,5 @@
 using System.Collections.ObjectModel;
 using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Security;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR.Client;
@@ -13,47 +9,37 @@ namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class HttpAgentClient : IAgentClient
 {
-    private readonly ViewerSettings _settings;
     private readonly HttpClient _httpClient;
     private readonly HubConnection _hub;
-    private readonly IReadOnlyList<byte[]> _acceptedCertificatePins;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _startGate = new(1, 1);
     private readonly object _reconnectSync = new();
     private IReadOnlyDictionary<string, string> _deviceNames =
         new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
     private Task? _reconnectTask;
-    private int _certificatePinRejected;
     private int _apiCompatibility;
     private bool _disposed;
 
     public HttpAgentClient(ViewerSettings settings)
     {
-        _settings = ViewerSettingsSanitizer.Sanitize(settings);
-        _settings.BearerToken = settings.BearerToken;
-        if (!ViewerSettingsSanitizer.IsValidForLiveConnection(_settings, out var reason))
+        var clean = ViewerSettingsSanitizer.Sanitize(settings);
+        if (!ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason))
         {
             throw new InvalidOperationException(reason);
         }
-        _acceptedCertificatePins = _settings.AcceptedCertificateFingerprints
-            .Select(Convert.FromHexString)
-            .ToArray();
 
-        _httpClient = new HttpClient(CreatePinnedHandler())
+        _httpClient = new HttpClient(CreateDirectHttpHandler())
         {
-            BaseAddress = new Uri(_settings.AgentUri),
+            BaseAddress = new Uri(clean.AgentUri),
             Timeout = TimeSpan.FromSeconds(20)
         };
-        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _settings.BearerToken);
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/2.0");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.6");
 
         _hub = new HubConnectionBuilder()
-            .WithUrl(new Uri(new Uri(_settings.AgentUri), "/hubs/events"), options =>
+            .WithUrl(new Uri(new Uri(clean.AgentUri), "/hubs/events"), options =>
             {
-                options.AccessTokenProvider = () => Task.FromResult<string?>(_settings.BearerToken);
-                options.HttpMessageHandlerFactory = _ => CreatePinnedHandler();
-                options.WebSocketConfiguration = webSocketOptions =>
-                    webSocketOptions.RemoteCertificateValidationCallback = ValidateWebSocketCertificate;
+                options.HttpMessageHandlerFactory = _ => CreateDirectHttpHandler();
+                options.WebSocketConfiguration = webSocketOptions => webSocketOptions.Proxy = DirectWebProxy.Instance;
             })
             .WithAutomaticReconnect(new IndefiniteReconnectPolicy())
             .Build();
@@ -78,14 +64,8 @@ public sealed class HttpAgentClient : IAgentClient
         {
             if (!_lifetime.IsCancellationRequested)
             {
-                var failure = exception is null
-                    ? null
-                    : AgentClientErrors.Translate(exception, ConsumePinRejection());
-                var state = failure?.SuggestedConnectionState == AgentConnectionState.NeedsPairing
-                    ? AgentConnectionState.NeedsPairing
-                    : AgentConnectionState.Offline;
-                ConnectionStateChanged?.Invoke(this, state);
-                if (state != AgentConnectionState.NeedsPairing) EnsureReconnectLoop();
+                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Offline);
+                EnsureReconnectLoop();
             }
             return Task.CompletedTask;
         };
@@ -108,18 +88,14 @@ public sealed class HttpAgentClient : IAgentClient
             ConnectionStateChanged?.Invoke(this, AgentConnectionState.Connecting);
             try
             {
-                Interlocked.Exchange(ref _certificatePinRejected, 0);
                 await _hub.StartAsync(cancellationToken).ConfigureAwait(false);
                 ConnectionStateChanged?.Invoke(this, AgentConnectionState.Connected);
             }
             catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
-                var failure = AgentClientErrors.Translate(exception, ConsumePinRejection());
-                var state = failure.SuggestedConnectionState == AgentConnectionState.NeedsPairing
-                    ? AgentConnectionState.NeedsPairing
-                    : AgentConnectionState.Offline;
-                ConnectionStateChanged?.Invoke(this, state);
-                if (state != AgentConnectionState.NeedsPairing) EnsureReconnectLoop();
+                var failure = AgentClientErrors.Translate(exception);
+                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Offline);
+                EnsureReconnectLoop();
                 throw failure;
             }
         }
@@ -323,7 +299,6 @@ public sealed class HttpAgentClient : IAgentClient
         string? jsonBody,
         CancellationToken cancellationToken)
     {
-        Interlocked.Exchange(ref _certificatePinRejected, 0);
         try
         {
             using var request = new HttpRequestMessage(method, route);
@@ -340,7 +315,7 @@ public sealed class HttpAgentClient : IAgentClient
         }
         catch (Exception exception)
         {
-            throw AgentClientErrors.Translate(exception, ConsumePinRejection());
+            throw AgentClientErrors.Translate(exception);
         }
     }
 
@@ -359,36 +334,12 @@ public sealed class HttpAgentClient : IAgentClient
         throw typed;
     }
 
-    private HttpClientHandler CreatePinnedHandler() => new()
+    internal static HttpClientHandler CreateDirectHttpHandler() => new()
     {
-        ServerCertificateCustomValidationCallback = ValidateCertificate
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        UseDefaultCredentials = false
     };
-
-    private bool ValidateCertificate(HttpRequestMessage _, X509Certificate2? certificate, X509Chain? __, SslPolicyErrors ___)
-        => ValidateCertificateCore(certificate);
-
-    private bool ValidateWebSocketCertificate(object _, X509Certificate? certificate, X509Chain? __, SslPolicyErrors ___)
-    {
-        if (certificate is X509Certificate2 certificate2) return ValidateCertificateCore(certificate2);
-        if (certificate is null) return ValidateCertificateCore(null);
-        using var copy = new X509Certificate2(certificate);
-        return ValidateCertificateCore(copy);
-    }
-
-    private bool ValidateCertificateCore(X509Certificate2? certificate)
-    {
-        if (certificate is null)
-        {
-            Interlocked.Exchange(ref _certificatePinRejected, 1);
-            return false;
-        }
-        var actual = SHA256.HashData(certificate.RawData);
-        var accepted = CertificatePinMatcher.Matches(actual, _acceptedCertificatePins);
-        if (!accepted) Interlocked.Exchange(ref _certificatePinRejected, 1);
-        return accepted;
-    }
-
-    private bool ConsumePinRejection() => Interlocked.Exchange(ref _certificatePinRejected, 0) != 0;
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -415,25 +366,20 @@ public sealed class HttpAgentClient : IAgentClient
     }
 }
 
-internal static class CertificatePinMatcher
-{
-    public static bool Matches(ReadOnlySpan<byte> actualSha256, IReadOnlyList<byte[]> acceptedPins)
-    {
-        var accepted = false;
-        foreach (var pin in acceptedPins)
-        {
-            // Do not return early: compare every configured pin so timing does not
-            // reveal which rotation slot matched.
-            accepted |= pin.Length == actualSha256.Length
-                        && CryptographicOperations.FixedTimeEquals(actualSha256, pin);
-        }
-        return accepted;
-    }
-}
-
 internal static class ApiCompatibilityPolicy
 {
     public static bool ShouldFallback(HttpStatusCode statusCode) => statusCode == HttpStatusCode.NotFound;
+}
+
+internal sealed class DirectWebProxy : IWebProxy
+{
+    public static DirectWebProxy Instance { get; } = new();
+
+    private DirectWebProxy() { }
+
+    public ICredentials? Credentials { get => null; set { } }
+    public Uri GetProxy(Uri destination) => destination;
+    public bool IsBypassed(Uri host) => true;
 }
 
 internal sealed class IndefiniteReconnectPolicy : IRetryPolicy

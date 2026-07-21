@@ -1,6 +1,3 @@
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -37,8 +34,7 @@ internal sealed class TestAgentHost : IAsyncDisposable
             ["Agent:DataDirectory"] = folder,
             ["Agent:MockMode"] = "true",
             ["Agent:EnablePolling"] = "false",
-            ["Agent:EnableSimulator"] = "true",
-            ["Agent:TokenPepper"] = Guid.NewGuid().ToString("N")
+            ["Agent:EnableSimulator"] = "true"
         };
         if (additionalOverrides is not null)
         {
@@ -59,20 +55,6 @@ internal sealed class TestAgentHost : IAsyncDisposable
         var address = server.Features.Get<IServerAddressesFeature>()!.Addresses.Single();
         var client = new HttpClient { BaseAddress = new Uri(address) };
         return new TestAgentHost(folder, app, client);
-    }
-
-    public async Task<string> PairAsync()
-    {
-        using var bootstrap = await Client.PostAsync("/api/v1/pairing/bootstrap", null);
-        bootstrap.EnsureSuccessStatusCode();
-        using var bootstrapJson = JsonDocument.Parse(await bootstrap.Content.ReadAsStringAsync());
-        var code = bootstrapJson.RootElement.GetProperty("code").GetString()!;
-        using var exchange = await Client.PostAsJsonAsync("/api/v1/pairing/exchange", new { code });
-        exchange.EnsureSuccessStatusCode();
-        using var tokenJson = JsonDocument.Parse(await exchange.Content.ReadAsStringAsync());
-        var token = tokenJson.RootElement.GetProperty("token").GetString()!;
-        Client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        return token;
     }
 
     public async ValueTask DisposeAsync()

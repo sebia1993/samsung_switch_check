@@ -1,18 +1,15 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class ViewerSettings
 {
     public bool DemoMode { get; set; } = true;
-    public string AgentUri { get; set; } = "https://localhost:18443";
-    public string CertificateFingerprint { get; set; } = string.Empty;
-    public List<string> CertificateFingerprints { get; set; } = [];
-    public string ProtectedBearerToken { get; set; } = string.Empty;
-    [JsonIgnore] public string BearerToken { get; set; } = string.Empty;
+    public string AgentUri { get; set; } = "http://localhost:18443";
     public long LastEventSequence { get; set; }
     public Dictionary<string, long> EventCursors { get; set; } = new(StringComparer.Ordinal);
     public bool MiniTopmost { get; set; } = true;
@@ -24,14 +21,10 @@ public sealed class ViewerSettings
     public double MainHeight { get; set; } = 900;
     public bool StartMinimizedToTray { get; set; }
 
-    [JsonIgnore]
-    public IReadOnlyList<string> AcceptedCertificateFingerprints => ViewerSettingsSanitizer
-        .NormalizeFingerprints((CertificateFingerprints ?? []).Prepend(CertificateFingerprint));
-
     public string BuildAgentIdentity(string agentId)
     {
-        var pins = string.Join(',', AcceptedCertificateFingerprints.Order(StringComparer.Ordinal));
-        var material = $"{agentId.Trim()}\n{AgentUri.Trim().ToUpperInvariant()}\n{pins}";
+        var normalizedUri = ViewerSettingsSanitizer.NormalizeAgentUri(AgentUri);
+        var material = $"{agentId.Trim()}\n{normalizedUri.ToUpperInvariant()}";
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
 
@@ -52,19 +45,15 @@ public sealed class ViewerSettings
 
 public static class ViewerSettingsSanitizer
 {
+    public const int DefaultAgentPort = 18443;
+
     public static ViewerSettings Sanitize(ViewerSettings? input)
     {
         input ??= new ViewerSettings();
-        var uri = NormalizeAgentUri(input.AgentUri);
-        var fingerprints = NormalizeFingerprints((input.CertificateFingerprints ?? []).Prepend(input.CertificateFingerprint));
         return new ViewerSettings
         {
             DemoMode = input.DemoMode,
-            AgentUri = uri,
-            CertificateFingerprint = fingerprints.FirstOrDefault() ?? string.Empty,
-            CertificateFingerprints = fingerprints.ToList(),
-            ProtectedBearerToken = Limit(input.ProtectedBearerToken, 8192),
-            BearerToken = Limit(input.BearerToken, 4096),
+            AgentUri = NormalizeAgentUri(input.AgentUri),
             LastEventSequence = Math.Max(0, input.LastEventSequence),
             EventCursors = (input.EventCursors ?? new Dictionary<string, long>())
                 .Where(item => item.Key.Length is > 0 and <= 128)
@@ -81,112 +70,132 @@ public static class ViewerSettingsSanitizer
         };
     }
 
-    public static string NormalizeFingerprint(string? value)
+    public static ViewerSettings Copy(ViewerSettings source) => new()
     {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-        var hex = new string(value.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
-        return hex.Length == 64 ? hex : string.Empty;
-    }
+        DemoMode = source.DemoMode,
+        AgentUri = source.AgentUri,
+        LastEventSequence = source.LastEventSequence,
+        EventCursors = new Dictionary<string, long>(source.EventCursors, StringComparer.Ordinal),
+        MiniTopmost = source.MiniTopmost,
+        MiniLeft = source.MiniLeft,
+        MiniTop = source.MiniTop,
+        MainLeft = source.MainLeft,
+        MainTop = source.MainTop,
+        MainWidth = source.MainWidth,
+        MainHeight = source.MainHeight,
+        StartMinimizedToTray = source.StartMinimizedToTray
+    };
 
-    public static IReadOnlyList<string> NormalizeFingerprints(IEnumerable<string?>? values)
-    {
-        if (values is null) return [];
-        return values
-            .SelectMany(SplitFingerprintInput)
-            .Select(NormalizeFingerprint)
-            .Where(value => value.Length == 64)
-            .Distinct(StringComparer.Ordinal)
-            .Take(2)
-            .ToArray();
-    }
-
-    public static bool TryParseFingerprintInput(
-        string? value,
-        out IReadOnlyList<string> fingerprints,
+    public static bool TryBuildAgentUri(
+        string? addressInput,
+        string? portInput,
+        out string agentUri,
         out string reason)
     {
-        var parts = SplitFingerprintInput(value).ToArray();
-        if (parts.Length == 0)
+        agentUri = string.Empty;
+        var address = addressInput?.Trim() ?? string.Empty;
+        if (!int.TryParse(portInput?.Trim(), out var port) || port is < 1 or > 65535)
         {
-            fingerprints = [];
-            reason = "인증서 SHA-256 지문을 하나 이상 입력해야 합니다.";
+            reason = "포트는 1~65535 범위의 숫자여야 합니다.";
+            return false;
+        }
+        if (!IsSupportedHost(address))
+        {
+            reason = "Agent 주소에는 IPv4 주소 또는 DNS 이름만 입력해 주세요.";
             return false;
         }
 
-        var invalid = parts.Any(part => NormalizeFingerprint(part).Length != 64);
-        var normalized = parts
-            .Select(NormalizeFingerprint)
-            .Where(item => item.Length == 64)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        if (invalid)
+        try
         {
-            fingerprints = [];
-            reason = "각 인증서 SHA-256 지문은 64자리 16진수여야 합니다.";
+            agentUri = new UriBuilder(Uri.UriSchemeHttp, address, port).Uri
+                .GetLeftPart(UriPartial.Authority)
+                .TrimEnd('/');
+            reason = string.Empty;
+            return true;
+        }
+        catch (UriFormatException)
+        {
+            reason = "Agent 주소 형식이 올바르지 않습니다.";
             return false;
         }
-        if (normalized.Length > 2)
+    }
+
+    public static void SplitAgentUri(string? value, out string address, out int port)
+    {
+        var normalized = NormalizeAgentUri(value);
+        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
         {
-            fingerprints = [];
-            reason = "인증서 지문은 현재 인증서와 예정 인증서를 합쳐 최대 2개까지 입력할 수 있습니다.";
-            return false;
+            address = uri.Host;
+            port = uri.Port;
+            return;
         }
 
-        fingerprints = normalized;
-        reason = string.Empty;
-        return true;
+        address = "localhost";
+        port = DefaultAgentPort;
     }
 
     public static bool IsValidForLiveConnection(ViewerSettings settings, out string reason)
     {
-        var clean = Sanitize(settings);
-        if (!Uri.TryCreate(clean.AgentUri, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        var normalized = NormalizeAgentUri(settings.AgentUri);
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+            || uri.Scheme != Uri.UriSchemeHttp
+            || uri.Port is < 1 or > 65535
+            || !IsSupportedHost(uri.Host))
         {
-            reason = "Agent 주소는 HTTPS URL이어야 합니다.";
+            reason = "Agent 주소와 포트를 확인해 주세요.";
             return false;
         }
-        if (clean.AcceptedCertificateFingerprints.Count is < 1 or > 2)
-        {
-            reason = "인증서 SHA-256 지문은 64자리이며 최대 2개까지 허용됩니다.";
-            return false;
-        }
-        if (string.IsNullOrWhiteSpace(clean.BearerToken))
-        {
-            reason = "페어링 토큰을 입력해야 합니다.";
-            return false;
-        }
+
         reason = string.Empty;
         return true;
     }
 
-    private static string NormalizeAgentUri(string? value)
+    public static string NormalizeAgentUri(string? value)
     {
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            || uri.Port is < 1 or > 65535
+            || !IsSupportedHost(uri.Host))
         {
             return string.Empty;
         }
-        var builder = new UriBuilder(uri)
+
+        try
         {
-            Path = string.Empty,
-            Query = string.Empty,
-            Fragment = string.Empty,
-            UserName = string.Empty,
-            Password = string.Empty
-        };
-        return builder.Uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+            // v0.5.x settings used HTTPS. Preserve the same host and effective
+            // port while moving the connection to the v0.6 HTTP transport.
+            return new UriBuilder(Uri.UriSchemeHttp, uri.Host, uri.Port).Uri
+                .GetLeftPart(UriPartial.Authority)
+                .TrimEnd('/');
+        }
+        catch (UriFormatException)
+        {
+            return string.Empty;
+        }
     }
 
-    private static string Limit(string? value, int maxLength) =>
-        string.IsNullOrEmpty(value) ? string.Empty : value[..Math.Min(value.Length, maxLength)];
-
-    private static double NormalizeCoordinate(double value) => IsFinite(value) ? Math.Clamp(value, -32000, 32000) : -32000;
-    private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
-
-    private static IEnumerable<string> SplitFingerprintInput(string? value)
+    private static bool IsSupportedHost(string value)
     {
-        if (string.IsNullOrWhiteSpace(value)) return [];
-        return value.Split([',', ';', '\r', '\n', '\t', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Contains("://", StringComparison.Ordinal)
+            || value.Any(char.IsWhiteSpace))
+        {
+            return false;
+        }
+
+        if (IPAddress.TryParse(value, out var address))
+        {
+            return address.AddressFamily == AddressFamily.InterNetwork;
+        }
+
+        return Uri.CheckHostName(value) == UriHostNameType.Dns;
     }
+
+    private static double NormalizeCoordinate(double value) =>
+        IsFinite(value) ? Math.Clamp(value, -32000, 32000) : -32000;
+
+    private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
 }
 
 public sealed class ViewerSettingsStore
@@ -215,15 +224,22 @@ public sealed class ViewerSettingsStore
                 LastLoadStatus = ViewerSettingsLoadStatus.Missing;
                 return new ViewerSettings();
             }
-            var settings = JsonSerializer.Deserialize<ViewerSettings>(File.ReadAllText(_settingsPath), JsonOptions);
+
+            // Legacy certificate and token properties are intentionally ignored by
+            // System.Text.Json. A subsequent Save writes only the v0.6 HTTP model.
+            var storedJson = File.ReadAllText(_settingsPath);
+            var settings = JsonSerializer.Deserialize<ViewerSettings>(storedJson, JsonOptions);
             settings = ViewerSettingsSanitizer.Sanitize(settings);
-            if (!TryUnprotect(settings.ProtectedBearerToken, out var token))
+            var migratedJson = JsonSerializer.Serialize(settings, JsonOptions);
+            if (!string.Equals(storedJson, migratedJson, StringComparison.Ordinal))
             {
-                LastLoadStatus = ViewerSettingsLoadStatus.NeedsPairing;
-                settings.BearerToken = string.Empty;
-                return settings;
+                try { Save(settings); }
+                catch
+                {
+                    // A read-only profile must still be able to monitor with the
+                    // in-memory migrated settings. The next writable save retries.
+                }
             }
-            settings.BearerToken = token;
             LastLoadStatus = ViewerSettingsLoadStatus.Ok;
             return settings;
         }
@@ -238,14 +254,6 @@ public sealed class ViewerSettingsStore
     public void Save(ViewerSettings settings)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(settings);
-        if (!string.IsNullOrEmpty(clean.BearerToken))
-        {
-            clean.ProtectedBearerToken = Protect(clean.BearerToken);
-        }
-        else
-        {
-            clean.ProtectedBearerToken = settings.ProtectedBearerToken;
-        }
         Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
         var temporaryPath = _settingsPath + $".{Guid.NewGuid():N}.tmp";
         try
@@ -257,34 +265,6 @@ public sealed class ViewerSettingsStore
         {
             try { File.Delete(temporaryPath); } catch { }
         }
-    }
-
-    private static string Protect(string value)
-    {
-        if (string.IsNullOrEmpty(value)) return string.Empty;
-        try
-        {
-            var bytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser);
-            return "dpapi:" + Convert.ToBase64String(bytes);
-        }
-        catch
-        {
-            throw new InvalidOperationException("VIEWER_TOKEN_PROTECT_FAILED");
-        }
-    }
-
-    private static bool TryUnprotect(string value, out string token)
-    {
-        token = string.Empty;
-        if (string.IsNullOrEmpty(value)) return true;
-        if (!value.StartsWith("dpapi:", StringComparison.Ordinal)) return false;
-        try
-        {
-            var bytes = Convert.FromBase64String(value[6..]);
-            token = Encoding.UTF8.GetString(ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser));
-            return true;
-        }
-        catch { return false; }
     }
 
     private void QuarantineCorruptSettings()
@@ -299,6 +279,6 @@ public enum ViewerSettingsLoadStatus
 {
     Ok,
     Missing,
-    NeedsPairing,
+    NeedsConnection,
     Corrupt
 }

@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260721-v3",
+  "runId": "ssw-20260721-v4-http-pending-figma",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -19,8 +19,16 @@
     "miniOfflineRecoveryV2": "14:127",
     "popupStatesV2": "15:129",
     "operationalStatesV2": "15:148",
-    "pairingWizardV3": "20:129",
+    "pairingWizardV3Historical": "20:129",
+    "httpConnectionV4": null,
     "commandCapabilityV3": "22:131"
+  },
+  "implementationOverride": {
+    "version": "v4-http",
+    "status": "user-approved-figma-sync-pending",
+    "fields": ["agentAddress", "httpPort"],
+    "defaultPort": 18443,
+    "warning": "사내 관리망 전용 · 암호화/인증 없음"
   },
   "componentSets": {
     "StatusBadge": "5:17",

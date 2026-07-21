@@ -70,7 +70,7 @@ public sealed class DemoAgentClient : IAgentClient
             OperationalStatuses:
             [
                 new("DB_READY", "로컬 상태 DB", "Readiness 정상 · 데모 저장소", DeviceHealth.Normal),
-                new("CERT_VALID", "HTTPS 인증서", "데모 모드 · 실환경 pin 검증은 비활성", DeviceHealth.Normal),
+                new("HTTP_UNPROTECTED", "통신 보호", "사내 관리망 전용 · 암호화/인증 없음", DeviceHealth.Warning),
                 new("POLLING", "수집 진행", "동시 장비 수집 상한 4대", DeviceHealth.Normal)
             ],
             MaxConcurrentDevices: 4));

@@ -12,12 +12,11 @@ $result = [ordered]@{
     generatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
     service = 'SERVICE_NOT_FOUND'
     configuration = 'CONFIG_NOT_FOUND'
-    certificate = 'CERT_NOT_FOUND'
     database = 'DATABASE_NOT_FOUND'
     switchTcp = 'NOT_TESTED'
     agentLive = 'NOT_TESTED'
     agentReady = 'NOT_TESTED'
-    agentHttps = 'NOT_TESTED'
+    agentHttp = 'NOT_TESTED'
 }
 
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -27,8 +26,6 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     try {
         $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $result.configuration = 'OK'
-        $certificatePath = [string]$config.Agent.Https.CertificatePath
-        $result.certificate = if (Test-Path -LiteralPath $certificatePath -PathType Leaf) { 'OK' } else { 'CERT_NOT_FOUND' }
         $databasePath = Join-Path ([string]$config.Agent.DataDirectory) 'switchwatch.db'
         $result.database = if (Test-Path -LiteralPath $databasePath -PathType Leaf) { 'OK' } else { 'DATABASE_NOT_FOUND' }
 
@@ -51,22 +48,12 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
         $ready = $null
         try {
             Add-Type -AssemblyName System.Net.Http
-            if (-not ('SswDiagnosticHttpHandler' -as [type])) {
-                Add-Type -TypeDefinition @'
-using System.Net.Http;
-public sealed class SswDiagnosticHttpHandler : HttpClientHandler
-{
-    public SswDiagnosticHttpHandler()
-    {
-        ServerCertificateCustomValidationCallback = (request, certificate, chain, errors) => true;
-    }
-}
-'@ -ReferencedAssemblies 'System.Net.Http.dll'
-            }
-            $handler = New-Object SswDiagnosticHttpHandler
+            $handler = New-Object Net.Http.HttpClientHandler
+            $handler.UseProxy = $false
             $client = New-Object Net.Http.HttpClient($handler)
             $client.Timeout = [TimeSpan]::FromSeconds(5)
-            $baseUri = "https://127.0.0.1:$([int]$config.Agent.Https.Port)"
+            $configuredUri = [Uri]([string]$config.Agent.ListenUrl)
+            $baseUri = "http://127.0.0.1:$($configuredUri.Port)"
 
             $live = $client.GetAsync("$baseUri/health/live").GetAwaiter().GetResult()
             if ([int]$live.StatusCode -eq 404) {
@@ -89,12 +76,12 @@ public sealed class SswDiagnosticHttpHandler : HttpClientHandler
                     catch { $result.agentReady = $fallbackCode }
                 }
             }
-            $result.agentHttps = $result.agentLive
+            $result.agentHttp = $result.agentLive
         }
         catch {
-            $result.agentLive = 'AGENT_HTTPS_UNREACHABLE'
-            $result.agentReady = 'AGENT_HTTPS_UNREACHABLE'
-            $result.agentHttps = 'AGENT_HTTPS_UNREACHABLE'
+            $result.agentLive = 'AGENT_HTTP_UNREACHABLE'
+            $result.agentReady = 'AGENT_HTTP_UNREACHABLE'
+            $result.agentHttp = 'AGENT_HTTP_UNREACHABLE'
         }
         finally {
             if ($ready) { $ready.Dispose() }

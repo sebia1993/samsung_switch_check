@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.5.1-poc',
+    [string]$Version = '0.6.0-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -70,8 +70,8 @@ Write-SswStep 'Viewer self-contained publish'
 if ($LASTEXITCODE -ne 0) { throw 'Viewer publish 실패' }
 
 $agentScripts = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'set-switch-credential.ps1',
-    'new-pairing-code.ps1', 'new-viewer-pairing.ps1', 'new-agent-certificate.ps1', 'diagnose-agent.ps1')
-$viewerScripts = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1', 'pair-viewer.ps1')
+    'set-viewer-access.ps1', 'diagnose-agent.ps1')
+$viewerScripts = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1')
 foreach ($script in $agentScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $agentOut }
 foreach ($script in $viewerScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $viewerOut }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $agentOut

@@ -17,7 +17,6 @@ public static class AgentApiRoutes
     public static string EventChangesV3(long cursor, int limit) =>
         $"/api/v3/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
     public const string CheckRunsV3 = "/api/v3/check-runs";
-    public const string CertificateStatus = "/api/v1/certificate/fingerprint";
     public static string Command(string deviceId, string commandId) =>
         $"/api/v1/commands/{Uri.EscapeDataString(deviceId)}/{Uri.EscapeDataString(commandId)}";
     public static string Acknowledge(string eventId) => $"/api/v1/events/{Uri.EscapeDataString(eventId)}/ack";
@@ -124,7 +123,6 @@ public static class AgentContractMapper
         var realtimeChannel = ObjectValue(channels, "realtime");
         var readiness = ObjectValue(channels, "readiness");
         var storage = ObjectValue(channels, "storage");
-        var certificate = ObjectValue(channels, "certificate");
         var agentStatus = StringValue(agentChannel, "status") ?? "unknown";
         var apiStatus = StringValue(apiChannel, "status") ?? "unknown";
         var realtimeStatus = StringValue(realtimeChannel, "status") ?? "unknown";
@@ -145,8 +143,6 @@ public static class AgentContractMapper
         var storageReady = BoolValue(storage, "ready");
         var storageCode = StringValue(storage, "errorCode");
         var storageSchemaVersion = IntValue(storage, "schemaVersion");
-        var certificateStatus = StringValue(certificate, "state") ?? "unknown";
-        var certificateExpiresAt = DateTimeValue(certificate, "notAfterUtc");
         var mappedDevices = new List<DeviceSnapshotDto>();
         if (root.TryGetProperty("devices", out var devices) && devices.ValueKind == JsonValueKind.Array)
         {
@@ -169,9 +165,7 @@ public static class AgentContractMapper
             maxConcurrentDevices,
             storageReady,
             storageCode,
-            storageSchemaVersion,
-            certificateStatus,
-            certificateExpiresAt);
+            storageSchemaVersion);
         return new AgentSnapshotDto(
             generatedAt,
             state,
@@ -187,47 +181,8 @@ public static class AgentContractMapper
             agentStatus,
             apiStatus,
             realtimeStatus,
-            certificateStatus,
-            certificateExpiresAt,
             operational,
             MaxConcurrentDevices: Math.Max(1, maxConcurrentDevices));
-    }
-
-    public static AgentSnapshotDto WithCertificateStatus(AgentSnapshotDto snapshot, string certificateJson)
-    {
-        using var document = JsonDocument.Parse(certificateJson);
-        var root = document.RootElement;
-        var enabled = BoolValue(root, "httpsEnabled") ?? false;
-        var state = StringValue(root, "state") ?? (enabled ? "unknown" : "disabled");
-        var expiresAt = DateTimeValue(root, "notAfterUtc");
-        var statuses = (snapshot.OperationalStatuses ?? []).ToList();
-        statuses.RemoveAll(item => item.Code.StartsWith("CERT_", StringComparison.Ordinal));
-        var health = state.ToUpperInvariant() switch
-        {
-            "EXPIRED" or "UNAVAILABLE" => DeviceHealth.Critical,
-            "EXPIRING" => DeviceHealth.Warning,
-            "ACTIVE" or "VALID" => DeviceHealth.Normal,
-            _ when enabled => DeviceHealth.Normal,
-            _ => DeviceHealth.Warning
-        };
-        var code = state.ToUpperInvariant() switch
-        {
-            "EXPIRED" => "CERT_EXPIRED",
-            "EXPIRING" => "CERT_EXPIRING",
-            "UNAVAILABLE" => "CERT_UNAVAILABLE",
-            _ when enabled => "CERT_VALID",
-            _ => "CERT_DISABLED"
-        };
-        var detail = expiresAt is null
-            ? $"HTTPS 인증서 상태 {state}"
-            : $"HTTPS 인증서 상태 {state} · 만료 {expiresAt.Value.LocalDateTime:yyyy-MM-dd}";
-        statuses.Add(new OperationalStatusDto(code, "HTTPS 인증서", detail, health));
-        return snapshot with
-        {
-            CertificateStatus = state,
-            CertificateExpiresAt = expiresAt,
-            OperationalStatuses = statuses
-        };
     }
 
     private static IReadOnlyList<OperationalStatusDto> BuildOperationalStatuses(
@@ -239,17 +194,15 @@ public static class AgentContractMapper
         int maxConcurrentDevices,
         bool? storageReady = null,
         string? storageCode = null,
-        int? storageSchemaVersion = null,
-        string certificateStatus = "unknown",
-        DateTimeOffset? certificateExpiresAt = null)
+        int? storageSchemaVersion = null)
     {
         var statuses = new List<OperationalStatusDto>
         {
             new("AGENT_CHANNEL", "원격 수집기", $"Agent 채널 {agentStatus}",
-                state is AgentConnectionState.Offline or AgentConnectionState.NeedsPairing
+                state is AgentConnectionState.Offline or AgentConnectionState.NeedsConnection
                     ? DeviceHealth.Disconnected
                     : DeviceHealth.Normal),
-            new("API_CHANNEL", "HTTPS API", $"API 채널 {apiStatus}",
+            new("API_CHANNEL", "HTTP API", $"API 채널 {apiStatus}",
                 apiStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
                     ? DeviceHealth.Normal
                     : DeviceHealth.Critical),
@@ -259,7 +212,7 @@ public static class AgentContractMapper
                 "실시간 이벤트",
                 realtimeStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
                     ? "SignalR 실시간 채널 정상"
-                    : $"SignalR 채널 {realtimeStatus} · HTTPS 캐치업 유지",
+                    : $"SignalR 채널 {realtimeStatus} · HTTP 캐치업 유지",
                 realtimeStatus.Equals("available", StringComparison.OrdinalIgnoreCase)
                     ? DeviceHealth.Normal
                     : DeviceHealth.Warning),
@@ -275,24 +228,6 @@ public static class AgentContractMapper
                     ? $"Readiness 정상 · 스키마 v{storageSchemaVersion?.ToString() ?? "-"}"
                     : $"Liveness 유지 · Readiness 실패 · {storageCode ?? "STORAGE_WRITE_FAILED"}",
                 storageReady.Value ? DeviceHealth.Normal : DeviceHealth.Critical));
-        }
-
-        if (!certificateStatus.Equals("unknown", StringComparison.OrdinalIgnoreCase))
-        {
-            var certificateHealth = certificateStatus.ToUpperInvariant() switch
-            {
-                "EXPIRED" or "UNAVAILABLE" => DeviceHealth.Critical,
-                "EXPIRING" => DeviceHealth.Warning,
-                _ => DeviceHealth.Normal
-            };
-            statuses.Add(new OperationalStatusDto(
-                certificateHealth == DeviceHealth.Critical ? "CERT_UNAVAILABLE"
-                    : certificateHealth == DeviceHealth.Warning ? "CERT_EXPIRING" : "CERT_VALID",
-                "HTTPS 인증서",
-                certificateExpiresAt is null
-                    ? $"인증서 상태 {certificateStatus}"
-                    : $"인증서 상태 {certificateStatus} · 만료 {certificateExpiresAt.Value.LocalDateTime:yyyy-MM-dd}",
-                certificateHealth));
         }
 
         if (!readinessCode.Equals("READY", StringComparison.OrdinalIgnoreCase)

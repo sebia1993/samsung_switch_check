@@ -83,7 +83,7 @@ public sealed class ViewerStabilityTests
 
     [Theory]
     [InlineData(AgentConnectionState.Offline, TrayIndicator.Offline, "오프라인")]
-    [InlineData(AgentConnectionState.NeedsPairing, TrayIndicator.NeedsPairing, "연결 설정")]
+    [InlineData(AgentConnectionState.NeedsConnection, TrayIndicator.NeedsConnection, "연결 설정")]
     [InlineData(AgentConnectionState.Stale, TrayIndicator.Warning, "미확인")]
     [InlineData(AgentConnectionState.Reconnecting, TrayIndicator.Warning, "재연결")]
     public void TrayProjection_ConnectionStateOverridesHealthyCachedDevices(
@@ -103,7 +103,7 @@ public sealed class ViewerStabilityTests
     }
 
     [Fact]
-    public void AgentClientErrors_ClassifiesPairingReadinessAndSafeServerCodes()
+    public void AgentClientErrors_ClassifiesAccessReadinessAndSafeServerCodes()
     {
         var unauthorized = AgentClientErrors.FromStatus(HttpStatusCode.Unauthorized, "secret response");
         var forbidden = AgentClientErrors.FromStatus(HttpStatusCode.Forbidden);
@@ -112,8 +112,8 @@ public sealed class ViewerStabilityTests
         var unsafeCode = AgentClientErrors.FromStatus(HttpStatusCode.ServiceUnavailable,
             """{"error":{"code":"unsafe secret value"}}""");
 
-        Assert.Equal("VIEWER_PAIRING_REQUIRED", unauthorized.ErrorCode);
-        Assert.Equal(AgentConnectionState.NeedsPairing, forbidden.SuggestedConnectionState);
+        Assert.Equal("AGENT_ACCESS_DENIED", unauthorized.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, forbidden.SuggestedConnectionState);
         Assert.Equal("AGENT_DB_INTEGRITY_FAILED", unavailable.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, unavailable.SuggestedConnectionState);
         Assert.Equal("AGENT_NOT_READY", unsafeCode.ErrorCode);
@@ -121,9 +121,10 @@ public sealed class ViewerStabilityTests
     }
 
     [Fact]
-    public void AgentClientErrors_ClassifiesPinDnsRefusedTimeoutAndInvalidJsonWithoutRawMessage()
+    public void AgentClientErrors_ClassifiesProtocolDnsRefusedTimeoutAndInvalidJsonWithoutRawMessage()
     {
-        var pin = AgentClientErrors.Translate(new HttpRequestException("raw certificate data"), true);
+        var protocol = AgentClientErrors.Translate(new HttpRequestException(
+            HttpRequestError.SecureConnectionError, "raw protocol", null, null));
         var dns = AgentClientErrors.Translate(new HttpRequestException(
             HttpRequestError.NameResolutionError, "raw host", null, null));
         var refused = AgentClientErrors.Translate(new HttpRequestException(
@@ -133,13 +134,13 @@ public sealed class ViewerStabilityTests
         var timeout = AgentClientErrors.Translate(new TaskCanceledException("raw timeout"));
         var invalidJson = AgentClientErrors.Translate(new JsonException("raw response"));
 
-        Assert.Equal("TLS_PIN_MISMATCH", pin.ErrorCode);
+        Assert.Equal("AGENT_PROTOCOL_MISMATCH", protocol.ErrorCode);
         Assert.Equal("AGENT_DNS_FAILED", dns.ErrorCode);
         Assert.Equal("AGENT_CONNECTION_REFUSED", refused.ErrorCode);
-        Assert.Equal("VIEWER_PAIRING_REQUIRED", authentication.ErrorCode);
+        Assert.Equal("AGENT_ACCESS_DENIED", authentication.ErrorCode);
         Assert.Equal("AGENT_TIMEOUT", timeout.ErrorCode);
         Assert.Equal("AGENT_RESPONSE_INVALID", invalidJson.ErrorCode);
-        Assert.All(new[] { pin, dns, refused, authentication, timeout, invalidJson }, error =>
+        Assert.All(new[] { protocol, dns, refused, authentication, timeout, invalidJson }, error =>
             Assert.DoesNotContain("raw", error.Message, StringComparison.OrdinalIgnoreCase));
     }
 

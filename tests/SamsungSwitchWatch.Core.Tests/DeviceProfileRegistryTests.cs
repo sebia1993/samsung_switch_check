@@ -54,7 +54,7 @@ public sealed class DeviceProfileRegistryTests
                 ["show port status", "show interfaces status"],
                 profile.GetRequiredCommand(CommandIds.InterfaceStatus).CandidateCommands);
             Assert.Equal(
-                ["show syslog tail num 100", "show log ram"],
+                ["show syslog tail num 100", "show sylog tail num 100", "show log ram"],
                 profile.GetRequiredCommand(CommandIds.LogRam).CandidateCommands);
         }
     }

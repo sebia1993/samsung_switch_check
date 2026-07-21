@@ -146,7 +146,7 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public async Task VersionOneDatabaseIsBackedUpMigratedToVersionFourAndLegacyRawIsPurged()
+    public async Task VersionOneDatabaseIsBackedUpMigratedToVersionFiveAndLegacyRawIsPurged()
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-MigrationTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -188,7 +188,7 @@ public sealed class PersistenceTests
             var page = await store.GetEventChangesAsync(0);
 
             Assert.True(readiness.Ready);
-            Assert.Equal(4, readiness.SchemaVersion);
+            Assert.Equal(5, readiness.SchemaVersion);
             var backupPath = Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v1-*.bak"));
             await using (var current = new SqliteConnection($"Data Source={path}"))
             {
@@ -309,7 +309,7 @@ public sealed class PersistenceTests
                 NullLogger<SqliteAgentStore>.Instance);
             await store.InitializeAsync();
 
-            Assert.Equal(4, (await store.CheckReadinessAsync()).SchemaVersion);
+            Assert.Equal(5, (await store.CheckReadinessAsync()).SchemaVersion);
             var backupPath = Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v3-*.bak"));
             await using (var current = new SqliteConnection($"Data Source={path}"))
             {
@@ -335,6 +335,98 @@ public sealed class PersistenceTests
                 Assert.DoesNotContain("schema3 plaintext evidence",
                     System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(candidate)),
                     StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+                // Best-effort temporary cleanup on Windows.
+            }
+        }
+    }
+
+    [Fact]
+    public async Task VersionFourMigrationBacksUpThenDropsAuthTablesAndPreservesMonitoringData()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-V4MigrationTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var options = new AgentOptions { DataDirectory = folder };
+        var path = options.DatabasePath;
+        var credentialPath = Path.Combine(folder, "credentials", "readonly.bin");
+        try
+        {
+            var seed = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
+            await seed.InitializeAsync();
+            var now = DateTimeOffset.UtcNow;
+            await seed.UpsertSnapshotAsync(new DeviceSnapshot("TEST-SW-01", "system", now,
+                new System.Text.Json.Nodes.JsonObject { ["uptime"] = "12 days" }));
+            await seed.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Warning,
+                "migration-fixture", "Migration fixture", "Sanitized", EventState.New, "migration:fixture"));
+            await seed.InsertAuditAsync(new AuditEntry(now, "migration-fixture", "test", "TEST-SW-01",
+                "success", "Sanitized"));
+            await seed.InsertRawBytesAsync("TEST-SW-01", "system", now, "protected fixture"u8.ToArray());
+            Directory.CreateDirectory(Path.GetDirectoryName(credentialPath)!);
+            var credentialEnvelope = "synthetic-dpapi-envelope"u8.ToArray();
+            await File.WriteAllBytesAsync(credentialPath, credentialEnvelope);
+
+            await using (var connection = new SqliteConnection($"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    DELETE FROM schema_migrations WHERE version=5;
+                    CREATE TABLE pairing_codes (
+                        code_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
+                        expires_utc TEXT NOT NULL, used_utc TEXT NULL);
+                    CREATE TABLE api_tokens (
+                        token_hash TEXT PRIMARY KEY, created_utc TEXT NOT NULL,
+                        last_used_utc TEXT NULL, revoked_utc TEXT NULL);
+                    INSERT INTO pairing_codes VALUES('PAIRING_HASH', '2026-01-01', '2026-01-02', NULL);
+                    INSERT INTO api_tokens VALUES('TOKEN_HASH', '2026-01-01', NULL, NULL);
+                    """;
+                await command.ExecuteNonQueryAsync();
+            }
+            SqliteConnection.ClearAllPools();
+
+            var migrated = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
+            await migrated.InitializeAsync();
+
+            Assert.Equal(5, (await migrated.CheckReadinessAsync()).SchemaVersion);
+            Assert.NotNull(await migrated.GetSnapshotAsync("TEST-SW-01", "system"));
+            Assert.Single(await migrated.GetEventsAfterAsync(0));
+            var counts = await migrated.GetCountsAsync();
+            Assert.Equal(1, counts.RawCount);
+            Assert.Equal(1, counts.EventCount);
+            Assert.Equal(1, counts.AuditCount);
+            Assert.Equal(credentialEnvelope, await File.ReadAllBytesAsync(credentialPath));
+
+            var backupPath = Assert.Single(Directory.GetFiles(folder, "switchwatch.db.schema-v4-*.bak"));
+            await using (var current = new SqliteConnection($"Data Source={path}"))
+            {
+                await current.OpenAsync();
+                await using var command = current.CreateCommand();
+                command.CommandText = """
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type='table' AND name IN ('pairing_codes', 'api_tokens');
+                    """;
+                Assert.Equal(0L, Convert.ToInt64(await command.ExecuteScalarAsync()));
+            }
+            await using (var backup = new SqliteConnection($"Data Source={backupPath}"))
+            {
+                await backup.OpenAsync();
+                await using var command = backup.CreateCommand();
+                command.CommandText = """
+                    SELECT COUNT(*) FROM sqlite_master
+                    WHERE type='table' AND name IN ('pairing_codes', 'api_tokens');
+                    """;
+                Assert.Equal(2L, Convert.ToInt64(await command.ExecuteScalarAsync()));
             }
         }
         finally
@@ -404,7 +496,7 @@ public sealed class PersistenceTests
             {
                 var readiness = await store.CheckReadinessAsync();
                 Assert.True(readiness.Ready);
-                Assert.Equal(4, readiness.SchemaVersion);
+                Assert.Equal(5, readiness.SchemaVersion);
             }
             Assert.Equal(initialCheck, store.LastIntegrityCheckUtc);
 
@@ -412,7 +504,7 @@ public sealed class PersistenceTests
             {
                 await connection.OpenAsync();
                 await using var command = connection.CreateCommand();
-                command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
+                command.CommandText = "DELETE FROM schema_migrations WHERE version=5;";
                 Assert.Equal(1, await command.ExecuteNonQueryAsync());
             }
 
@@ -425,7 +517,7 @@ public sealed class PersistenceTests
             var refreshed = await store.CheckReadinessAsync();
             Assert.False(refreshed.Ready);
             Assert.Equal(AgentErrorCodes.StorageWriteFailed, refreshed.ErrorCode);
-            Assert.Equal(3, refreshed.SchemaVersion);
+            Assert.Equal(4, refreshed.SchemaVersion);
             Assert.True(store.LastIntegrityCheckUtc > initialCheck);
 
             var writeFailure = await Assert.ThrowsAsync<AgentOperationException>(() =>
@@ -739,36 +831,52 @@ public sealed class PersistenceTests
     }
 
     [Fact]
-    public void ProductionConfigurationRejectsPlaceholderTokenPepper()
+    public void ProductionConfigurationAcceptsHttpWithoutCertificateOrApplicationToken()
     {
         var options = new AgentOptions
         {
             MockMode = false,
             DataDirectory = Path.GetTempPath(),
-            TokenPepper = "replace-with-a-long-random-local-value",
-            Https = new HttpsOptions { Enabled = true, CertificatePath = "missing.pfx" },
+            ListenUrl = "http://0.0.0.0:18443",
             Switches = [new SwitchOptions()]
         };
 
-        var exception = Assert.Throws<AgentConfigurationException>(() =>
-            AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath()));
-        Assert.Contains("TokenPepper", exception.Message, StringComparison.Ordinal);
+        AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath());
+
+        Assert.Equal("http://0.0.0.0:18443", options.ListenUrl);
     }
 
     [Fact]
-    public void ProductionConfigurationRejectsMissingHttpsCertificateEarly()
+    public void ConfigurationRejectsHttpsListenUrl()
     {
         var options = new AgentOptions
         {
             MockMode = false,
             DataDirectory = Path.GetTempPath(),
-            TokenPepper = "A-unique-production-pepper-that-is-longer-than-32-characters",
-            Https = new HttpsOptions { Enabled = true, CertificatePath = $"missing-{Guid.NewGuid():N}.pfx" },
+            ListenUrl = "https://0.0.0.0:18443",
             Switches = [new SwitchOptions()]
         };
 
         var exception = Assert.Throws<AgentConfigurationException>(() =>
             AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath()));
-        Assert.Contains("certificate", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("HTTP", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProductionConfigurationRejectsEphemeralListenPort()
+    {
+        var options = new AgentOptions
+        {
+            MockMode = false,
+            DataDirectory = Path.GetTempPath(),
+            ListenUrl = "http://127.0.0.1:0",
+            Switches = [new SwitchOptions()]
+        };
+
+        var exception = Assert.Throws<AgentConfigurationException>(() =>
+            AgentOptionsValidator.ValidateAndNormalize(options, Path.GetTempPath()));
+
+        Assert.Equal("CONFIG_INVALID", exception.Code);
+        Assert.Contains("HTTP", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 }

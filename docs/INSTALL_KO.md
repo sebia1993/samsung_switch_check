@@ -1,60 +1,56 @@
 # Samsung Switch Watch 설치 안내
 
-## 1. 배포 파일 검증
+## 1. 배포 파일
 
-공식 GitHub `v0.5.1-poc` Release의 사용자 정의 Assets에서 Agent·Viewer ZIP 두 개만
-같은 폴더에 내려받습니다. GitHub가 자동 표시하는 소스 코드 ZIP·tar.gz는 설치 파일이
-아닙니다.
+공식 GitHub `v0.6.0-poc` Release의 사용자 정의 Assets에서 아래 ZIP 두 개만 받습니다.
+GitHub가 자동 표시하는 소스 코드 ZIP·tar.gz는 설치 파일이 아닙니다.
+
+- `SamsungSwitchWatch-Agent-0.6.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.6.0-poc-win-x64.zip`
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.5.1-poc'
+$tag = 'v0.6.0-poc'
 $releaseFiles = @(
-  'SamsungSwitchWatch-Agent-0.5.1-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.5.1-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.6.0-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.6.0-poc-win-x64.zip'
 )
 
 $tagRef = gh api "repos/$repo/git/ref/tags/$tag" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -ne 'tag') { throw '검증된 annotated tag를 찾지 못했습니다.' }
 $tagObject = gh api "repos/$repo/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $tagObject.object.type -ne 'commit') { throw '릴리스 소스 커밋을 확인하지 못했습니다.' }
 $sourceCommit = [string]$tagObject.object.sha
-
 gh release verify $tag --repo $repo
-if ($LASTEXITCODE -ne 0) { throw 'GitHub release attestation 불일치' }
 foreach ($name in $releaseFiles) {
-  if (-not (Test-Path -LiteralPath ".\$name" -PathType Leaf)) { throw "릴리스 ZIP이 없습니다: $name" }
-  Get-FileHash -LiteralPath ".\$name" -Algorithm SHA256
   gh attestation verify ".\$name" --repo $repo `
     --signer-workflow "$repo/.github/workflows/release.yml" `
     --source-digest $sourceCommit --source-ref "refs/tags/$tag" `
     --deny-self-hosted-runners
-  if ($LASTEXITCODE -ne 0) { throw "GitHub build provenance 불일치: $name" }
   gh release verify-asset $tag ".\$name" --repo $repo
-  if ($LASTEXITCODE -ne 0) { throw "GitHub release attestation 불일치: $name" }
+  if ($LASTEXITCODE -ne 0) { throw "릴리스 검증 실패: $name" }
 }
 ```
 
-위 명령은 GitHub CLI 2.95 이상에서 실행합니다. release attestation 또는 provenance가
-일치하지 않으면 설치하지 마십시오. 각 ZIP에는 해당 패키지의 `BUILD-MANIFEST.json`과
-SPDX/CycloneDX SBOM이 들어 있습니다. ZIP은 최종 설치 폴더 바깥의 임시 폴더에 각각
-압축 해제합니다.
+각 ZIP에는 패키지 `BUILD-MANIFEST.json`과 SPDX/CycloneDX SBOM이 들어 있습니다.
 
-## 2. Agent PC 준비
+## 2. 보안 전제
 
-Agent PC는 다음 조건을 충족해야 합니다.
+Agent–Viewer 통신은 `HTTP/18443`이며 암호화와 사용자 인증이 없습니다. 설치기가 만든
+Windows 방화벽의 **고정 Viewer IPv4 허용 목록이 유일한 Agent API 접근 통제**입니다.
+인터넷, 일반 사용자 VLAN, 공용 Wi-Fi 또는 신뢰하지 않는 중계망을 통과시키지 마십시오.
+설치 전 Windows Defender Firewall 서비스와 Domain/Private/Public 프로필을 모두 켜고,
+각 프로필의 기본 인바운드 정책을 차단 상태로 유지하십시오. TCP/18443과 겹치는 별도
+인바운드 Allow 규칙이 있으면 설치기가 안전을 위해 중단합니다.
 
-- Windows x64, 관리자 PowerShell 사용 가능
-- 스위치 관리 IPv4로 TCP/23 접근 가능
-- Viewer PC에서 Agent TCP/18443 접근 가능
-- 스위치와 같은 격리 관리망 또는 승인된 관리 경로
-- 읽기 전용 Telnet 계정과 중요 업링크 포트 식별값 준비
+준비할 값:
 
-실제 비밀번호를 JSON·명령줄·문서에 기록하지 마십시오.
+- Agent PC에서 접근 가능한 스위치 관리 IPv4와 읽기 전용 Telnet 계정
+- Viewer PC마다 변경되지 않는 고정 IPv4 주소(최대 32개)
+- Viewer에서 접근할 Agent IPv4 또는 DNS 이름
 
 ## 3. Agent 설치
 
-먼저 변경 없는 사전 검사를 실행합니다.
+관리자 PowerShell에서 먼저 시스템을 바꾸지 않는 사전 검사를 실행합니다.
 
 ```powershell
 .\install-agent.ps1 `
@@ -66,161 +62,129 @@ Agent PC는 다음 조건을 충족해야 합니다.
   -Preflight
 ```
 
-위 명령은 문서용 주소를 쓰는 로컬 사전 점검 예시입니다. 실제 설치를 사전 점검할 때는
-`-MockMode`를 빼고 `-SwitchHost`와 `-ViewerRemoteAddress`를 회사망의 실제 값으로 바꾸십시오.
-
-검사가 통과하면 `-Preflight`를 빼고 설치합니다. 예시 주소는 실제 관리망 값으로 바꾸되
-외부 자료에 복사하지 마십시오.
-
-### 여러 스위치 등록
-
-[switches.example.json](examples/switches.example.json)을 회사 PC에서 복사한 다음, 모든
-`Host` 값을 실제 스위치 관리 IPv4 주소로 바꾸고 실행합니다. 예제의 `192.0.2.0/24`는
-문서 전용 주소이므로 실환경 설치기가 의도적으로 거부합니다. 파일에는 비밀번호를 넣지
-않습니다. 배포용 Agent ZIP에서는 같은 예제가 ZIP 루트의 `switches.example.json`으로
-포함됩니다.
+실제 설치에서는 `-MockMode`를 빼고 문서용 주소를 회사망의 실제 값으로 바꿉니다.
+여러 Viewer를 허용할 때는 고정 IPv4를 쉼표로 나열합니다. CIDR·서브넷·DNS는 방화벽
+입력으로 허용하지 않습니다.
 
 ```powershell
 .\install-agent.ps1 `
   -SourceDirectory . `
   -SwitchesJsonPath C:\Temp\switches.json `
-  -ViewerRemoteAddress 192.0.2.50
+  -ViewerRemoteAddress 10.20.30.41,10.20.30.42
 ```
 
-Agent 한 대에 최대 256개 장비를 등록하며 `Id`는 대소문자 구분 없이 고유해야 합니다.
-지원 모델은 `IES4224GP`, `IES4028XP`, `IES4226XP`입니다.
+설치기는 표준 4-octet 십진 IPv4만 받아 중복 제거·정렬하고 정확히 1~32개만 받습니다.
+축약형, 16진수, 8진수로 해석될 수 있는 선행 0 표기는 거부합니다. `-SkipFirewall`은
+없습니다. Agent는 `http://0.0.0.0:18443`에서 수신하지만 Domain/Private 프로필의 허용
+Viewer 주소만 인바운드로 통과합니다.
 
-설치기는 다음 작업을 트랜잭션 형태로 수행합니다.
+[switches.example.json](examples/switches.example.json)에는 최대 256대의 등록 형식이 있습니다.
+비밀번호는 JSON에 넣지 않습니다.
 
-- 패키지 매니페스트와 EXE SHA-256 확인
-- 프로그램 staging·교체와 실패 시 rollback
-- SQLite DB와 `-wal`, `-shm` 일관 백업
-- LocalService 서비스와 데이터 ACL 설정
-- 가능한 경우 `LocalMachine\My` 비내보내기 인증서 생성
-- Viewer 단일 IPv4 범위의 소유된 방화벽 규칙 생성
-- 설치 receipt와 단계별 operation journal 저장
+## 4. 스위치 자격 증명
 
-## 4. 스위치 자격 증명 저장
-
-각 `CredentialId`마다 관리자 PowerShell에서 실행합니다. 비밀번호는 대화형으로 입력되어
-명령 기록에 남지 않습니다.
+각 `CredentialId`를 관리자 PowerShell에서 대화형으로 저장합니다.
 
 ```powershell
 .\set-switch-credential.ps1 `
   -CredentialId samsung-switch-readonly-01 `
   -Username monitor-readonly
-```
 
-등록되지 않은 CredentialId는 거부됩니다. 설정 뒤 Agent readiness와 진단을 확인합니다.
-
-```powershell
 .\diagnose-agent.ps1 -OutputPath C:\Temp\ssw-diagnostic.json
 ```
 
-진단 JSON은 원문과 실제 주소를 포함하지 않지만 외부 반출 전 회사 정책을 확인하십시오.
+비밀번호와 Telnet 원문은 Agent PC의 DPAPI·제한 ACL 경계 안에 남습니다.
 
-## 5. Viewer 설치와 페어링
+## 5. Viewer 설치와 연결
 
-운영자 PC의 일반 사용자 PowerShell에서 Viewer를 설치합니다.
+운영자 PC의 일반 사용자 PowerShell에서 설치합니다.
 
 ```powershell
 .\install-viewer.ps1 -SourceDirectory . -StartWithWindows -Preflight
 .\install-viewer.ps1 -SourceDirectory . -StartWithWindows
 ```
 
-Agent PC의 관리자 PowerShell에서 10분 동안 한 번만 쓸 수 있는 Viewer 연결 문자열을 만듭니다.
+Viewer의 **Agent 연결** 창에는 다음 두 값만 입력합니다.
+
+1. Agent 주소: Agent IPv4 또는 사내 DNS 이름
+2. 포트: 기본 `18443`
+
+인증서 SHA-256, 페어링 문자열, 페어링 코드, Bearer 토큰은 사용하지 않습니다. 주소 입력 후
+**연결 확인 및 저장**을 누릅니다. Viewer 설정의 기존 `https://` 주소는 v0.6 첫 실행에서 같은
+authority의 `http://` 주소로 전환되고, 구 fingerprint/token 필드는 다음 저장 때 제거됩니다.
+
+## 6. Viewer 고정 IPv4 변경
+
+Agent PC의 관리자 PowerShell에서 전체 허용 목록을 한 번에 교체합니다.
 
 ```powershell
-.\new-viewer-pairing.ps1
+.\set-viewer-access.ps1 `
+  -ViewerRemoteAddress 10.20.30.41,10.20.30.42 `
+  -Preflight
+
+.\set-viewer-access.ps1 `
+  -ViewerRemoteAddress 10.20.30.41,10.20.30.42
 ```
 
-활성 IPv4 주소가 여러 개면 Viewer에서 접근 가능한 주소를 번호로 선택합니다. 주소를 직접
-지정해야 하는 환경에서는 다음처럼 실행합니다.
+스크립트는 설치 설정의 `Agent.DataDirectory`를 기준으로 제품 소유 방화벽 규칙과 설치 receipt를
+함께 갱신합니다. 명시한 `-DataDirectory`가 설정과 다르거나 Agent ID·장비 인벤토리가 일치하지
+않으면 중단합니다. 검증이나 receipt 저장이 실패하면 이전 방화벽 범위로 되돌립니다.
 
-```powershell
-.\new-viewer-pairing.ps1 -AgentHost <Viewer에서-접근할-Agent-IP-또는-DNS>
-```
+## 7. v0.5.x에서 v0.6.0으로 복구 설치
 
-출력된 `SSW1:` 문자열 전체를 Viewer의 **Agent 연결** 창에 붙여 넣고 **연결 및 저장**을
-누릅니다. Viewer가 주소와 인증서 SHA-256을 확인한 뒤 일회용 코드를 최종 Bearer 토큰으로
-교환하고, 토큰은 현재 Windows 사용자 DPAPI로 즉시 보호합니다. 최종 토큰은 화면에 표시하지
-않습니다. 토큰 발급 뒤 네트워크 사전 점검이 일시적으로 실패해도 보호된 토큰과 열린 연결 창을
-유지하므로 같은 창에서 **연결 및 저장**을 다시 누릅니다. 새 연결 문자열을 만들 필요가 없습니다.
-연결 문자열은 코드 교환에 성공하면 다시 쓸 수 없으며, 교환 전 실패도 표시된 만료 시각이 지나면
-만료됩니다.
-
-클립보드 복사가 꼭 필요할 때만 `-CopyToClipboard`를 명시하십시오. 기본값은 화면 출력이며,
-문자열을 메신저나 파일에 저장하지 않습니다. 기존 `new-pairing-code.ps1`과 `pair-viewer.ps1`은
-복구용 고급 방식으로 남아 있지만 일반 설치에서는 사용할 필요가 없습니다.
-`new-viewer-pairing.ps1`은 실행 중인 Agent, 설치 영수증, 현재 인증서와 HTTPS listener를 서로
-대조하며 PFX 비밀번호를 읽거나 하위 프로세스에 전달하지 않습니다.
-
-## 6. 인증서 회전과 dual pin
-
-만료 경고가 60일 상태에 들어오면 회전을 계획합니다. Agent PC에서 새 인증서를 미리 만들고
-아직 활성화하지 않습니다.
-
-```powershell
-.\new-agent-certificate.ps1
-```
-
-출력된 새 store thumbprint와 SHA-256을 별도 경로로 확인합니다. 모든 Viewer 설정에 현재와
-새 SHA-256 pin을 최대 2개까지 등록해 연결을 확인한 다음 Agent를 전환합니다.
+Agent와 Viewer는 **Agent 먼저, Viewer 다음** 순서로 같은 작업 시간에 올립니다. v0.5 Viewer는
+v0.6 Agent와 호환되지 않습니다.
 
 ```powershell
 .\install-agent.ps1 `
   -SourceDirectory . `
-  -Repair -ReuseData -RotateCertificate `
-  -RotationCertificateThumbprint <새-40자리-store-thumbprint> `
-  -CertificateOverlapDays 7
+  -Repair -ReuseData `
+  -ViewerRemoteAddress 10.20.30.41,10.20.30.42
 ```
 
-새 인증서는 `LocalMachine\My`에 비내보내기 개인키로 생성되며 서비스 SID에만 개인키 읽기
-권한을 줍니다. 중첩 기간은 최대 14일입니다. 새 연결을 확인한 뒤 이전 pin을 Viewer에서
-제거하십시오.
-Agent 응답에 나온 pin을 자동 신뢰하지 말고 설치 콘솔의 지문을 별도 경로로 대조합니다.
+`-ViewerRemoteAddress`를 생략하면 유효한 v0.6 receipt 또는 기존 제품 소유 방화벽 규칙의
+주소를 가져옵니다. 명시 입력을 권장합니다.
 
-## 7. 복구 설치
+Repair는 프로그램을 staging한 뒤 DB·WAL/SHM·receipt·서비스 환경·방화벽을 백업합니다.
+기존 서비스가 중지 상태이거나 `-DoNotStart`여도 새 Agent를 임시 시작해 HTTP readiness와
+DB schema migration을 검증하고, 원래 중지 상태였으면 다시 중지합니다. 검증 성공 뒤에만
+구 인증서 환경 변수를 제거하고, receipt·설정의 thumbprint/SHA-256과 저장소 FriendlyName이
+모두 맞는 현재 및 rotation 이전 설치기 소유 인증서만 제거합니다. 사용자 소유 인증서는
+제거하지 않습니다. 인증서 정리 실패는 되돌릴 수 없는 키 삭제 뒤의 잘못된 rollback을 피하기
+위해 설치 성공을 유지하고 경고로 남깁니다. 그 밖의 검증 실패 시 프로그램, DB,
+receipt, 서비스 환경, 방화벽과 원래 서비스 상태를 복원합니다.
 
-프로그램 파일만 다시 배치하면서 DB·자격 증명·설정·인증서를 유지하려면 다음을 사용합니다.
-
-```powershell
-.\install-agent.ps1 -SourceDirectory . -Repair -ReuseData
-```
-
-`-ReuseData`는 이전 설치 receipt와 제품 경계를 확인하지 못하면 중단합니다. 실패하면 설치
-journal을 바탕으로 서비스, 프로그램, DB/WAL/SHM, 방화벽과 인증서를 이전 상태로 되돌립니다.
-
-Viewer 재설치도 staging, EXE smoke와 바로가기 rollback을 적용합니다.
+그 다음 Viewer ZIP에서 `install-viewer.ps1`을 실행합니다. 최초 연결 때 주소와 포트를 확인하십시오.
 
 ## 8. 제거
-
-기본 제거는 Agent 데이터를 보존합니다.
 
 ```powershell
 .\uninstall-agent.ps1
 .\uninstall-viewer.ps1
 ```
 
-Agent DB·자격 증명·receipt와 설치기가 소유한 인증서까지 제거하려면 명시적으로 실행합니다.
+기본 Agent 제거는 데이터와 자격 증명을 보존합니다. 완전 삭제는 명시적으로 실행합니다.
 
 ```powershell
 .\uninstall-agent.ps1 -RemoveData
 ```
 
-`-RemoveData`는 복구하기 어려운 작업입니다. 제품 receipt와 절대 경로가 정확한지 먼저
-확인하십시오. 설치기가 소유하지 않은 방화벽 규칙과 인증서는 제거하지 않습니다.
+제거기는 설치 설정의 사용자 지정 `Agent.DataDirectory`를 자동으로 따릅니다. 다른
+`-DataDirectory`를 명시하거나 설정·receipt로 정확한 설치 소유권을 확인할 수 없으면
+`-RemoveData`를 거부합니다. `-RemoveData`는 복구하기 어렵습니다. 제품 경계와 백업을 먼저
+확인하십시오. 유효한 v0.5 receipt가 남아 있으면 현재 및 rotation 이전 설치기 소유 인증서도
+엄격한 thumbprint·SHA-256·FriendlyName 확인 뒤 제거합니다.
 
 ## 9. 정상 확인
 
-- 서비스 `SamsungSwitchWatchAgent`가 실행 중
-- `https://<Agent>:18443/health/live` 응답
-- `/health/ready`가 `ready`, 또는 표시된 안정 오류 코드로 원인 구분
+- 서비스 `SamsungSwitchWatchAgent`가 의도한 실행/중지 상태
+- `http://<Agent>:18443/health/live` 응답
+- `/health/ready`가 ready 또는 원인을 나타내는 안정 오류 코드
+- Windows 방화벽 `Samsung Switch Watch Agent HTTP`의 RemoteAddress가 허용 Viewer와 정확히 일치
 - Viewer의 API 상태와 SignalR 상태가 별도로 정상
-- 세 모델별 capability가 실제 펌웨어에서 확인됨
-- RDP를 종료해도 Agent 점검 지속
-- Viewer 재연결 후 누락 이벤트가 catch-up 요약 1건으로 표시
+- RDP 종료 후에도 Agent 수집 지속
+- Viewer 재연결 뒤 누락 이벤트 catch-up
 
-`agentLive=OK`, `agentReady=AGENT_NOT_READY_503`이면 프로세스는 동작하지만 DB·인증서·
-자격 증명·스케줄러·필수 수집기 중 하나가 준비되지 않은 상태입니다. 모든 스위치를 Down으로
-판정하지 말고 readiness 코드와 마지막 정상 수신 시각을 확인하십시오.
+`agentLive=OK`, `agentReady=AGENT_NOT_READY_503`이면 프로세스는 동작하지만 DB·자격 증명·
+스케줄러·필수 수집기 중 하나가 준비되지 않은 상태입니다. 모든 스위치를 Down으로 판정하지
+말고 readiness 코드와 마지막 정상 수신 시각을 확인하십시오.

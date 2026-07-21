@@ -1,19 +1,17 @@
-using SamsungSwitchWatch.Viewer.Services;
 using System.IO;
+using SamsungSwitchWatch.Viewer.Services;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
 
 public sealed class ViewerSettingsTests
 {
     [Fact]
-    public void Sanitize_RemovesUnsafeUriPartsAndNormalizesFingerprint()
+    public void Sanitize_MigratesLegacyHttpsAndRemovesUnsafeUriParts()
     {
-        var fingerprint = string.Join(":", Enumerable.Repeat("ab", 32));
         var source = new ViewerSettings
         {
             DemoMode = false,
-            AgentUri = "https://user:secret@monitor.example.test:18443/path?token=leak#part",
-            CertificateFingerprint = fingerprint,
+            AgentUri = "https://user:secret@monitor.example.test:18443/path?value=leak#part",
             LastEventSequence = -50,
             MainWidth = 30,
             MainHeight = double.PositiveInfinity
@@ -21,8 +19,7 @@ public sealed class ViewerSettingsTests
 
         var clean = ViewerSettingsSanitizer.Sanitize(source);
 
-        Assert.Equal("https://monitor.example.test:18443", clean.AgentUri);
-        Assert.Equal(string.Concat(Enumerable.Repeat("AB", 32)), clean.CertificateFingerprint);
+        Assert.Equal("http://monitor.example.test:18443", clean.AgentUri);
         Assert.Equal(0, clean.LastEventSequence);
         Assert.Equal(1280, clean.MainWidth);
         Assert.Equal(900, clean.MainHeight);
@@ -30,73 +27,113 @@ public sealed class ViewerSettingsTests
     }
 
     [Theory]
-    [InlineData("http://monitor.example.test:18443")]
-    [InlineData("file:///c:/agent")]
-    [InlineData("not a uri")]
-    public void Sanitize_RejectsNonHttpsAgentUris(string input)
+    [InlineData("http://monitor.example.test:18443", "http://monitor.example.test:18443")]
+    [InlineData("https://192.0.2.10:18443", "http://192.0.2.10:18443")]
+    [InlineData("https://monitor.example.test", "http://monitor.example.test:443")]
+    public void Sanitize_AcceptsHttpAndMigratesHttps(string input, string expected)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings { AgentUri = input });
+
+        Assert.Equal(expected, clean.AgentUri);
+        Assert.True(ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason));
+        Assert.Empty(reason);
+    }
+
+    [Theory]
+    [InlineData("file:///c:/agent")]
+    [InlineData("not a uri")]
+    [InlineData("http://monitor.example.test:0")]
+    [InlineData("http://[::1]:18443")]
+    public void Sanitize_RejectsUnsupportedAgentUris(string input)
+    {
+        var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings { AgentUri = input });
+
         Assert.Empty(clean.AgentUri);
-        clean.BearerToken = "token";
-        clean.CertificateFingerprint = new string('A', 64);
         Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out _));
     }
 
-    [Fact]
-    public void LiveValidation_RequiresPinnedCertificateAndToken()
+    [Theory]
+    [InlineData("10.10.10.20", "18443", "http://10.10.10.20:18443")]
+    [InlineData("monitor-pc.corp.local", "18443", "http://monitor-pc.corp.local:18443")]
+    [InlineData("localhost", "80", "http://localhost")]
+    public void ConnectionInput_AcceptsIpv4OrDnsAndPort(string address, string port, string expected)
     {
-        var settings = new ViewerSettings
-        {
-            DemoMode = false,
-            AgentUri = "https://monitor.example.test:18443",
-            CertificateFingerprint = new string('A', 64),
-            BearerToken = "paired-token"
-        };
-
-        Assert.True(ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out var reason));
+        Assert.True(ViewerSettingsSanitizer.TryBuildAgentUri(address, port, out var uri, out var reason));
+        Assert.Equal(expected, uri);
         Assert.Empty(reason);
-
-        settings.BearerToken = string.Empty;
-        Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out reason));
-        Assert.Contains("토큰", reason);
     }
 
-    [Fact]
-    public void Store_DoesNotPersistTokenAsPlainText()
-    {
-        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-SettingsTests", Guid.NewGuid().ToString("N"));
-        var path = Path.Combine(folder, "viewer-settings.json");
-        try
-        {
-            var store = new ViewerSettingsStore(path);
-            store.Save(new ViewerSettings { BearerToken = "sensitive-pair-token" });
-
-            var json = File.ReadAllText(path);
-            Assert.DoesNotContain("sensitive-pair-token", json, StringComparison.Ordinal);
-            Assert.Equal("sensitive-pair-token", store.Load().BearerToken);
-        }
-        finally
-        {
-            if (Directory.Exists(folder)) Directory.Delete(folder, true);
-        }
-    }
+    [Theory]
+    [InlineData("http://monitor", "18443")]
+    [InlineData("::1", "18443")]
+    [InlineData("monitor pc", "18443")]
+    [InlineData("monitor", "0")]
+    [InlineData("monitor", "65536")]
+    [InlineData("monitor", "not-a-port")]
+    public void ConnectionInput_RejectsUnsupportedValues(string address, string port) =>
+        Assert.False(ViewerSettingsSanitizer.TryBuildAgentUri(address, port, out _, out _));
 
     [Fact]
-    public void EventCursor_IsScopedByAgentUriFingerprintAndAgentId()
+    public void EventCursor_IsScopedByAgentUriAndAgentId()
     {
-        var settings = new ViewerSettings
-        {
-            AgentUri = "https://agent-a.example.test:18443",
-            CertificateFingerprint = new string('A', 64)
-        };
+        var settings = new ViewerSettings { AgentUri = "http://agent-a.example.test:18443" };
         settings.SetEventCursor("agent-1", 42);
 
         Assert.True(settings.TryGetEventCursor("agent-1", out var cursor));
         Assert.Equal(42, cursor);
         Assert.False(settings.TryGetEventCursor("agent-2", out _));
 
-        settings.AgentUri = "https://agent-b.example.test:18443";
+        settings.AgentUri = "http://agent-b.example.test:18443";
         Assert.False(settings.TryGetEventCursor("agent-1", out _));
+    }
+
+    [Fact]
+    public void Store_MigratesLegacyConnectionDropsSecurityFieldsAndPreservesViewerState()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-SettingsTests", Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(folder, "viewer-settings.json");
+        try
+        {
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(path, """
+            {
+              "DemoMode": false,
+              "AgentUri": "https://agent.example.test:18443",
+              "CertificateFingerprint": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+              "CertificateFingerprints": ["BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"],
+              "ProtectedBearerToken": "dpapi:not-base64",
+              "EventCursors": {"LEGACY-PIN-IDENTITY": 77},
+              "MiniTopmost": false,
+              "MainWidth": 1600,
+              "MainHeight": 920,
+              "StartMinimizedToTray": true
+            }
+            """);
+            var store = new ViewerSettingsStore(path);
+
+            var loaded = store.Load();
+
+            Assert.Equal(ViewerSettingsLoadStatus.Ok, store.LastLoadStatus);
+            Assert.False(loaded.DemoMode);
+            Assert.Equal("http://agent.example.test:18443", loaded.AgentUri);
+            Assert.False(loaded.MiniTopmost);
+            Assert.Equal(1600, loaded.MainWidth);
+            Assert.Equal(920, loaded.MainHeight);
+            Assert.True(loaded.StartMinimizedToTray);
+            Assert.Equal(77, loaded.EventCursors["LEGACY-PIN-IDENTITY"]);
+
+            var migratedJson = File.ReadAllText(path);
+            Assert.DoesNotContain("https://", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Certificate", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Fingerprint", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Bearer", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Token", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("LEGACY-PIN-IDENTITY", migratedJson, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
     }
 
     [Fact]
@@ -124,41 +161,15 @@ public sealed class ViewerSettingsTests
     }
 
     [Fact]
-    public void Store_InvalidProtectedTokenRequiresPairingWithoutDestroyingConnectionSettings()
-    {
-        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-SettingsTests", Guid.NewGuid().ToString("N"));
-        var path = Path.Combine(folder, "viewer-settings.json");
-        try
-        {
-            Directory.CreateDirectory(folder);
-            File.WriteAllText(path, """
-            {"DemoMode":false,"AgentUri":"https://agent.example.test:18443","CertificateFingerprint":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","ProtectedBearerToken":"dpapi:not-base64"}
-            """);
-            var store = new ViewerSettingsStore(path);
-
-            var loaded = store.Load();
-
-            Assert.Equal(ViewerSettingsLoadStatus.NeedsPairing, store.LastLoadStatus);
-            Assert.False(loaded.DemoMode);
-            Assert.Equal("https://agent.example.test:18443", loaded.AgentUri);
-            Assert.Empty(loaded.BearerToken);
-        }
-        finally
-        {
-            if (Directory.Exists(folder)) Directory.Delete(folder, true);
-        }
-    }
-
-    [Fact]
-    public void StartupWindowPolicy_HonorsTrayStartUnlessPairingNeedsAttention()
+    public void StartupWindowPolicy_HonorsTrayStartUnlessConnectionNeedsAttention()
     {
         var settings = new ViewerSettings { StartMinimizedToTray = true };
 
-        Assert.False(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: false));
-        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: true));
+        Assert.False(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: false));
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: true));
 
         settings.StartMinimizedToTray = false;
-        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing: false));
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: false));
     }
 
     [Fact]

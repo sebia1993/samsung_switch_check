@@ -10,36 +10,6 @@ namespace SamsungSwitchWatch.Viewer.Tests;
 public sealed class ViewerV04Tests
 {
     [Fact]
-    public void CertificatePins_AcceptCurrentAndPlannedPinsWithoutTrustingThirdValue()
-    {
-        var current = new string('A', 64);
-        var planned = new string('B', 64);
-
-        Assert.True(ViewerSettingsSanitizer.TryParseFingerprintInput(
-            $"{current}\r\n{planned},{current.ToLowerInvariant()}", out var pins, out var reason));
-        Assert.Empty(reason);
-        Assert.Equal([current, planned], pins);
-
-        var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings
-        {
-            CertificateFingerprint = current,
-            CertificateFingerprints = [planned, current]
-        });
-        Assert.Equal(current, clean.CertificateFingerprint);
-        Assert.Equal([current, planned], clean.AcceptedCertificateFingerprints);
-
-        Assert.False(ViewerSettingsSanitizer.TryParseFingerprintInput(
-            $"{current},{planned},{new string('C', 64)}", out _, out reason));
-        Assert.Contains("최대 2개", reason, StringComparison.Ordinal);
-
-        var actual = Convert.FromHexString(planned);
-        Assert.True(CertificatePinMatcher.Matches(actual, clean.AcceptedCertificateFingerprints
-            .Select(Convert.FromHexString).ToArray()));
-        Assert.False(CertificatePinMatcher.Matches(Convert.FromHexString(new string('D', 64)),
-            clean.AcceptedCertificateFingerprints.Select(Convert.FromHexString).ToArray()));
-    }
-
-    [Fact]
     public void MapSnapshotV3_UsesAuthoritativeCountsAndSeparatesOperationalChannels()
     {
         const string json = """
@@ -54,8 +24,7 @@ public sealed class ViewerV04Tests
             "api":{"status":"available","version":3},
             "realtime":{"status":"available","meaning":"agent-endpoint-available"},
             "readiness":{"status":"not-ready","code":"STORAGE_WRITE_FAILED","schemaVersion":3},
-            "storage":{"ready":false,"errorCode":"STORAGE_WRITE_FAILED","schemaVersion":3},
-            "certificate":{"state":"expiring","notAfterUtc":"2026-08-01T00:00:00Z","daysRemaining":11}
+            "storage":{"ready":false,"errorCode":"STORAGE_WRITE_FAILED","schemaVersion":3}
           },
           "devices":[{
             "id":"SW-02","displayName":"ACCESS-SW-02","model":"IES4028XP","uplinkPort":"25",
@@ -85,7 +54,8 @@ public sealed class ViewerV04Tests
         Assert.Contains("대체 명령", fallback.StateText, StringComparison.Ordinal);
         Assert.Equal(DeviceHealth.Warning, device.Health);
         Assert.Contains(snapshot.OperationalStatuses!, item => item.Code == "DB_INTEGRITY_FAILED");
-        Assert.Contains(snapshot.OperationalStatuses!, item => item.Code == "CERT_EXPIRING");
+        Assert.Contains(snapshot.OperationalStatuses!, item => item.Code == "API_CHANNEL" && item.Title == "HTTP API");
+        Assert.DoesNotContain(snapshot.OperationalStatuses!, item => item.Code.StartsWith("CERT_", StringComparison.Ordinal));
     }
 
     [Theory]

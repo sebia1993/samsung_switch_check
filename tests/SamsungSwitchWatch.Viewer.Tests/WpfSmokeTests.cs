@@ -28,6 +28,15 @@ public sealed class WpfSmokeTests
                 Assert.Equal(1280, window.MinWidth);
                 Assert.Equal(720, window.MinHeight);
                 Assert.True(window.IsVisible);
+                var connection = new ConnectionSettingsWindow(
+                    new ViewerSettings { DemoMode = false, AgentUri = "http://monitor-pc:18443" },
+                    (_, _) => Task.CompletedTask);
+                connection.Show();
+                connection.UpdateLayout();
+                Assert.Equal("monitor-pc", connection.AgentAddressTextBox.Text);
+                Assert.Equal("18443", connection.AgentPortTextBox.Text);
+                Assert.Equal("사내 관리망 전용 · 암호화/인증 없음", connection.TransportWarningText.Text);
+                connection.Close();
                 var mini = new MiniWindow(viewModel, true);
                 mini.Show();
                 mini.UpdateLayout();

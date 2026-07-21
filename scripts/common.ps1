@@ -272,29 +272,17 @@ function Invoke-SswLocalHealthProbe {
     )
 
     Add-Type -AssemblyName System.Net.Http
-    if (-not ('SswLocalHealthHttpHandler' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System.Net.Http;
-public sealed class SswLocalHealthHttpHandler : HttpClientHandler
-{
-    public SswLocalHealthHttpHandler()
-    {
-        ServerCertificateCustomValidationCallback = (request, certificate, chain, errors) => true;
-    }
-}
-'@ -ReferencedAssemblies 'System.Net.Http.dll'
-    }
-
-    $handler = New-Object SswLocalHealthHttpHandler
+    $handler = New-Object Net.Http.HttpClientHandler
+    $handler.UseProxy = $false
     $client = New-Object Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(3)
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
-    $lastStatus = 'AGENT_HTTPS_UNREACHABLE'
+    $lastStatus = 'AGENT_HTTP_UNREACHABLE'
     try {
         do {
             $response = $null
             try {
-                $response = $client.GetAsync("https://127.0.0.1:$Port/health/ready").GetAwaiter().GetResult()
+                $response = $client.GetAsync("http://127.0.0.1:$Port/health/ready").GetAwaiter().GetResult()
                 if ($response.IsSuccessStatusCode) { return 'READY' }
                 try {
                     $readinessBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
@@ -340,42 +328,6 @@ function Set-SswInstallerBackupAcl {
             $sid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow)))
     }
     Set-Acl -LiteralPath $resolved -AclObject $acl
-}
-
-function Grant-SswCertificatePrivateKeyRead {
-    param(
-        [Parameter(Mandatory = $true)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
-        [Parameter(Mandatory = $true)][string]$ServiceSid
-    )
-
-    $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($Certificate)
-    if (-not $rsa) { throw 'HTTPS 인증서의 RSA 개인 키를 찾지 못했습니다.' }
-    try {
-        $keyPath = $null
-        if ($rsa -is [Security.Cryptography.RSACng]) {
-            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$($rsa.Key.UniqueName)"
-        }
-        elseif ($rsa -is [Security.Cryptography.RSACryptoServiceProvider]) {
-            $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\RSA\MachineKeys\$($rsa.CspKeyContainerInfo.UniqueKeyContainerName)"
-        }
-        if ([string]::IsNullOrWhiteSpace($keyPath) -or -not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
-            throw 'HTTPS 인증서 개인 키 파일 위치를 확인하지 못했습니다.'
-        }
-        $acl = Get-Acl -LiteralPath $keyPath
-        $identity = New-Object Security.Principal.SecurityIdentifier($ServiceSid)
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-            $identity, [Security.AccessControl.FileSystemRights]::Read,
-            [Security.AccessControl.AccessControlType]::Allow)
-        $acl.SetAccessRule($rule)
-        Set-Acl -LiteralPath $keyPath -AclObject $acl
-        $verified = Get-Acl -LiteralPath $keyPath
-        if (-not ($verified.Access | Where-Object {
-            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $ServiceSid -and
-            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne 0
-        })) { throw '서비스 SID의 인증서 개인 키 읽기 권한을 확인하지 못했습니다.' }
-    }
-    finally { $rsa.Dispose() }
 }
 
 function Write-SswOperationJournal {
@@ -436,75 +388,321 @@ function Invoke-SswBestEffortPlan {
         catch {
             $code = "{0}_FAILED" -f ([string]$step.Name).ToUpperInvariant().Replace('-', '_')
             $errors.Add($code)
-            Write-Warning ("복구 단계 실패 [{0}]: {1}" -f $step.Name, $_.Exception.Message)
+            Write-Warning ("복구 단계 실패 [{0}]: {1}" -f $step.Name, $_.Exception.Message) -WarningAction Continue
         }
     }
     return @($errors)
 }
 
+function ConvertTo-SswViewerRemoteAddresses {
+    param([Parameter(Mandatory = $true)][string[]]$Address)
+
+    if ($Address.Count -lt 1 -or $Address.Count -gt 32) {
+        throw 'ViewerRemoteAddress는 1~32개의 고정 IPv4 주소여야 합니다.'
+    }
+    $normalized = New-Object Collections.Generic.List[string]
+    foreach ($candidate in $Address) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or $candidate -match '[/\\]') {
+            throw "ViewerRemoteAddress에는 서브넷이 아닌 고정 IPv4 주소만 사용할 수 있습니다: $candidate"
+        }
+        $trimmed = $candidate.Trim()
+        if ($trimmed -notmatch '^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$') {
+            throw "ViewerRemoteAddress는 4개 십진 octet의 canonical dotted-quad 형식이어야 합니다: $candidate"
+        }
+        $octets = @($trimmed.Split('.') | ForEach-Object { [int]$_ })
+        if (@($octets | Where-Object { $_ -gt 255 }).Count -gt 0) {
+            throw "ViewerRemoteAddress의 각 octet은 0~255 범위여야 합니다: $candidate"
+        }
+        $parsed = $null
+        if (-not [Net.IPAddress]::TryParse($trimmed, [ref]$parsed) -or
+            $parsed.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+            throw "ViewerRemoteAddress가 유효한 IPv4 주소가 아닙니다: $candidate"
+        }
+        $normalized.Add($parsed.ToString())
+    }
+    return @($normalized | Select-Object -Unique | Sort-Object {
+        $bytes = [Net.IPAddress]::Parse($_).GetAddressBytes()
+        ([uint64]$bytes[0] -shl 24) -bor ([uint64]$bytes[1] -shl 16) -bor
+            ([uint64]$bytes[2] -shl 8) -bor [uint64]$bytes[3]
+    })
+}
+
+function Get-SswSwitchInventoryHash {
+    param([Parameter(Mandatory = $true)][object[]]$Switches)
+
+    $canonical = $Switches | ConvertTo-Json -Depth 6 -Compress
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical)))).Replace('-', '') }
+    finally { $sha.Dispose() }
+}
+
+function ConvertTo-SswFirewallSnapshot {
+    param([Parameter(Mandatory = $true)][object]$Rule)
+
+    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $Rule
+    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $Rule
+    $application = Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule
+    $service = Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $Rule
+    $interfaceType = Get-NetFirewallInterfaceTypeFilter -AssociatedNetFirewallRule $Rule
+    return [pscustomobject]@{
+        Name = [string]$Rule.Name
+        DisplayName = [string]$Rule.DisplayName
+        Group = [string]$Rule.Group
+        Description = [string]$Rule.Description
+        Enabled = [string]$Rule.Enabled
+        Direction = [string]$Rule.Direction
+        Action = [string]$Rule.Action
+        Profile = [string]$Rule.Profile
+        Protocol = [string]$port.Protocol
+        LocalPort = [string]$port.LocalPort
+        RemotePort = [string]$port.RemotePort
+        LocalAddress = @($address.LocalAddress | ForEach-Object { [string]$_ })
+        RemoteAddress = @($address.RemoteAddress | ForEach-Object { [string]$_ })
+        Program = [string]$application.Program
+        Service = [string]$service.Service
+        InterfaceType = [string]$interfaceType.InterfaceType
+    }
+}
+
 function Get-SswAgentFirewallSnapshot {
-    param([string]$DisplayName = 'Samsung Switch Watch Agent HTTPS')
+    param([string]$DisplayName = 'Samsung Switch Watch Agent HTTP')
 
     $rules = @(Get-NetFirewallRule -DisplayName $DisplayName -ErrorAction SilentlyContinue)
     if ($rules.Count -eq 0) { return $null }
     if ($rules.Count -ne 1) { throw "Agent 방화벽 규칙이 중복되어 있습니다: $DisplayName" }
-    $rule = $rules[0]
-    $port = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule
-    $address = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule
-    return [pscustomobject]@{
-        Name = [string]$rule.Name
-        DisplayName = [string]$rule.DisplayName
-        Group = [string]$rule.Group
-        Description = [string]$rule.Description
-        Enabled = [string]$rule.Enabled
-        Direction = [string]$rule.Direction
-        Action = [string]$rule.Action
-        Profile = [string]$rule.Profile
-        Protocol = [string]$port.Protocol
-        LocalPort = [string]$port.LocalPort
-        RemoteAddress = @($address.RemoteAddress | ForEach-Object { [string]$_ })
-    }
+    return ConvertTo-SswFirewallSnapshot -Rule $rules[0]
+}
+
+function Get-SswAgentFirewallSnapshotByName {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $rules = @(Get-NetFirewallRule -Name $Name -ErrorAction SilentlyContinue)
+    if ($rules.Count -eq 0) { return $null }
+    if ($rules.Count -ne 1) { throw "Agent 방화벽 내부 이름이 중복되어 있습니다: $Name" }
+    return ConvertTo-SswFirewallSnapshot -Rule $rules[0]
 }
 
 function Test-SswOwnedAgentFirewallRule {
     param([Parameter(Mandatory = $true)][object]$Snapshot)
+    return $Snapshot.Name -eq 'SamsungSwitchWatchAgent-Http' -and
+        $Snapshot.DisplayName -eq 'Samsung Switch Watch Agent HTTP' -and
+        $Snapshot.Group -eq 'Samsung Switch Watch' -and
+        $Snapshot.Description -eq 'Owned by SamsungSwitchWatchAgent installer v2'
+}
+
+function Test-SswLegacyOwnedAgentFirewallRule {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
     return $Snapshot.Name -eq 'SamsungSwitchWatchAgent-Https' -and
+        $Snapshot.DisplayName -eq 'Samsung Switch Watch Agent HTTPS' -and
         $Snapshot.Group -eq 'Samsung Switch Watch' -and
         $Snapshot.Description -eq 'Owned by SamsungSwitchWatchAgent installer v1'
+}
+
+function Assert-SswAgentFirewallNameSafety {
+    foreach ($definition in @(
+        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Http'; Legacy = $false },
+        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Https'; Legacy = $true }
+    )) {
+        $snapshot = Get-SswAgentFirewallSnapshotByName -Name $definition.Name
+        if (-not $snapshot) { continue }
+        $owned = if ($definition.Legacy) {
+            Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot
+        }
+        else { Test-SswOwnedAgentFirewallRule -Snapshot $snapshot }
+        if (-not $owned) {
+            throw "제품 내부 이름과 충돌하는 외부 방화벽 규칙이 있습니다. 자동 변경하지 않습니다: $($definition.Name)"
+        }
+    }
+}
+
+function Test-SswFirewallPortOverlap {
+    param(
+        [Parameter(Mandatory = $true)][string]$Protocol,
+        [Parameter(Mandatory = $true)][string[]]$LocalPort,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$TargetPort
+    )
+
+    if ($Protocol -notin @('TCP', '6', 'Any', '256', '*')) { return $false }
+    foreach ($entry in $LocalPort) {
+        foreach ($token in ([string]$entry).Split(',')) {
+            $value = $token.Trim()
+            if ($value -in @('Any', '*')) { return $true }
+            $singlePort = 0
+            if ([int]::TryParse($value, [ref]$singlePort)) {
+                if ($singlePort -eq $TargetPort) { return $true }
+                continue
+            }
+            if ($value -match '^(\d{1,5})-(\d{1,5})$') {
+                $start = [int]$Matches[1]
+                $end = [int]$Matches[2]
+                if ($start -le $TargetPort -and $TargetPort -le $end) { return $true }
+                continue
+            }
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-SswFirewallProfileSetExact {
+    param([Parameter(Mandatory = $true)][string]$Profile)
+
+    $profiles = @($Profile.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+    return $profiles.Count -eq 2 -and $profiles[0] -eq 'Domain' -and $profiles[1] -eq 'Private'
+}
+
+function Test-SswFirewallRuleMayApplyToAgent {
+    param(
+        [Parameter(Mandatory = $true)][object]$Rule,
+        [Parameter(Mandatory = $true)][string]$AgentExecutablePath
+    )
+
+    try {
+        $applicationFilters = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $Rule)
+        $programApplies = $applicationFilters.Count -eq 0
+        foreach ($filter in $applicationFilters) {
+            $program = [Environment]::ExpandEnvironmentVariables([string]$filter.Program)
+            if ([string]::IsNullOrWhiteSpace($program) -or $program -in @('Any', '*')) {
+                $programApplies = $true
+                break
+            }
+            try {
+                if ([IO.Path]::GetFullPath($program).Equals([IO.Path]::GetFullPath($AgentExecutablePath), [StringComparison]::OrdinalIgnoreCase)) {
+                    $programApplies = $true
+                    break
+                }
+            }
+            catch { return $true }
+        }
+        if (-not $programApplies) { return $false }
+
+        $serviceFilters = @(Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $Rule)
+        if ($serviceFilters.Count -eq 0) { return $true }
+        foreach ($filter in $serviceFilters) {
+            $service = [string]$filter.Service
+            if ([string]::IsNullOrWhiteSpace($service) -or $service -in @('Any', '*', 'SamsungSwitchWatchAgent')) { return $true }
+        }
+        return $false
+    }
+    catch { return $true }
+}
+
+function Assert-SswAgentFirewallGateReady {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$AgentExecutablePath
+    )
+
+    Assert-SswAgentFirewallNameSafety
+    $firewallService = Get-Service -Name 'MpsSvc' -ErrorAction Stop
+    if ($firewallService.Status -ne 'Running') {
+        throw 'Windows Defender Firewall 서비스(MpsSvc)가 실행 중이어야 Agent HTTP를 사용할 수 있습니다.'
+    }
+    $profiles = @(Get-NetFirewallProfile -Name Domain,Private,Public -ErrorAction Stop)
+    foreach ($requiredName in @('Domain', 'Private', 'Public')) {
+        $profile = $profiles | Where-Object { [string]$_.Name -eq $requiredName } | Select-Object -First 1
+        if (-not $profile -or $profile.Enabled -ne $true) {
+            throw "Windows Firewall $requiredName 프로필이 활성화되어야 Agent HTTP를 사용할 수 있습니다."
+        }
+        if ([string]$profile.DefaultInboundAction -eq 'Allow') {
+            throw "Windows Firewall $requiredName 프로필의 기본 인바운드 정책이 Allow이면 Agent HTTP를 사용할 수 없습니다."
+        }
+        if ([string]$profile.AllowInboundRules -eq 'False' -or
+            [string]$profile.AllowLocalFirewallRules -eq 'False') {
+            throw "Windows Firewall $requiredName 프로필 정책이 로컬 인바운드 허용 규칙 적용을 차단합니다."
+        }
+    }
+
+    foreach ($rule in @(Get-NetFirewallRule -Enabled True -Direction Inbound -Action Allow -ErrorAction Stop)) {
+        $candidateSnapshot = if ([string]$rule.Name -eq 'SamsungSwitchWatchAgent-Http') {
+            Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
+        }
+        elseif ([string]$rule.Name -eq 'SamsungSwitchWatchAgent-Https') {
+            Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+        }
+        else { $null }
+        if ($candidateSnapshot -and ((Test-SswOwnedAgentFirewallRule -Snapshot $candidateSnapshot) -or
+            (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $candidateSnapshot))) { continue }
+
+        $portFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule
+        if (-not (Test-SswFirewallPortOverlap -Protocol ([string]$portFilter.Protocol) `
+            -LocalPort @($portFilter.LocalPort | ForEach-Object { [string]$_ }) -TargetPort $Port)) { continue }
+        if (-not (Test-SswFirewallRuleMayApplyToAgent -Rule $rule -AgentExecutablePath $AgentExecutablePath)) { continue }
+        throw ("제품 소유가 아닌 활성 인바운드 Allow 규칙이 Agent TCP/{0}과 겹칩니다: {1} ({2})" -f
+            $Port, [string]$rule.DisplayName, [string]$rule.Name)
+    }
 }
 
 function Test-SswAgentFirewallRuleExact {
     param(
         [Parameter(Mandatory = $true)][object]$Snapshot,
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
-        [Parameter(Mandatory = $true)][string]$RemoteAddress
+        [Parameter(Mandatory = $true)][string[]]$RemoteAddress
     )
 
+    $expected = @(ConvertTo-SswViewerRemoteAddresses -Address $RemoteAddress)
+    $actual = @($Snapshot.RemoteAddress | ForEach-Object { [string]$_ } | Sort-Object)
+    $expectedSorted = @($expected | Sort-Object)
     return (Test-SswOwnedAgentFirewallRule -Snapshot $Snapshot) -and
         $Snapshot.Enabled -eq 'True' -and $Snapshot.Direction -eq 'Inbound' -and
         $Snapshot.Action -eq 'Allow' -and $Snapshot.Protocol -in @('TCP', '6') -and
-        $Snapshot.LocalPort -eq [string]$Port -and $Snapshot.RemoteAddress.Count -eq 1 -and
-        $Snapshot.RemoteAddress[0] -eq $RemoteAddress -and
-        $Snapshot.Profile -notmatch 'Public'
+        $Snapshot.LocalPort -eq [string]$Port -and $Snapshot.RemotePort -eq 'Any' -and
+        (@($Snapshot.LocalAddress) -join '|') -eq 'Any' -and
+        $Snapshot.Program -eq 'Any' -and $Snapshot.Service -eq 'Any' -and
+        $Snapshot.InterfaceType -eq 'Any' -and
+        ($actual -join '|') -eq ($expectedSorted -join '|') -and
+        (Test-SswFirewallProfileSetExact -Profile ([string]$Snapshot.Profile))
 }
 
 function New-SswAgentFirewallRule {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
-        [Parameter(Mandatory = $true)][string]$RemoteAddress
+        [Parameter(Mandatory = $true)][string[]]$RemoteAddress
     )
 
-    New-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' `
-        -DisplayName 'Samsung Switch Watch Agent HTTPS' -Group 'Samsung Switch Watch' `
-        -Description 'Owned by SamsungSwitchWatchAgent installer v1' `
+    $validatedAddresses = @(ConvertTo-SswViewerRemoteAddresses -Address $RemoteAddress)
+    Assert-SswAgentFirewallNameSafety
+    if (Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http') {
+        throw 'Agent HTTP 방화벽 내부 이름이 이미 사용 중입니다.'
+    }
+    New-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Http' `
+        -DisplayName 'Samsung Switch Watch Agent HTTP' -Group 'Samsung Switch Watch' `
+        -Description 'Owned by SamsungSwitchWatchAgent installer v2' `
         -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port `
-        -RemoteAddress $RemoteAddress -Profile Domain,Private | Out-Null
+        -RemotePort Any -LocalAddress Any -RemoteAddress $validatedAddresses `
+        -Program Any -Service Any -InterfaceType Any -Profile Domain,Private | Out-Null
+}
+
+function Remove-SswOwnedAgentFirewallRuleByName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('SamsungSwitchWatchAgent-Http', 'SamsungSwitchWatchAgent-Https')][string]$Name,
+        [switch]$AllowMissing
+    )
+
+    $snapshot = Get-SswAgentFirewallSnapshotByName -Name $Name
+    if (-not $snapshot) {
+        if ($AllowMissing) { return }
+        throw "Agent 방화벽 규칙을 찾지 못했습니다: $Name"
+    }
+    $owned = if ($Name -eq 'SamsungSwitchWatchAgent-Https') {
+        Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot
+    }
+    else { Test-SswOwnedAgentFirewallRule -Snapshot $snapshot }
+    if (-not $owned) { throw "소유권 표식이 없는 방화벽 규칙은 자동 제거하지 않습니다: $Name" }
+    Get-NetFirewallRule -Name $Name -ErrorAction Stop | Remove-NetFirewallRule
 }
 
 function Restore-SswAgentFirewallSnapshot {
     param([AllowNull()][object]$Snapshot)
 
-    Get-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    if ($Snapshot -and -not ((Test-SswOwnedAgentFirewallRule -Snapshot $Snapshot) -or
+        (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $Snapshot))) {
+        throw '제품 소유권이 확인되지 않은 방화벽 snapshot은 복원하지 않습니다.'
+    }
+    Assert-SswAgentFirewallNameSafety
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' -AllowMissing
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Https' -AllowMissing
     if ($null -eq $Snapshot) { return }
     $parameters = @{
         Name = $Snapshot.Name
@@ -514,28 +712,100 @@ function Restore-SswAgentFirewallSnapshot {
         Action = $Snapshot.Action
         Protocol = $Snapshot.Protocol
         LocalPort = $Snapshot.LocalPort
+        RemotePort = $Snapshot.RemotePort
+        LocalAddress = @($Snapshot.LocalAddress)
         RemoteAddress = @($Snapshot.RemoteAddress)
+        Program = $Snapshot.Program
+        Service = $Snapshot.Service
+        InterfaceType = $Snapshot.InterfaceType
         Profile = $Snapshot.Profile
     }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Group)) {
-        $parameters.Group = [string]$Snapshot.Group
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Description)) {
-        $parameters.Description = [string]$Snapshot.Description
-    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Group)) { $parameters.Group = [string]$Snapshot.Group }
+    if (-not [string]::IsNullOrWhiteSpace([string]$Snapshot.Description)) { $parameters.Description = [string]$Snapshot.Description }
     New-NetFirewallRule @parameters | Out-Null
 }
 
 function Remove-SswOwnedAgentFirewallRule {
     param([switch]$AllowMissing)
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' -AllowMissing:$AllowMissing
+}
 
-    $snapshot = Get-SswAgentFirewallSnapshot
-    if ($null -eq $snapshot) {
-        if ($AllowMissing) { return }
-        throw 'Agent 방화벽 규칙을 찾지 못했습니다.'
+function Assert-SswAgentInstallReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][string]$AgentId,
+        [Parameter(Mandatory = $true)][string]$SwitchInventoryHash,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 256)][int]$SwitchCount
+    )
+
+    $receiptVersion = 0
+    if ($Receipt.product -ne 'SamsungSwitchWatchAgent' -or
+        -not [int]::TryParse([string]$Receipt.receiptVersion, [ref]$receiptVersion) -or
+        $receiptVersion -notin @(1, 2)) {
+        throw '지원하지 않거나 제품 소유권을 확인할 수 없는 Agent 설치 영수증입니다.'
     }
-    if (-not (Test-SswOwnedAgentFirewallRule -Snapshot $snapshot)) {
-        throw '소유권 표식이 없는 방화벽 규칙은 자동 제거하지 않습니다.'
+    $receiptSwitchCount = 0
+    if ([string]$Receipt.agentId -ne $AgentId -or
+        -not [int]::TryParse([string]$Receipt.switchCount, [ref]$receiptSwitchCount) -or
+        $receiptSwitchCount -ne $SwitchCount -or
+        [string]$Receipt.switchInventoryHash -ne $SwitchInventoryHash) {
+        throw 'Agent 설치 영수증의 Agent ID 또는 스위치 인벤토리가 현재 설정과 일치하지 않습니다.'
     }
-    Get-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' -ErrorAction Stop | Remove-NetFirewallRule
+    return $receiptVersion
+}
+
+function Get-SswCertificateSha256 {
+    param([Parameter(Mandatory = $true)][Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Certificate.RawData))).Replace('-', '') }
+    finally { $sha.Dispose() }
+}
+
+function Get-SswLegacyOwnedAgentCertificateThumbprints {
+    param(
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][object]$Configuration
+    )
+
+    $result = New-Object Collections.Generic.List[string]
+    $expectedFriendlyName = "Samsung Switch Watch Agent $([string]$Receipt.agentId)"
+    $httpsProperty = $Configuration.Agent.PSObject.Properties['Https']
+    if (-not $httpsProperty -or -not $httpsProperty.Value) { return @() }
+
+    $activeConfigThumbprint = ([string]$httpsProperty.Value.CertificateStoreThumbprint).Replace(' ', '').ToUpperInvariant()
+    $activeReceiptThumbprint = ([string]$Receipt.certificateStoreThumbprint).Replace(' ', '').ToUpperInvariant()
+    $activeOwned = $Receipt.PSObject.Properties['certificateOwnedByInstaller'] -and
+        $Receipt.certificateOwnedByInstaller -eq $true
+    if ($activeOwned -and $activeConfigThumbprint -match '^[0-9A-F]{40}$' -and
+        $activeReceiptThumbprint -eq $activeConfigThumbprint) {
+        $certificatePath = "Cert:\LocalMachine\My\$activeConfigThumbprint"
+        if (Test-Path -LiteralPath $certificatePath) {
+            $certificate = Get-Item -LiteralPath $certificatePath
+            $receiptSha = ([string]$Receipt.certificateSha256).Replace(' ', '').ToUpperInvariant()
+            if ($certificate.FriendlyName -eq $expectedFriendlyName -and
+                $receiptSha -match '^[0-9A-F]{64}$' -and
+                (Get-SswCertificateSha256 -Certificate $certificate) -eq $receiptSha) {
+                $result.Add($activeConfigThumbprint)
+            }
+        }
+    }
+
+    $previousOwned = $Receipt.PSObject.Properties['previousCertificateOwnedByInstaller'] -and
+        $Receipt.previousCertificateOwnedByInstaller -eq $true
+    $previousThumbprint = ([string]$Receipt.previousCertificateStoreThumbprint).Replace(' ', '').ToUpperInvariant()
+    $previousReceiptSha = ([string]$Receipt.previousCertificateSha256).Replace(' ', '').ToUpperInvariant()
+    $previousConfigSha = ([string]$httpsProperty.Value.PreviousCertificateSha256Fingerprint).Replace(' ', '').ToUpperInvariant()
+    if ($previousOwned -and $previousThumbprint -match '^[0-9A-F]{40}$' -and
+        $previousReceiptSha -match '^[0-9A-F]{64}$' -and $previousConfigSha -eq $previousReceiptSha) {
+        $certificatePath = "Cert:\LocalMachine\My\$previousThumbprint"
+        if (Test-Path -LiteralPath $certificatePath) {
+            $certificate = Get-Item -LiteralPath $certificatePath
+            if ($certificate.FriendlyName -eq $expectedFriendlyName -and
+                (Get-SswCertificateSha256 -Certificate $certificate) -eq $previousReceiptSha) {
+                $result.Add($previousThumbprint)
+            }
+        }
+    }
+    return @($result | Select-Object -Unique)
 }

@@ -105,7 +105,7 @@ try {
             Exe = 'SamsungSwitchWatch.Agent.exe'
             Installer = 'install-agent.ps1'
             Required = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'set-switch-credential.ps1',
-                'new-pairing-code.ps1', 'new-viewer-pairing.ps1', 'new-agent-certificate.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
+                'set-viewer-access.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
                 'switches.example.json', $releaseNotesName, 'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json')
         },
         [pscustomobject]@{
@@ -113,7 +113,7 @@ try {
             Zip = $viewerZip
             Exe = 'SamsungSwitchWatch.Viewer.exe'
             Installer = 'install-viewer.ps1'
-            Required = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1', 'pair-viewer.ps1',
+            Required = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1',
                 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md', $releaseNotesName, 'BUILD-MANIFEST.json',
                 'SBOM.spdx.json', 'SBOM.cdx.json')
         }
@@ -141,6 +141,11 @@ try {
         foreach ($requiredName in $package.Required) {
             if (-not (Test-Path -LiteralPath (Join-Path $expanded $requiredName) -PathType Leaf)) {
                 throw "$($package.Name) ZIP 필수 파일이 없습니다: $requiredName"
+            }
+        }
+        foreach ($removedHelper in @('new-pairing-code.ps1', 'new-viewer-pairing.ps1', 'pair-viewer.ps1', 'new-agent-certificate.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $expanded $removedHelper) -PathType Leaf) {
+                throw "$($package.Name) ZIP에 제거된 인증/인증서 helper가 남아 있습니다: $removedHelper"
             }
         }
         $packagedReleaseNotes = @(Get-ChildItem -LiteralPath $expanded -Filter 'RELEASE_NOTES_*_KO.md' -File)
@@ -213,8 +218,7 @@ try {
                 '\$id\s+-notmatch',
                 '\$credential\s+-notmatch',
                 'IPAddress\]::TryParse\(\$hostAddress',
-                '\$uplink\s+-notmatch',
-                'IPAddress\]::TryParse\(\$ViewerRemoteAddress'
+                '\$uplink\s+-notmatch'
             )) {
                 if ($installerText -notmatch $validationPattern) {
                     throw "Agent 설치 전 입력 검증 계약이 없습니다: $validationPattern"
@@ -238,37 +242,144 @@ try {
                 throw '기존 명시적 ACE를 남길 수 있는 증분 ACL 설정이 포함되어 있습니다.'
             }
             $credentialText = Get-Content -LiteralPath (Join-Path $expanded 'set-switch-credential.ps1') -Raw -Encoding UTF8
-            $pairingText = Get-Content -LiteralPath (Join-Path $expanded 'new-pairing-code.ps1') -Raw -Encoding UTF8
-            $viewerPairingText = Get-Content -LiteralPath (Join-Path $expanded 'new-viewer-pairing.ps1') -Raw -Encoding UTF8
-            if ($credentialText -notmatch 'Push-Location\s+-LiteralPath\s+\$install' -or
-                $pairingText -notmatch 'Push-Location\s+-LiteralPath\s+\$install' -or
-                $viewerPairingText -notmatch 'Push-Location\s+-LiteralPath\s+\$install') {
-                throw 'Agent 유지보수 명령은 설치 폴더를 작업 디렉터리로 고정해야 합니다.'
+            $viewerAccessText = Get-Content -LiteralPath (Join-Path $expanded 'set-viewer-access.ps1') -Raw -Encoding UTF8
+            if ($credentialText -notmatch 'Push-Location\s+-LiteralPath\s+\$install') {
+                throw 'Agent 자격 증명 명령은 설치 폴더를 작업 디렉터리로 고정해야 합니다.'
             }
-            foreach ($pairingPattern in @(
-                'pairing\s+create\s+--json',
-                'install-receipt\.json',
-                'appsettings\.Production\.json',
-                'certificateSha256',
-                'certificateStoreThumbprint',
-                '\^\[0-9A-Fa-f\]\{64\}\$',
-                'SSW1:',
-                '\[switch\]\$CopyToClipboard',
-                '\$service\.Status\s+-ne\s+''Running''',
-                'Get-NetTCPConnection',
-                'SkipAsSource',
-                'InterfaceAlias',
-                '\$expiresUtc\s+-\s+\[DateTimeOffset\]::UtcNow'
+            foreach ($httpPattern in @(
+                '\[ValidateRange\(1,\s*65535\)\]\[int\]\$HttpPort\s*=\s*18443',
+                '\[ValidateCount\(1,\s*32\)\]\[string\[\]\]\$ViewerRemoteAddress',
+                'http://0\.0\.0\.0:\$HttpPort',
+                'receiptVersion\s*=\s*2',
+                'httpPort\s*=\s*\$HttpPort',
+                'viewerRemoteAddresses\s*=\s*\$viewerRemoteAddresses',
+                'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD=\*',
+                'legacyOwnedCertificateThumbprint',
+                'restore-service-environment',
+                "@\('Https',\s*'PairingCodeLifetimeMinutes',\s*'TokenPepper',\s*'Tokens'\)",
+                '\$installedDataDirectory\s*=\s*\[IO\.Path\]::GetFullPath',
+                '\$data\s*=\s*\$installedDataDirectory',
+                '\$shouldStart\s*=\s*\$Repair\s+-or',
+                '\$previousServiceWasRunning\s+-and\s+-not\s+\$DoNotStart',
+                'readiness \(clean environment\)',
+                'Restore-SswAgentFirewallSnapshot'
             )) {
-                if ($viewerPairingText -notmatch $pairingPattern) {
-                    throw "Viewer 단일 연결 문자열 계약이 없습니다: $pairingPattern"
+                if ($installerText -notmatch $httpPattern) { throw "Agent HTTP 마이그레이션 계약이 없습니다: $httpPattern" }
+            }
+            foreach ($removedPattern in @('\$HttpsPort', '\[switch\]\$SkipFirewall', '\[switch\]\$RotateCertificate', 'PairingCodeLifetimeMinutes\s*=', 'TokenPepper\s*=')) {
+                if ($installerText -match $removedPattern) { throw "제거된 HTTPS/인증 설치 계약이 남아 있습니다: $removedPattern" }
+            }
+            foreach ($accessPattern in @(
+                'ConvertTo-SswViewerRemoteAddresses',
+                'Set-NetFirewallAddressFilter\s+-RemoteAddress',
+                'Test-SswAgentFirewallRuleExact',
+                '\[IO\.File\]::Replace\(\$temporaryReceipt',
+                'Restore-SswAgentFirewallSnapshot'
+            )) {
+                if ($viewerAccessText -notmatch $accessPattern) { throw "Viewer 방화벽 원자 갱신 계약이 없습니다: $accessPattern" }
+            }
+            foreach ($commonSecurityPattern in @(
+                'canonical dotted-quad',
+                '\$_\s+-gt\s+255',
+                'function\s+Test-SswFirewallProfileSetExact',
+                'Profile\s+Domain,Private',
+                "Get-Service\s+-Name\s+'MpsSvc'",
+                "\.Status\s+-ne\s+'Running'",
+                'Get-NetFirewallProfile\s+-Name\s+Domain,Private,Public',
+                "@\('Domain',\s*'Private',\s*'Public'\)",
+                "DefaultInboundAction\s+-eq\s+'Allow'",
+                "AllowInboundRules\s+-eq\s+'False'",
+                "AllowLocalFirewallRules\s+-eq\s+'False'",
+                'Get-NetFirewallRule\s+-Enabled\s+True\s+-Direction\s+Inbound\s+-Action\s+Allow',
+                'Test-SswFirewallPortOverlap',
+                'Test-SswFirewallRuleMayApplyToAgent',
+                'function\s+Assert-SswAgentInstallReceipt',
+                '\$receiptVersion\s+-notin\s+@\(1,\s*2\)',
+                'switchInventoryHash'
+            )) {
+                if ($commonText -notmatch $commonSecurityPattern) {
+                    throw "Agent 공통 방화벽/영수증 보안 계약이 없습니다: $commonSecurityPattern"
                 }
             }
-            if ($viewerPairingText -match 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD') {
-                throw 'Viewer 연결 문자열 helper가 HTTPS 인증서 암호를 읽거나 복사해서는 안 됩니다.'
+            foreach ($exactFilterPattern in @(
+                'RemotePort\s*=\s*\[string\]\$port\.RemotePort',
+                'LocalAddress\s*=\s*@\(\$address\.LocalAddress',
+                'Program\s*=\s*\[string\]\$application\.Program',
+                'Service\s*=\s*\[string\]\$service\.Service',
+                'InterfaceType\s*=\s*\[string\]\$interfaceType\.InterfaceType'
+            )) {
+                if ($commonText -notmatch $exactFilterPattern) {
+                    throw "Agent 방화벽 exact 가용성 filter 계약이 없습니다: $exactFilterPattern"
+                }
             }
-            if ($viewerPairingText -match '10\s*분') {
-                throw 'Viewer 연결 문자열 helper는 유효 시간을 Agent의 expiresUtc에서 계산해야 합니다.'
+            if ($commonText -match '\$profileText\s*=') {
+                throw 'Agent 외부 인바운드 Allow 중첩 검사가 특정 프로필 규칙만 선별합니다.'
+            }
+            foreach ($installerSecurityPattern in @(
+                'Assert-SswAgentFirewallGateReady\s+-Port\s+\$HttpPort',
+                'Assert-SswAgentInstallReceipt',
+                'Remove-SswOwnedAgentFirewallRuleByName',
+                'Get-SswLegacyOwnedAgentCertificateThumbprints',
+                'Remove-Item\s+-LiteralPath\s+\$(?:legacy)?CertificatePath'
+            )) {
+                if ($installerText -notmatch $installerSecurityPattern) {
+                    throw "Agent 설치/Repair 보안 계약이 없습니다: $installerSecurityPattern"
+                }
+            }
+            foreach ($accessSecurityPattern in @(
+                '\$installedDataDirectory\s*=\s*\[IO\.Path\]::GetFullPath',
+                '\$PSBoundParameters\.ContainsKey\(''DataDirectory''\)',
+                '\$data\.Equals\(\$installedDataDirectory',
+                '\$data\s*=\s*\$installedDataDirectory',
+                '\$receiptPath\s*=\s*Join-Path\s+\$data\s+''install-receipt\.json''',
+                'Assert-SswAgentInstallReceipt',
+                'Assert-SswAgentFirewallGateReady\s+-Port\s+\$httpPort',
+                'Invoke-SswBestEffortPlan',
+                '\$preserveRollbackArtifacts'
+            )) {
+                if ($viewerAccessText -notmatch $accessSecurityPattern) {
+                    throw "Viewer 허용 주소 보안 계약이 없습니다: $accessSecurityPattern"
+                }
+            }
+            foreach ($credentialFirewallPattern in @(
+                'Assert-SswCredentialStartFirewall',
+                'Assert-SswAgentInstallReceipt',
+                'Test-SswAgentFirewallRuleExact',
+                'Assert-SswAgentFirewallGateReady'
+            )) {
+                if ($credentialText -notmatch $credentialFirewallPattern) {
+                    throw "Agent 최초 시작 방화벽 안전 계약이 없습니다: $credentialFirewallPattern"
+                }
+            }
+            foreach ($uninstallSecurityPattern in @(
+                'Assert-SswAgentFirewallNameSafety',
+                'Remove-SswOwnedAgentFirewallRuleByName',
+                '\$installedDataDirectory\s*=\s*\[IO\.Path\]::GetFullPath',
+                '\$PSBoundParameters\.ContainsKey\(''DataDirectory''\)',
+                '\$data\.Equals\(\$installedDataDirectory',
+                '\$data\s*=\s*\$installedDataDirectory',
+                '\$receiptPath\s*=\s*Join-Path\s+\$data\s+''install-receipt\.json''',
+                'Assert-SswAgentInstallReceipt',
+                'Get-SswLegacyOwnedAgentCertificateThumbprints',
+                'Remove-Item\s+-LiteralPath\s+\$(?:legacy)?CertificatePath'
+            )) {
+                if ($uninstallerText -notmatch $uninstallSecurityPattern) {
+                    throw "Agent 제거 보안 계약이 없습니다: $uninstallSecurityPattern"
+                }
+            }
+            foreach ($legacyCertificateHelperPattern in @(
+                'function\s+Get-SswLegacyOwnedAgentCertificateThumbprints',
+                'certificateOwnedByInstaller',
+                'certificateStoreThumbprint',
+                'previousCertificateOwnedByInstaller',
+                'previousCertificateStoreThumbprint',
+                '\$certificate\.FriendlyName\s+-eq\s+\$expectedFriendlyName',
+                'Get-SswCertificateSha256',
+                'Cert:\\LocalMachine\\My\\'
+            )) {
+                if ($commonText -notmatch $legacyCertificateHelperPattern) {
+                    throw "v0.5 active/previous 인증서 소유권 검증 helper 계약이 없습니다: $legacyCertificateHelperPattern"
+                }
             }
             if ($installerText -match 'AllowLegacyHealth' -or $credentialText -match 'AllowLegacyHealth') {
                 throw 'Agent 설치와 자격 증명 검증은 v2 readiness를 구형 health 응답으로 우회할 수 없습니다.'

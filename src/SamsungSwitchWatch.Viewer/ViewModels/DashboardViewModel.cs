@@ -84,7 +84,6 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         SynchronizationContext? synchronizationContext = null)
     {
         _settings = ViewerSettingsSanitizer.Sanitize(settings);
-        _settings.BearerToken = settings.BearerToken;
         _settingsStore = settingsStore;
         _clientFactory = clientFactory ?? new AgentClientFactory();
         _uiContext = synchronizationContext ?? SynchronizationContext.Current;
@@ -101,8 +100,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         ];
         _selectedEventFilter = EventFilters[0];
 
-        RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy && ConnectionState != AgentConnectionState.NeedsPairing);
-        ManualCheckCommand = new AsyncRelayCommand(ExecuteManualCheckAsync, () => !IsBusy && SelectedDevice is not null && ConnectionState != AgentConnectionState.NeedsPairing);
+        RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy && ConnectionState != AgentConnectionState.NeedsConnection);
+        ManualCheckCommand = new AsyncRelayCommand(ExecuteManualCheckAsync, () => !IsBusy && SelectedDevice is not null && ConnectionState != AgentConnectionState.NeedsConnection);
         AcknowledgeCommand = new RelayCommand<EventViewModel>(item => _ = AcknowledgeAsync(item), item => item is { Acknowledged: false });
         SelectDeviceCommand = new RelayCommand<DeviceViewModel>(item => SelectedDevice = item, item => item is not null);
     }
@@ -200,7 +199,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentConnectionState.Connecting => "연결 중",
         AgentConnectionState.Reconnecting => "실시간 재연결 중",
         AgentConnectionState.Stale => "현재 미확인",
-        AgentConnectionState.NeedsPairing => "연결 설정 필요",
+        AgentConnectionState.NeedsConnection => "연결 설정 필요",
         _ => "Agent 오프라인"
     };
 
@@ -215,12 +214,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public string HttpConnectionText => HttpConnectionState switch
     {
-        AgentConnectionState.Connected => "HTTPS 상태 수신 정상",
+        AgentConnectionState.Connected => "HTTP 상태 수신 정상",
         AgentConnectionState.Demo => "데모 상태 수신",
-        AgentConnectionState.Stale => "HTTPS 상태 준비 안 됨",
-        AgentConnectionState.NeedsPairing => "HTTPS 인증 필요",
-        AgentConnectionState.Connecting => "HTTPS 연결 중",
-        _ => "HTTPS 상태 수신 실패"
+        AgentConnectionState.Stale => "HTTP 상태 준비 안 됨",
+        AgentConnectionState.NeedsConnection => "HTTP 연결 설정 필요",
+        AgentConnectionState.Connecting => "HTTP 연결 중",
+        _ => "HTTP 상태 수신 실패"
     };
 
     public string RealtimeConnectionText => RealtimeConnectionState switch
@@ -229,7 +228,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentConnectionState.Demo => "데모 이벤트 연결됨",
         AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
         AgentConnectionState.Connecting => "실시간 이벤트 연결 중",
-        AgentConnectionState.NeedsPairing => "실시간 이벤트 인증 필요",
+        AgentConnectionState.NeedsConnection => "실시간 이벤트 연결 설정 필요",
         _ => "실시간 이벤트 연결 끊김"
     };
 
@@ -320,7 +319,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         : "현재 상태 미확인";
     public string MiniIssueTitle => ConnectionState switch
     {
-        AgentConnectionState.NeedsPairing => "Viewer 연결 설정 필요",
+        AgentConnectionState.NeedsConnection => "Viewer 연결 설정 필요",
         AgentConnectionState.Offline => "원격 수집기 연결 끊김",
         AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
         AgentConnectionState.Stale => "원격 상태 수신 지연",
@@ -364,9 +363,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 await RunOnUiAsync(() =>
                 {
-                    HttpConnectionState = AgentConnectionState.NeedsPairing;
-                    RealtimeConnectionState = AgentConnectionState.NeedsPairing;
-                    OperationMessage = "Agent 주소, 인증서 지문과 페어링 토큰을 설정해 주세요.";
+                    HttpConnectionState = AgentConnectionState.NeedsConnection;
+                    RealtimeConnectionState = AgentConnectionState.NeedsConnection;
+                    OperationMessage = "Agent 주소와 포트를 설정해 주세요.";
                 }).ConfigureAwait(false);
                 _initialized = true;
                 return;
@@ -518,7 +517,6 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var clean = ViewerSettingsSanitizer.Sanitize(settings);
-            clean.BearerToken = settings.BearerToken;
             if (!clean.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason))
             {
                 throw new InvalidOperationException(reason);
@@ -615,16 +613,16 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         if (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _))
         {
-            HttpConnectionState = AgentConnectionState.NeedsPairing;
-            RealtimeConnectionState = AgentConnectionState.NeedsPairing;
+            HttpConnectionState = AgentConnectionState.NeedsConnection;
+            RealtimeConnectionState = AgentConnectionState.NeedsConnection;
             return new UnavailableAgentClient();
         }
 
         try { return _clientFactory.Create(settings); }
         catch (InvalidOperationException)
         {
-            HttpConnectionState = AgentConnectionState.NeedsPairing;
-            RealtimeConnectionState = AgentConnectionState.NeedsPairing;
+            HttpConnectionState = AgentConnectionState.NeedsConnection;
+            RealtimeConnectionState = AgentConnectionState.NeedsConnection;
             return new UnavailableAgentClient();
         }
     }
@@ -1104,7 +1102,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         CollectorHealth.Clear();
         CollectorHealth.Add(new("Agent", ConnectionText, ConnectionHealth));
-        CollectorHealth.Add(new("HTTPS 상태", HttpConnectionText,
+        CollectorHealth.Add(new("HTTP 상태", HttpConnectionText,
             HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
         CollectorHealth.Add(new("실시간 이벤트", RealtimeConnectionText,
             RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
@@ -1123,7 +1121,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             ConnectionHealth));
         OperationalStatuses.Add(new OperationalStatusDto(
             "API_CHANNEL",
-            "HTTPS API",
+            "HTTP API",
             HttpConnectionText,
             HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
                 ? DeviceHealth.Normal
@@ -1135,7 +1133,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             "SignalR 실시간",
             RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
                 ? RealtimeConnectionText
-                : $"{RealtimeConnectionText} · HTTPS 캐치업 유지",
+                : $"{RealtimeConnectionText} · HTTP 캐치업 유지",
             RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
                 ? DeviceHealth.Normal
                 : DeviceHealth.Warning));
@@ -1150,13 +1148,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
         }
 
-        OperationalStatuses.Add(new OperationalStatusDto(
-            "CERT_PIN_CONFIGURED",
-            "Viewer 인증서 Pin",
-            $"로컬에 {_settings.AcceptedCertificateFingerprints.Count}개 고정 · 원격 응답 자동 신뢰 안 함",
-            _settings.AcceptedCertificateFingerprints.Count is >= 1 and <= 2
-                ? DeviceHealth.Normal
-                : DeviceHealth.Critical));
+        if (OperationalStatuses.All(status =>
+                !status.Code.Equals("HTTP_UNPROTECTED", StringComparison.Ordinal)))
+        {
+            OperationalStatuses.Add(new OperationalStatusDto(
+                "HTTP_UNPROTECTED",
+                "통신 보호",
+                "사내 관리망 전용 · 암호화/인증 없음 · Windows 방화벽 허용 IPv4만 접근",
+                DeviceHealth.Warning));
+        }
 
         foreach (var device in Devices)
         {
@@ -1185,7 +1185,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             var typed = exception as AgentClientException;
             var state = typed?.SuggestedConnectionState ?? AgentConnectionState.Offline;
-            if (state == AgentConnectionState.NeedsPairing)
+            if (state == AgentConnectionState.NeedsConnection)
             {
                 HttpConnectionState = state;
                 RealtimeConnectionState = state;
@@ -1205,10 +1205,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private void UpdateCombinedConnectionState()
     {
         AgentConnectionState combined;
-        if (HttpConnectionState == AgentConnectionState.NeedsPairing
-            || RealtimeConnectionState == AgentConnectionState.NeedsPairing)
+        if (HttpConnectionState == AgentConnectionState.NeedsConnection
+            || RealtimeConnectionState == AgentConnectionState.NeedsConnection)
         {
-            combined = AgentConnectionState.NeedsPairing;
+            combined = AgentConnectionState.NeedsConnection;
         }
         else if (HttpConnectionState == AgentConnectionState.Demo
                  || RealtimeConnectionState == AgentConnectionState.Demo)
@@ -1323,7 +1323,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentClientException typed => typed.ErrorCode,
         HttpRequestException => "AGENT_UNREACHABLE",
         TaskCanceledException => "AGENT_TIMEOUT",
-        InvalidOperationException invalid when invalid.Message.Contains("PAIRING", StringComparison.OrdinalIgnoreCase) => "VIEWER_PAIRING_REQUIRED",
+        InvalidOperationException invalid when invalid.Message.Contains("CONNECTION", StringComparison.OrdinalIgnoreCase) => "VIEWER_CONNECTION_REQUIRED",
         InvalidOperationException => "VIEWER_CONFIGURATION_INVALID",
         JsonException => "AGENT_RESPONSE_INVALID",
         _ => "VIEWER_UNEXPECTED_ERROR"

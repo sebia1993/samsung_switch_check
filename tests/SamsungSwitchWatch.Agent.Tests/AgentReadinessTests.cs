@@ -1,7 +1,5 @@
 using System.Text.Json.Nodes;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
@@ -26,16 +24,13 @@ public sealed class AgentReadinessTests
                 DataDirectory = folder,
                 MockMode = false,
                 EnablePolling = true,
-                Https = new HttpsOptions { Enabled = false },
                 Switches = [new SwitchOptions()]
             };
             var store = new SqliteAgentStore(options, NullLogger<SqliteAgentStore>.Instance);
             await store.InitializeAsync();
             var runtime = new AgentRuntimeState();
             runtime.TouchScheduler(DateTimeOffset.UtcNow);
-            var certificates = new CertificateStatusService(options, new TestWebHostEnvironment(folder),
-                NullLogger<CertificateStatusService>.Instance);
-            var readiness = new AgentReadinessService(options, store, certificates, new AvailableCredentialVault(),
+            var readiness = new AgentReadinessService(options, store, new AvailableCredentialVault(),
                 runtime, NullLogger<AgentReadinessService>.Instance);
 
             var initializing = await readiness.CheckAsync();
@@ -151,15 +146,5 @@ public sealed class AgentReadinessTests
         public Task<SwitchCredential?> GetAsync(string credentialId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<SwitchCredential?>(new SwitchCredential("readonly", "test-only"));
-    }
-
-    private sealed class TestWebHostEnvironment(string root) : IWebHostEnvironment
-    {
-        public string ApplicationName { get; set; } = "SamsungSwitchWatch.Agent.Tests";
-        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
-        public string WebRootPath { get; set; } = root;
-        public string EnvironmentName { get; set; } = "Development";
-        public string ContentRootPath { get; set; } = root;
-        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

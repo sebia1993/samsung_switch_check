@@ -13,7 +13,7 @@ public enum TrayIndicator
     Warning,
     Critical,
     Offline,
-    NeedsPairing
+    NeedsConnection
 }
 
 public sealed record TrayStatus(TrayIndicator Indicator, string Text);
@@ -32,7 +32,7 @@ public static class TrayStatusProjector
             : $"수신 {lastSuccessfulReceipt.Value.LocalDateTime:MM-dd HH:mm}";
         var status = connectionState switch
         {
-            AgentConnectionState.NeedsPairing => new TrayStatus(TrayIndicator.NeedsPairing, "연결 설정 필요"),
+            AgentConnectionState.NeedsConnection => new TrayStatus(TrayIndicator.NeedsConnection, "연결 설정 필요"),
             AgentConnectionState.Offline => new TrayStatus(TrayIndicator.Offline, "Agent 오프라인"),
             AgentConnectionState.Reconnecting => new TrayStatus(TrayIndicator.Warning, "실시간 재연결 중"),
             AgentConnectionState.Stale => new TrayStatus(TrayIndicator.Warning, "현재 상태 미확인"),
@@ -140,7 +140,7 @@ public sealed class TrayIconService : IDisposable, IWindowsToastBackend
         _icon.Icon = status.Indicator switch
         {
             TrayIndicator.Critical or TrayIndicator.Offline => SystemIcons.Error,
-            TrayIndicator.Warning or TrayIndicator.NeedsPairing => SystemIcons.Warning,
+            TrayIndicator.Warning or TrayIndicator.NeedsConnection => SystemIcons.Warning,
             _ => SystemIcons.Information
         };
         _icon.Text = status.Text;

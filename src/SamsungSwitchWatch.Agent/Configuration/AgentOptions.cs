@@ -13,42 +13,18 @@ public sealed class AgentOptions
     public const string SectionName = "Agent";
 
     public string AgentId { get; set; } = "agent-poc-01";
-    public string ListenUrl { get; set; } = "http://127.0.0.1:18443";
+    public string ListenUrl { get; set; } = "http://0.0.0.0:18443";
     public string DataDirectory { get; set; } = "data";
     public bool MockMode { get; set; } = true;
     public bool EnablePolling { get; set; } = true;
     public bool EnableSimulator { get; set; } = true;
     public int SchedulerTickSeconds { get; set; } = 1;
     public int MaxConcurrentDevices { get; set; } = 4;
-    public int PairingCodeLifetimeMinutes { get; set; } = 10;
-    public string TokenPepper { get; set; } = "change-this-local-secret-before-production";
-    public TokenOptions Tokens { get; set; } = new();
     public TelnetSessionOptions Telnet { get; set; } = new();
     public RetentionOptions Retention { get; set; } = new();
-    public HttpsOptions Https { get; set; } = new();
     public List<SwitchOptions> Switches { get; set; } = [];
 
     public string DatabasePath => Path.Combine(Path.GetFullPath(DataDirectory), "switchwatch.db");
-}
-
-public sealed class TokenOptions
-{
-    public const int MaximumActiveTokenLimit = 5;
-
-    public int MaximumActiveTokens { get; set; } = 5;
-    public int AbsoluteLifetimeDays { get; set; } = 180;
-    public int IdleLifetimeDays { get; set; } = 60;
-}
-
-public sealed class HttpsOptions
-{
-    public bool Enabled { get; set; }
-    public int Port { get; set; } = 18443;
-    public string CertificatePath { get; set; } = "certs/agent.pfx";
-    public string CertificatePasswordEnvironmentVariable { get; set; } = "SAMSUNG_SWITCH_WATCH_CERT_PASSWORD";
-    public string? CertificateStoreThumbprint { get; set; }
-    public string? PreviousCertificateSha256Fingerprint { get; set; }
-    public DateTimeOffset? PreviousCertificateAcceptUntilUtc { get; set; }
 }
 
 public sealed class TelnetSessionOptions
@@ -85,11 +61,9 @@ public static class AgentOptionsValidator
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (options.Switches is null || options.Tokens is null || options.Telnet is null ||
-            options.Retention is null || options.Https is null ||
-            string.IsNullOrEmpty(options.TokenPepper) || options.TokenPepper.Length > 1024)
+        if (options.Switches is null || options.Telnet is null || options.Retention is null)
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Agent security settings are invalid.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Agent settings are invalid.");
         }
 
         if (options.Switches.Count is < 1 or > AgentOptions.MaximumSwitches)
@@ -110,25 +84,11 @@ public static class AgentOptionsValidator
                 $"MaxConcurrentDevices must be between 1 and {AgentOptions.MaximumConcurrentDeviceLimit}.");
         }
 
-        if (options.PairingCodeLifetimeMinutes is < 1 or > 60)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID",
-                "PairingCodeLifetimeMinutes must be between 1 and 60.");
-        }
-
         if (options.Telnet.MaxSessionSeconds is < 120 or > 240 ||
             options.Telnet.ImmediateSessionCloseRetryCount is < 0 or > 1 ||
             options.Telnet.ImmediateSessionCloseRetryDelaySeconds is < 1 or > 10)
         {
             throw new AgentConfigurationException("CONFIG_INVALID", "Telnet session recovery settings are invalid.");
-        }
-
-        if (options.Tokens.MaximumActiveTokens is < 1 or > TokenOptions.MaximumActiveTokenLimit ||
-            options.Tokens.AbsoluteLifetimeDays is < 1 or > 365 ||
-            options.Tokens.IdleLifetimeDays is < 1 or > 365 ||
-            options.Tokens.IdleLifetimeDays > options.Tokens.AbsoluteLifetimeDays)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Token lifetime settings are invalid.");
         }
 
         if (options.Retention.RawDays is < 1 or > 30 ||
@@ -194,88 +154,14 @@ public static class AgentOptionsValidator
         }
 
         if (!Uri.TryCreate(options.ListenUrl, UriKind.Absolute, out var listenUri) ||
-            (listenUri.Scheme != Uri.UriSchemeHttp && listenUri.Scheme != Uri.UriSchemeHttps))
+            listenUri.Scheme != Uri.UriSchemeHttp ||
+            (!options.MockMode && listenUri.Port == 0) ||
+            !string.IsNullOrEmpty(listenUri.UserInfo) ||
+            !string.IsNullOrEmpty(listenUri.Query) ||
+            !string.IsNullOrEmpty(listenUri.Fragment) ||
+            listenUri.AbsolutePath != "/")
         {
-            throw new AgentConfigurationException("CONFIG_INVALID", "Agent listen URL is invalid.");
-        }
-
-        if (!options.Https.Enabled && listenUri.Scheme != Uri.UriSchemeHttp)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID",
-                "ListenUrl must use HTTP when the explicit HTTPS endpoint is disabled.");
-        }
-
-        if (!options.MockMode && !options.Https.Enabled)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS must be enabled outside mock mode.");
-        }
-
-        if (!options.MockMode &&
-            (options.TokenPepper.Length < 32 ||
-             string.Equals(options.TokenPepper, "replace-with-a-long-random-local-value", StringComparison.Ordinal) ||
-             string.Equals(options.TokenPepper, "change-this-local-secret-before-production", StringComparison.Ordinal)))
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID",
-                "TokenPepper must be replaced with a unique random value of at least 32 characters outside mock mode.");
-        }
-
-        if (options.Https.Enabled)
-        {
-            if (options.Https.Port is < 1 or > 65535)
-            {
-                throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS port is invalid.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.Https.CertificateStoreThumbprint))
-            {
-                options.Https.CertificateStoreThumbprint = NormalizeHex(
-                    options.Https.CertificateStoreThumbprint, 40, "HTTPS certificate store thumbprint");
-            }
-            else
-            {
-                if (string.IsNullOrWhiteSpace(options.Https.CertificatePath) ||
-                    string.IsNullOrWhiteSpace(options.Https.CertificatePasswordEnvironmentVariable) ||
-                    options.Https.CertificatePasswordEnvironmentVariable.Length > 128 ||
-                    options.Https.CertificatePasswordEnvironmentVariable.Any(character =>
-                        character is '=' or '\0' || char.IsControl(character)))
-                {
-                    throw new AgentConfigurationException("CONFIG_INVALID",
-                        "HTTPS certificate file settings are invalid.");
-                }
-                options.Https.CertificatePath = Path.IsPathRooted(options.Https.CertificatePath)
-                    ? Path.GetFullPath(options.Https.CertificatePath)
-                    : Path.GetFullPath(Path.Combine(contentRoot, options.Https.CertificatePath));
-                if (!File.Exists(options.Https.CertificatePath))
-                {
-                    throw new AgentConfigurationException("CONFIG_INVALID", "HTTPS certificate file does not exist.");
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(options.Https.PreviousCertificateSha256Fingerprint))
-            {
-                options.Https.PreviousCertificateSha256Fingerprint = NormalizeHex(
-                    options.Https.PreviousCertificateSha256Fingerprint, 64,
-                    "Previous HTTPS certificate SHA-256 fingerprint");
-                var now = DateTimeOffset.UtcNow;
-                if (options.Https.PreviousCertificateAcceptUntilUtc is null ||
-                    options.Https.PreviousCertificateAcceptUntilUtc <= now ||
-                    options.Https.PreviousCertificateAcceptUntilUtc > now.AddDays(14))
-                {
-                    throw new AgentConfigurationException("CONFIG_INVALID",
-                        "The previous certificate overlap must have an expiry no more than 14 days away.");
-                }
-            }
-            else if (options.Https.PreviousCertificateAcceptUntilUtc is not null)
-            {
-                throw new AgentConfigurationException("CONFIG_INVALID",
-                    "A previous certificate fingerprint is required for an overlap expiry.");
-            }
-        }
-        else if (!string.IsNullOrWhiteSpace(options.Https.PreviousCertificateSha256Fingerprint) ||
-                 options.Https.PreviousCertificateAcceptUntilUtc is not null)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID",
-                "Certificate pin overlap requires HTTPS to be enabled.");
+            throw new AgentConfigurationException("CONFIG_INVALID", "Agent listen URL must be an HTTP origin.");
         }
 
         options.DataDirectory = Path.IsPathRooted(options.DataDirectory)
@@ -288,20 +174,6 @@ public static class AgentOptionsValidator
         !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength &&
         value.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_');
 
-    private static string NormalizeHex(string value, int expectedLength, string field)
-    {
-        if (value.Any(character => !Uri.IsHexDigit(character) &&
-                                   character is not ':' and not '-' && !char.IsWhiteSpace(character)))
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", $"{field} is invalid.");
-        }
-        var normalized = new string(value.Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
-        if (normalized.Length != expectedLength)
-        {
-            throw new AgentConfigurationException("CONFIG_INVALID", $"{field} is invalid.");
-        }
-        return normalized;
-    }
 }
 
 public sealed class AgentConfigurationException(string code, string message) : Exception(message)

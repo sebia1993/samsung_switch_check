@@ -27,7 +27,7 @@ internal static class AgentClientErrors
     {
         if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
-            return new AgentClientException("VIEWER_PAIRING_REQUIRED", AgentConnectionState.NeedsPairing);
+            return new AgentClientException("AGENT_ACCESS_DENIED", AgentConnectionState.Stale);
         }
 
         if (statusCode == HttpStatusCode.ServiceUnavailable)
@@ -50,13 +50,9 @@ internal static class AgentClientErrors
         return new AgentClientException("AGENT_HTTP_ERROR", AgentConnectionState.Stale);
     }
 
-    public static AgentClientException Translate(Exception exception, bool certificatePinRejected = false)
+    public static AgentClientException Translate(Exception exception)
     {
         if (exception is AgentClientException typed) return typed;
-        if (certificatePinRejected)
-        {
-            return new AgentClientException("TLS_PIN_MISMATCH", AgentConnectionState.Offline, exception);
-        }
         if (exception is JsonException or InvalidDataException or FormatException or InvalidOperationException)
         {
             return new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale, exception);
@@ -74,11 +70,11 @@ internal static class AgentClientErrors
             }
             if (request.HttpRequestError == HttpRequestError.UserAuthenticationError)
             {
-                return new AgentClientException("VIEWER_PAIRING_REQUIRED", AgentConnectionState.NeedsPairing, exception);
+                return new AgentClientException("AGENT_ACCESS_DENIED", AgentConnectionState.Stale, exception);
             }
             if (request.HttpRequestError == HttpRequestError.SecureConnectionError)
             {
-                return new AgentClientException("TLS_HANDSHAKE_FAILED", AgentConnectionState.Offline, exception);
+                return new AgentClientException("AGENT_PROTOCOL_MISMATCH", AgentConnectionState.Offline, exception);
             }
             if (FindSocketException(request) is { } socket) return FromSocket(socket, exception);
             if (request.HttpRequestError == HttpRequestError.ConnectionError)
@@ -130,4 +126,19 @@ internal static class AgentClientErrors
     private static bool IsStableCode(string? code) => !string.IsNullOrWhiteSpace(code)
         && code.Length <= 64
         && code.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
+}
+
+internal static class ViewerConnectionMessages
+{
+    public static string ForCode(string? errorCode) => errorCode switch
+    {
+        "AGENT_DNS_FAILED" => "Agent PC 이름을 찾지 못했습니다. 주소 또는 사내 DNS 연결을 확인해 주세요.",
+        "AGENT_CONNECTION_REFUSED" => "Agent가 연결을 거부했습니다. 서비스 실행 상태와 방화벽을 확인해 주세요.",
+        "AGENT_TIMEOUT" => "Agent 응답 시간이 초과되었습니다. 네트워크 경로를 확인해 주세요.",
+        "AGENT_ACCESS_DENIED" => "Agent 접근이 거부되었습니다. Windows 방화벽의 허용 Viewer IPv4를 확인해 주세요.",
+        "AGENT_PROTOCOL_MISMATCH" => "Agent와 Viewer의 통신 방식이 다릅니다. Agent를 v0.6 이상으로 먼저 업데이트해 주세요.",
+        "AGENT_NOT_READY" or "STORAGE_WRITE_FAILED" => "Agent가 아직 상태 제공을 준비하지 못했습니다. Agent 상태를 확인해 주세요.",
+        "AGENT_RESPONSE_INVALID" => "Agent 응답 형식이 올바르지 않습니다. Agent와 Viewer 버전을 확인해 주세요.",
+        _ => "Agent에 연결하지 못했습니다. 서비스와 네트워크 경로를 확인해 주세요."
+    };
 }

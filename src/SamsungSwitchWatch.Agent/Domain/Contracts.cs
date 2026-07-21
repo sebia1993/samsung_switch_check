@@ -16,18 +16,11 @@ public static class AgentErrorCodes
     public const string IncompleteOutput = "INCOMPLETE_OUTPUT";
     public const string ParserUnsupported = "PARSER_UNSUPPORTED";
     public const string Ipv6Unsupported = "IPV6_UNSUPPORTED";
-    public const string TlsPinMismatch = "TLS_PIN_MISMATCH";
     public const string StorageWriteFailed = "STORAGE_WRITE_FAILED";
     public const string CommandNotAllowed = "COMMAND_NOT_ALLOWED";
     public const string DeviceNotFound = "DEVICE_NOT_FOUND";
-    public const string PairingInvalid = "PAIRING_INVALID";
     public const string CredentialUnavailable = "CREDENTIAL_UNAVAILABLE";
     public const string CredentialCorrupt = "CREDENTIAL_CORRUPT";
-    public const string CertificateUnavailable = "CERTIFICATE_UNAVAILABLE";
-    public const string PairingRateLimited = "PAIRING_RATE_LIMITED";
-    public const string TokenLimitReached = "TOKEN_LIMIT_REACHED";
-    public const string TokenNotFound = "TOKEN_NOT_FOUND";
-    public const string CertificateExpired = "CERTIFICATE_EXPIRED";
     public const string CollectorInitializing = "COLLECTOR_INITIALIZING";
     public const string CollectorUnusable = "COLLECTOR_UNUSABLE";
     public const string CollectorStale = "COLLECTOR_STALE";
@@ -139,23 +132,6 @@ public sealed record AuditEntry(
     string? DeviceId,
     string Outcome,
     string Detail);
-
-public sealed record CertificateStatus(
-    bool HttpsEnabled,
-    string? Sha256Fingerprint,
-    DateTimeOffset? NotAfterUtc = null,
-    int? DaysRemaining = null,
-    string State = "disabled",
-    IReadOnlyList<string>? AcceptedSha256Fingerprints = null);
-
-public sealed record ApiTokenInfo(
-    string Id,
-    DateTimeOffset CreatedUtc,
-    DateTimeOffset? LastUsedUtc,
-    DateTimeOffset? RevokedUtc,
-    DateTimeOffset AbsoluteExpiresUtc,
-    DateTimeOffset IdleExpiresUtc,
-    bool Expired);
 
 public sealed record EventSummary(long LastSequence, long ActiveCritical, long Unacknowledged);
 

@@ -19,7 +19,7 @@ public enum AgentConnectionState
     Connected,
     Offline,
     Stale,
-    NeedsPairing,
+    NeedsConnection,
     Demo
 }
 
@@ -161,8 +161,6 @@ public sealed record AgentSnapshotDto(
     string AgentChannelStatus = "unknown",
     string ApiChannelStatus = "unknown",
     string RealtimeChannelStatus = "unknown",
-    string CertificateStatus = "configured",
-    DateTimeOffset? CertificateExpiresAt = null,
     IReadOnlyList<OperationalStatusDto>? OperationalStatuses = null,
     int MaxConcurrentDevices = 1)
 {

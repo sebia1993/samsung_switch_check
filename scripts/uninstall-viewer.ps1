@@ -36,7 +36,7 @@ $errors = @(Invoke-SswBestEffortPlan -Plan @(
     [pscustomobject]@{ Name = 'remove-settings'; Action = {
         if ($RemoveSettings -and (Test-Path -LiteralPath $settings)) {
             Remove-Item -LiteralPath $settings -Recurse -Force
-            Write-Warning 'Viewer 토큰과 화면 설정을 제거했으며 복구되지 않습니다.'
+            Write-Warning 'Viewer 연결과 화면 설정을 제거했으며 복구되지 않습니다.'
         }
     } }
 ))

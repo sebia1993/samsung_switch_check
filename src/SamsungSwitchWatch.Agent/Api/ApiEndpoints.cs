@@ -4,12 +4,9 @@ using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
-using SamsungSwitchWatch.Agent.Security;
 using SamsungSwitchWatch.Core.Profiles;
 
 namespace SamsungSwitchWatch.Agent.Api;
-
-public sealed record PairingExchangeRequest(string Code);
 
 public sealed record DeviceCheckRunResult(
     string DeviceId,
@@ -43,60 +40,6 @@ public static class ApiEndpoints
             return Results.Json(result, statusCode: result.Ready
                 ? StatusCodes.Status200OK
                 : StatusCodes.Status503ServiceUnavailable);
-        });
-
-        app.MapGet("/api/v1/certificate/fingerprint", (CertificateStatusService certificates) =>
-            Results.Ok(certificates.Status));
-
-        if (ShouldMapPairingBootstrap(options, app.Environment.EnvironmentName))
-        {
-            app.MapPost("/api/v1/pairing/bootstrap", async (
-                HttpContext context,
-                PairingService pairing,
-                SqliteAgentStore store,
-                CancellationToken token) =>
-            {
-                if (context.Connection.RemoteIpAddress is { } remote &&
-                    !System.Net.IPAddress.IsLoopback(remote))
-                {
-                    return Results.Json(new
-                    {
-                        error = new { code = AgentErrorCodes.AuthFailed, message = "Pairing bootstrap is local-only." }
-                    }, statusCode: StatusCodes.Status403Forbidden);
-                }
-                var created = await pairing.CreateCodeAsync(token);
-                await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "pairing-bootstrap", "local", null,
-                    "success", "One-time pairing code created."), token);
-                return Results.Ok(new { code = created.Code, expiresUtc = created.ExpiresUtc });
-            });
-        }
-
-        app.MapPost("/api/v1/pairing/exchange", async (
-            PairingExchangeRequest request,
-            HttpContext context,
-            PairingService pairing,
-            PairingAttemptLimiter limiter,
-            SqliteAgentStore store,
-            CancellationToken token) =>
-        {
-            var clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            if (!limiter.TryAcquire(clientKey, DateTimeOffset.UtcNow, out var retryAfter))
-            {
-                context.Response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds))
-                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
-                return Results.Json(new
-                {
-                    error = new
-                    {
-                        code = AgentErrorCodes.PairingRateLimited,
-                        message = "Too many pairing attempts. Try again later."
-                    }
-                }, statusCode: StatusCodes.Status429TooManyRequests);
-            }
-            var bearer = await pairing.ExchangeAsync(request.Code, token);
-            await store.InsertAuditAsync(new AuditEntry(DateTimeOffset.UtcNow, "pairing-exchange", "viewer", null,
-                "success", "One-time pairing completed."), token);
-            return Results.Ok(new { token = bearer, tokenType = "Bearer" });
         });
 
         app.MapGet("/api/v1/status", async (SqliteAgentStore store, CancellationToken token) =>
@@ -229,7 +172,6 @@ public static class ApiEndpoints
             AgentReadinessService readiness,
             AgentRuntimeState runtime,
             DeviceProfileRegistry profiles,
-            CertificateStatusService certificates,
             CancellationToken token) =>
         {
             var storage = await store.CheckReadinessAsync(token);
@@ -277,12 +219,6 @@ public static class ApiEndpoints
                         errorCode = storage.ErrorCode,
                         schemaVersion = storage.SchemaVersion,
                         integrityCheckedUtc = store.LastIntegrityCheckUtc
-                    },
-                    certificate = new
-                    {
-                        certificates.Status.State,
-                        certificates.Status.NotAfterUtc,
-                        certificates.Status.DaysRemaining
                     },
                     readiness = new
                     {
@@ -377,10 +313,7 @@ public static class ApiEndpoints
         }
     }
 
-    public static bool ShouldMapPairingBootstrap(AgentOptions options, string environmentName) =>
-        options.MockMode || string.Equals(environmentName, Environments.Development, StringComparison.OrdinalIgnoreCase);
-
-    private static string Actor(HttpContext context) => context.Items["actor"] as string ?? "unknown";
+    private static string Actor(HttpContext context) => "viewer-http";
 
     private static IReadOnlyList<object> BuildVersionThreeDevices(
         AgentOptions options,

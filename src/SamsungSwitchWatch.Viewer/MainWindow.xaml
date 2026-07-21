@@ -350,7 +350,7 @@
                                     </ListBox.ItemTemplate>
                                 </ListBox>
                                 <ListBox Grid.Row="3" Margin="0,12,0,0" ItemsSource="{Binding OperationalStatuses}" BorderThickness="0"
-                                         Background="Transparent" AutomationProperties.Name="Agent API SignalR DB 인증서 수집기 상태">
+                                         Background="Transparent" AutomationProperties.Name="Agent HTTP API SignalR DB 수집기 상태">
                                     <ListBox.ItemContainerStyle>
                                         <Style TargetType="ListBoxItem">
                                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>

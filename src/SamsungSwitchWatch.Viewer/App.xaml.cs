@@ -44,16 +44,16 @@ public partial class App : Application
         _alertService = new AlertPopupService(OpenAlert, _trayIcon);
         _viewModel.AlertRaised += OnAlertRaised;
 
-        var needsPairing = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.Missing
-                or ViewerSettingsLoadStatus.NeedsPairing
+        var needsConnection = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.Missing
+                or ViewerSettingsLoadStatus.NeedsConnection
                 or ViewerSettingsLoadStatus.Corrupt
                            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
-        if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsPairing))
+        if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection))
         {
             _mainWindow.Show();
         }
         _ = InitializeApplicationAsync();
-        if (needsPairing)
+        if (needsConnection)
         {
             Dispatcher.BeginInvoke(() =>
             {
@@ -139,15 +139,8 @@ public partial class App : Application
     {
         if (_settingsStore is null || _viewModel is null) return;
 
-        // A pairing code is consumed when the Agent issues its bearer token. Protect the
-        // candidate with DPAPI before network preflight so a transient failure cannot
-        // orphan the token or consume the Agent's Viewer-token limit invisibly.
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
-        await ViewerConnectionApply.PersistThenSwitchAsync(
-            settings,
-            _settingsStore.Save,
-            _viewModel.SwitchClientAsync,
-            linked.Token);
+        await _viewModel.SwitchClientAsync(settings, linked.Token);
     }
 
     public void RestoreMainWindowBounds(MainWindow window)
@@ -285,6 +278,6 @@ public partial class App : Application
 
 internal static class StartupWindowPolicy
 {
-    public static bool ShouldShowMainWindow(ViewerSettings settings, bool needsPairing) =>
-        needsPairing || !settings.StartMinimizedToTray;
+    public static bool ShouldShowMainWindow(ViewerSettings settings, bool needsConnection) =>
+        needsConnection || !settings.StartMinimizedToTray;
 }

@@ -1,10 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.Hosting;
-using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Polling;
@@ -16,7 +15,7 @@ namespace SamsungSwitchWatch.Agent.Tests;
 public sealed class AgentApiTests
 {
     [Fact]
-    public async Task HealthIsAnonymousButStatusRequiresBearerToken()
+    public async Task HealthAndStatusAreAvailableWithoutApplicationAuthentication()
     {
         await using var host = await TestAgentHost.StartAsync();
 
@@ -24,9 +23,53 @@ public sealed class AgentApiTests
         using var status = await host.Client.GetAsync("/api/v1/status");
 
         Assert.Equal(HttpStatusCode.OK, health.StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, status.StatusCode);
-        var body = await status.Content.ReadAsStringAsync();
-        Assert.Contains(AgentErrorCodes.AuthFailed, body, StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+    }
+
+    [Fact]
+    public async Task RemovedPairingAndCertificateEndpointsReturnNotFound()
+    {
+        await using var host = await TestAgentHost.StartAsync();
+
+        using var fingerprint = await host.Client.GetAsync("/api/v1/certificate/fingerprint");
+        using var bootstrap = await host.Client.PostAsync("/api/v1/pairing/bootstrap", null);
+        using var exchange = await host.Client.PostAsJsonAsync("/api/v1/pairing/exchange", new
+        {
+            code = "REMOVED"
+        });
+
+        Assert.Equal(HttpStatusCode.NotFound, fingerprint.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, bootstrap.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, exchange.StatusCode);
+    }
+
+    [Fact]
+    public async Task NonMockAgentStartsOnHttpWithoutCertificateOrBearerConfiguration()
+    {
+        var port = GetAvailableLoopbackPort();
+        await using var host = await TestAgentHost.StartAsync(additionalOverrides:
+            new Dictionary<string, string?>
+            {
+                ["Agent:ListenUrl"] = $"http://127.0.0.1:{port}",
+                ["Agent:MockMode"] = "false",
+                ["Agent:EnablePolling"] = "false",
+                ["Agent:EnableSimulator"] = "false"
+            });
+
+        using var live = await host.Client.GetAsync("/health/live");
+        using var status = await host.Client.GetAsync("/api/v1/status");
+
+        Assert.Equal(Uri.UriSchemeHttp, host.Client.BaseAddress!.Scheme);
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+    }
+
+    private static int GetAvailableLoopbackPort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try { return ((IPEndPoint)listener.LocalEndpoint).Port; }
+        finally { listener.Stop(); }
     }
 
     [Fact]
@@ -41,7 +84,7 @@ public sealed class AgentApiTests
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
         using var document = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
         Assert.True(document.RootElement.GetProperty("ready").GetBoolean());
-        Assert.Equal(4, document.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, document.RootElement.GetProperty("schemaVersion").GetInt32());
     }
 
     [Fact]
@@ -54,7 +97,7 @@ public sealed class AgentApiTests
         {
             await connection.OpenAsync();
             await using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM schema_migrations WHERE version=4;";
+            command.CommandText = "DELETE FROM schema_migrations WHERE version=5;";
             Assert.Equal(1, await command.ExecuteNonQueryAsync());
         }
         Assert.False(await store.RefreshIntegrityStatusAsync());
@@ -70,39 +113,9 @@ public sealed class AgentApiTests
     }
 
     [Fact]
-    public async Task PairingCodeCanBeExchangedOnlyOnce()
-    {
-        await using var host = await TestAgentHost.StartAsync();
-        using var bootstrap = await host.Client.PostAsync("/api/v1/pairing/bootstrap", null);
-        bootstrap.EnsureSuccessStatusCode();
-        using var document = JsonDocument.Parse(await bootstrap.Content.ReadAsStringAsync());
-        var code = document.RootElement.GetProperty("code").GetString();
-
-        using var first = await host.Client.PostAsJsonAsync("/api/v1/pairing/exchange", new { code });
-        using var second = await host.Client.PostAsJsonAsync("/api/v1/pairing/exchange", new { code });
-
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, second.StatusCode);
-        Assert.Contains(AgentErrorCodes.PairingInvalid, await second.Content.ReadAsStringAsync(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void ProductionDoesNotExposeAnonymousPairingBootstrap()
-    {
-        var liveOptions = new AgentOptions { MockMode = false };
-        var mockOptions = new AgentOptions { MockMode = true };
-
-        Assert.False(ApiEndpoints.ShouldMapPairingBootstrap(liveOptions, Environments.Production));
-        Assert.True(ApiEndpoints.ShouldMapPairingBootstrap(mockOptions, Environments.Production));
-        Assert.True(ApiEndpoints.ShouldMapPairingBootstrap(liveOptions, Environments.Development));
-    }
-
-    [Fact]
     public async Task CommandEndpointAllowsOnlyRegisteredIdsAndNeverReturnsRawOutput()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
-
         using var denied = await host.Client.PostAsync("/api/v1/commands/TEST-SW-01/configure", null);
         Assert.Equal(HttpStatusCode.BadRequest, denied.StatusCode);
         Assert.Contains(AgentErrorCodes.CommandNotAllowed, await denied.Content.ReadAsStringAsync(), StringComparison.Ordinal);
@@ -123,7 +136,6 @@ public sealed class AgentApiTests
     public async Task EventsCanBeCaughtUpAcknowledgedAndRecovered()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
 
         using var down = await host.Client.PostAsync("/api/dev/simulate/TEST-SW-01/down", null);
         down.EnsureSuccessStatusCode();
@@ -151,7 +163,6 @@ public sealed class AgentApiTests
     public async Task VersionTwoFeedPagesAcknowledgementAndRecoveryWithoutGaps()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
 
         using var down = await host.Client.PostAsync("/api/dev/simulate/TEST-SW-01/down", null);
         down.EnsureSuccessStatusCode();
@@ -197,7 +208,6 @@ public sealed class AgentApiTests
     public async Task VersionTwoFeedReturnsAllChangesAcrossMoreThanTwoPages()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
         var store = host.Services.GetRequiredService<SqliteAgentStore>();
         const int count = 1201;
         for (var index = 0; index < count; index++)
@@ -233,7 +243,6 @@ public sealed class AgentApiTests
     public async Task VersionTwoFeedReportsRetentionGapResetContract()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
         var store = host.Services.GetRequiredService<SqliteAgentStore>();
         var now = DateTimeOffset.UtcNow;
         await store.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Info, "expired",
@@ -259,7 +268,6 @@ public sealed class AgentApiTests
     public async Task VersionThreeSnapshotAndEventFeedsExposeAuthoritativeHealthContract()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
         var store = host.Services.GetRequiredService<SqliteAgentStore>();
         await store.InsertEventAsync(new NewEvent("TEST-SW-01", EventSeverity.Warning,
             "v3-fixture", "V3 fixture", "Sanitized", EventState.New, "v3:fixture"));
@@ -290,13 +298,11 @@ public sealed class AgentApiTests
             channels.GetProperty("realtime").GetProperty("meaning").GetString());
         var storage = channels.GetProperty("storage");
         Assert.True(storage.GetProperty("ready").GetBoolean());
-        Assert.Equal(4, storage.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, storage.GetProperty("schemaVersion").GetInt32());
         Assert.NotEqual(JsonValueKind.Null, storage.GetProperty("integrityCheckedUtc").ValueKind);
-        var certificate = channels.GetProperty("certificate");
-        Assert.Equal("disabled", certificate.GetProperty("state").GetString());
-        Assert.False(certificate.TryGetProperty("sha256Fingerprint", out _));
+        Assert.False(channels.TryGetProperty("certificate", out _));
         var readiness = channels.GetProperty("readiness");
-        Assert.Equal(4, readiness.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(5, readiness.GetProperty("schemaVersion").GetInt32());
         Assert.True(readiness.TryGetProperty("schedulerHeartbeatUtc", out _));
         var device = Assert.Single(root.GetProperty("devices").EnumerateArray());
         Assert.Equal("IES4224GP", device.GetProperty("model").GetString());
@@ -333,7 +339,6 @@ public sealed class AgentApiTests
     public async Task VersionThreeCheckRunSupportsSeveralDevicesAndRejectsUnregisteredInput()
     {
         await using var host = await TestAgentHost.StartAsync(additionalOverrides: MultiDeviceOverrides());
-        await host.PairAsync();
 
         using var run = await host.Client.PostAsJsonAsync("/api/v3/check-runs", new
         {
@@ -375,7 +380,6 @@ public sealed class AgentApiTests
     {
         var collector = new FailThreeThenSucceedCollector();
         await using var host = await TestAgentHost.StartAsync(collector);
-        await host.PairAsync();
 
         using var first = await host.Client.PostAsync("/api/v1/commands/TEST-SW-01/version", null);
         using var second = await host.Client.PostAsync("/api/v1/commands/TEST-SW-01/version", null);
@@ -440,7 +444,6 @@ public sealed class AgentApiTests
     public async Task SuccessOfAnotherCommandDoesNotClearFailedCommandHealth()
     {
         await using var host = await TestAgentHost.StartAsync(new VersionFailsSystemSucceedsCollector());
-        await host.PairAsync();
 
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -477,7 +480,6 @@ public sealed class AgentApiTests
     {
         var collector = new CircuitErrorThenSuccessCollector(errorCode);
         await using var host = await TestAgentHost.StartAsync(collector);
-        await host.PairAsync();
 
         using var first = await host.Client.PostAsync("/api/v1/commands/TEST-SW-01/version", null);
         using var blocked = await host.Client.PostAsync("/api/v1/commands/TEST-SW-01/version", null);
@@ -522,7 +524,6 @@ public sealed class AgentApiTests
             Logs("e"),
             Logs("e", "f"));
         await using var host = await TestAgentHost.StartAsync(collector);
-        await host.PairAsync();
 
         for (var poll = 0; poll < 5; poll++)
         {
@@ -545,7 +546,6 @@ public sealed class AgentApiTests
     public async Task StatusAggregatesAllEventsBeyondCatchUpPageLimit()
     {
         await using var host = await TestAgentHost.StartAsync();
-        await host.PairAsync();
         var store = host.Services.GetRequiredService<SqliteAgentStore>();
 
         for (var index = 0; index < 1001; index++)
