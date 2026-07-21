@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$InstallDirectory = "$env:ProgramFiles\SamsungSwitchWatch\Agent",
     [string]$DataDirectory = "$env:ProgramData\SamsungSwitchWatch",
     [string]$AgentHost,

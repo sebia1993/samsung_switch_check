@@ -2,16 +2,16 @@
 
 ## 1. 배포 파일 검증
 
-공식 GitHub `v0.5.0-poc` Release의 사용자 정의 Assets에서 Agent·Viewer ZIP 두 개만
+공식 GitHub `v0.5.1-poc` Release의 사용자 정의 Assets에서 Agent·Viewer ZIP 두 개만
 같은 폴더에 내려받습니다. GitHub가 자동 표시하는 소스 코드 ZIP·tar.gz는 설치 파일이
 아닙니다.
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.5.0-poc'
+$tag = 'v0.5.1-poc'
 $releaseFiles = @(
-  'SamsungSwitchWatch-Agent-0.5.0-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.5.0-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.5.1-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.5.1-poc-win-x64.zip'
 )
 
 $tagRef = gh api "repos/$repo/git/ref/tags/$tag" | ConvertFrom-Json

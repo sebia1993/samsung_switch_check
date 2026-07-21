@@ -29,11 +29,32 @@ if ($LASTEXITCODE -ne 0) { throw 'dotnet format 검사 실패' }
 
 Write-SswStep 'PowerShell 5.1 구문 검사'
 $parseFailures = @()
+$encodingFailures = @()
 Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Filter '*.ps1' | ForEach-Object {
+    $scriptBytes = [IO.File]::ReadAllBytes($_.FullName)
+    $hasUtf8Bom = $scriptBytes.Length -ge 3 -and
+        $scriptBytes[0] -eq 0xEF -and $scriptBytes[1] -eq 0xBB -and $scriptBytes[2] -eq 0xBF
+    $payloadOffset = if ($hasUtf8Bom) { 3 } else { 0 }
+    $hasNonAscii = $false
+    for ($index = $payloadOffset; $index -lt $scriptBytes.Length; $index++) {
+        if ($scriptBytes[$index] -gt 0x7F) {
+            $hasNonAscii = $true
+            break
+        }
+    }
+    if ($hasNonAscii -and -not $hasUtf8Bom) {
+        $encodingFailures += $_.FullName
+        return
+    }
+
     $tokens = $null
     $parseErrors = $null
     [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
     if ($parseErrors) { $parseFailures += $parseErrors }
+}
+if ($encodingFailures.Count -gt 0) {
+    $encodingFailures | ForEach-Object { Write-Error "비 ASCII 문자가 포함된 PowerShell 스크립트는 UTF-8 BOM으로 저장해야 합니다: $_" }
+    throw 'PowerShell 소스 인코딩 검사 실패'
 }
 if ($parseFailures.Count -gt 0) {
     $parseFailures | ForEach-Object { Write-Error ("{0}: {1}" -f $_.Extent.File, $_.Message) }
