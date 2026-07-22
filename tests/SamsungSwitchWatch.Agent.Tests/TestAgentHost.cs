@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using SamsungSwitchWatch.Agent;
 using SamsungSwitchWatch.Agent.Polling;
+using SamsungSwitchWatch.Agent.Queries;
 
 namespace SamsungSwitchWatch.Agent.Tests;
 
@@ -24,7 +25,8 @@ internal sealed class TestAgentHost : IAsyncDisposable
 
     public static async Task<TestAgentHost> StartAsync(
         IDeviceCollector? collector = null,
-        IReadOnlyDictionary<string, string?>? additionalOverrides = null)
+        IReadOnlyDictionary<string, string?>? additionalOverrides = null,
+        IReadOnlyQueryCollector? queryCollector = null)
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-AgentTests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -48,6 +50,10 @@ internal sealed class TestAgentHost : IAsyncDisposable
             if (collector is not null)
             {
                 services.AddSingleton(collector);
+            }
+            if (queryCollector is not null)
+            {
+                services.AddSingleton(queryCollector);
             }
         });
         await app.StartAsync();

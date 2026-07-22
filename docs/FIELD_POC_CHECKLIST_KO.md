@@ -101,6 +101,24 @@ Telnet 원문과 자격 증명을 외부로 반출하지 않습니다.
 - [ ] 24시간 이상 soak에서 메모리·파일·Telnet 세션 증가 없음
 - [ ] raw 500MB 제한과 7일 retention 동작
 
+## G. Viewer 읽기 전용 장비 명령
+
+- [ ] 기본 설치에서 `features.readOnlyQueries.enabled=false`이고 Viewer 탭이 이유와 함께 비활성
+- [ ] `-EnableReadOnlyQueries` 설치에서만 탭 활성, Repair 옵션 생략 시 기존 활성 여부와 제한값 보존
+- [ ] `show port status`, `show syslog tail num 100`, `show sylog tail num 100`을 각 모델에서 개별 확인
+- [ ] 한 줄 128자 제한, 줄바꿈·제어문자·세미콜론·파이프·앰퍼샌드·백틱·달러·꺾쇠 거부
+- [ ] `running-config`, `startup-config`, 계정·AAA·RADIUS·TACACS·SNMP community·비밀번호·
+  secret·key·crypto 관련 조회가 자격 증명 조회와 TCP 연결 전에 `QUERY_COMMAND_BLOCKED`
+- [ ] 허용 명령의 미지원 응답이 설정 모드 진입이나 후속 문자열 실행 없이 안전하게 종료
+- [ ] 65,536바이트 초과 UTF-8 출력이 깨진 문자 없이 잘리고 `truncated=true`
+- [ ] Viewer 복사·지우기·종료 뒤 결과가 명령 이력, 설정, CSV/JSON export에 남지 않음
+- [ ] Agent snapshot/event/raw DB와 감사에서 명령 문자열·결과 본문 평문 검색 불가
+- [ ] 감사에는 장비 ID, Viewer IP, 명령 SHA-256, 소요 시간, 결과 코드와 출력 크기만 기록
+- [ ] Viewer IPv4별 12회/분 초과는 `QUERY_RATE_LIMITED`, 장비 잠금 5초 초과는 `DEVICE_BUSY`
+- [ ] 명령 응답 30초·전체 60초 제한, Viewer 취소 뒤 Telnet 연결과 장비 잠금 정리
+- [ ] 장비별 수동 조회 중에도 다른 장비의 주기 수집이 계속되고 같은 장비 수집이 기아 상태가 되지 않음
+- [ ] 실제 HTTP/18443 패킷에 결과가 평문임을 확인하고 격리망·고정 Viewer IPv4 범위 밖 접근 차단
+
 ## 완료 판정
 
 세 모델의 실제 펌웨어 행이 모두 채워지고, Critical/복구·오프라인 catch-up·설치 rollback·

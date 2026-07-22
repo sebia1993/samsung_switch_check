@@ -36,38 +36,41 @@
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock FontSize="14" FontWeight="SemiBold">
-                        <Run Text="정상 " /><Run Text="{Binding NormalCount, Mode=OneWay}" /><Run Text=" · 경고 " />
-                        <Run Text="{Binding WarningCount, Mode=OneWay}" /><Run Text=" · 장애 " /><Run Text="{Binding CriticalDisplayCount, Mode=OneWay}" />
+                        <Run Text="정상 " /><Run Text="{Binding NormalCount, Mode=OneWay}" /><Run Text="대 · 경고 " />
+                        <Run Text="{Binding WarningCount, Mode=OneWay}" /><Run Text="대 · 문제 " />
+                        <Run Text="{Binding CriticalDisplayCount, Mode=OneWay}" /><Run Text="대" />
                     </TextBlock>
-                    <TextBlock Margin="0,5,0,0" FontSize="11" Foreground="{StaticResource MutedTextBrush}">
-                        <Run Text="복구 " /><Run Text="{Binding RecoveredCount, Mode=OneWay}" /><Run Text="건 · " />
+                    <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="{StaticResource MutedTextBrush}">
+                        <Run Text="장애 " /><Run Text="{Binding CriticalCount, Mode=OneWay}" /><Run Text="대 · 접속 끊김 " />
+                        <Run Text="{Binding DisconnectedCount, Mode=OneWay}" /><Run Text="대 · " />
                         <Run Text="{Binding MiniCurrentStatusText, Mode=OneWay}" />
                     </TextBlock>
                 </StackPanel>
                 <Border Grid.Column="1" Padding="9,4" CornerRadius="12"
-                        Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                    <TextBlock Text="{Binding UnacknowledgedCount, StringFormat=미확인 {0}}" FontSize="11" FontWeight="SemiBold"
-                               Foreground="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
+                        Background="{Binding MiniIssueHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                    <TextBlock Text="{Binding UnacknowledgedDisplayText}" FontSize="12" FontWeight="SemiBold"
+                               Foreground="{Binding MiniIssueHealth, Converter={StaticResource HealthBrush}}" />
                 </Border>
             </Grid>
 
-            <Border Grid.Row="2" Margin="0,6,0,0" Padding="12" CornerRadius="6" Background="#F1F5F9"
+            <Border Grid.Row="2" Margin="0,6,0,0" Padding="12" CornerRadius="6"
+                    Background="{Binding MiniIssueHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}"
                     BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                     AutomationProperties.LiveSetting="Polite">
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="5" /><ColumnDefinition Width="10" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                    <Border Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
+                    <Border Background="{Binding MiniIssueHealth, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
                     <StackPanel Grid.Column="2">
                         <TextBlock Text="{Binding MiniIssueTitle}" FontWeight="SemiBold" />
-                        <TextBlock Margin="0,4,0,0" Text="{Binding MiniIssueDetail}" FontSize="11"
+                        <TextBlock Margin="0,4,0,0" Text="{Binding MiniIssueDetail}" FontSize="12"
                                    Foreground="{StaticResource MutedTextBrush}" />
                     </StackPanel>
                 </Grid>
             </Border>
 
             <Grid Grid.Row="4">
-                <TextBlock Text="{Binding LastSuccessfulReceiptText}" FontSize="10" Foreground="{StaticResource MutedTextBrush}" />
-                <Button HorizontalAlignment="Right" Padding="9,3" Content="_상세 보기" Click="Dashboard_Click" FontSize="10"
+                <TextBlock Text="{Binding LastSuccessfulReceiptText}" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
+                <Button HorizontalAlignment="Right" Padding="9,3" Content="_상세 보기" Click="Dashboard_Click" FontSize="12"
                         AutomationProperties.Name="전체 대시보드 열기" />
             </Grid>
         </Grid>

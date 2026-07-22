@@ -1,12 +1,13 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260721-v4-http-pending-figma",
+  "runId": "ssw-20260722-v5-simple-ui-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
     "components": "3:122",
-    "screens": "3:123"
+    "screens": "3:123",
+    "uxAudit": "24:2"
   },
   "frames": {
     "cover": "3:2",
@@ -20,15 +21,41 @@
     "popupStatesV2": "15:129",
     "operationalStatesV2": "15:148",
     "pairingWizardV3Historical": "20:129",
-    "httpConnectionV4": null,
-    "commandCapabilityV3": "22:131"
+    "historicalPairingWarning": "29:205",
+    "httpConnectionV4": "25:214",
+    "commandCapabilityV3": "22:131",
+    "dashboardSimpleV5": "25:138",
+    "uxAudit": "24:3"
   },
   "implementationOverride": {
     "version": "v4-http",
-    "status": "user-approved-figma-sync-pending",
+    "status": "figma-synced",
     "fields": ["agentAddress", "httpPort"],
     "defaultPort": 18443,
     "warning": "사내 관리망 전용 · 암호화/인증 없음"
+  },
+  "uiSimplification": {
+    "version": "v5-simple",
+    "status": "figma-synced",
+    "layout": "device-list-selected-device-events",
+    "primaryTerms": ["포트 상태", "장비 상태", "시스템 로그", "버전 정보"],
+    "diagnosticsTab": "수집 진단",
+    "minimumHelperFontSize": 12,
+    "apiOrDatabaseChanges": false
+  },
+  "uxAudit": {
+    "status": "completed",
+    "date": "2026-07-22",
+    "rootFrame": "24:3",
+    "roleScorecards": ["29:211", "29:212"],
+    "evidenceImageFrames": ["29:228", "29:231", "29:234", "29:237", "29:240", "29:243"],
+    "prioritySection": "29:250",
+    "operatorFlowSection": "29:271",
+    "verified": {
+      "missingFonts": 0,
+      "textBoundOverflows": 0,
+      "evidenceImagesPresent": 6
+    }
   },
   "componentSets": {
     "StatusBadge": "5:17",

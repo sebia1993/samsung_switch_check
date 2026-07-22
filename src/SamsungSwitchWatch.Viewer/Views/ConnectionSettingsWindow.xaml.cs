@@ -21,7 +21,12 @@ public partial class ConnectionSettingsWindow : Window
         AgentAddressTextBox.Text = address;
         AgentPortTextBox.Text = port.ToString();
         StartMinimizedCheckBox.IsChecked = settings.StartMinimizedToTray;
-        Loaded += (_, _) => FitToWorkingArea();
+        Loaded += (_, _) =>
+        {
+            FitToWorkingArea();
+            if (DemoModeCheckBox.IsChecked == true) DemoModeCheckBox.Focus();
+            else AgentAddressTextBox.Focus();
+        };
         Closed += (_, _) => _lifetime.Cancel();
         UpdateLiveControls();
     }

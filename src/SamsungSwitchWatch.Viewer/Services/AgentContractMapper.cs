@@ -17,6 +17,7 @@ public static class AgentApiRoutes
     public static string EventChangesV3(long cursor, int limit) =>
         $"/api/v3/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
     public const string CheckRunsV3 = "/api/v3/check-runs";
+    public const string ReadOnlyQueriesV3 = "/api/v3/read-only-queries";
     public static string Command(string deviceId, string commandId) =>
         $"/api/v1/commands/{Uri.EscapeDataString(deviceId)}/{Uri.EscapeDataString(commandId)}";
     public static string Acknowledge(string eventId) => $"/api/v1/events/{Uri.EscapeDataString(eventId)}/ack";
@@ -60,6 +61,42 @@ public static class AgentContractMapper
             .Cast<SwitchEventDto>()
             .OrderBy(item => item.Sequence)
             .ToArray();
+    }
+
+    public static ReadOnlyQueryResultDto MapReadOnlyQueryResult(string resultJson)
+    {
+        using var document = JsonDocument.Parse(resultJson);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object || IntValue(root, "apiVersion") != 3)
+        {
+            throw new JsonException("READ_ONLY_QUERY_CONTRACT_INVALID");
+        }
+
+        var deviceId = StringValue(root, "deviceId");
+        var command = StringValue(root, "command");
+        var startedUtc = DateTimeValue(root, "startedUtc");
+        var completedUtc = DateTimeValue(root, "completedUtc");
+        var elapsedMs = LongValue(root, "elapsedMs");
+        if (string.IsNullOrWhiteSpace(deviceId)
+            || string.IsNullOrWhiteSpace(command)
+            || !startedUtc.HasValue
+            || !completedUtc.HasValue
+            || !elapsedMs.HasValue)
+        {
+            throw new JsonException("READ_ONLY_QUERY_CONTRACT_INVALID");
+        }
+
+        return new ReadOnlyQueryResultDto(
+            3,
+            deviceId,
+            command,
+            startedUtc.Value,
+            completedUtc.Value,
+            Math.Max(0, elapsedMs.Value),
+            StringValue(root, "output") ?? string.Empty,
+            BoolValue(root, "truncated") ?? false,
+            Math.Max(0, IntValue(root, "sessionCount") ?? 0),
+            Math.Max(0, IntValue(root, "reconnectCount") ?? 0));
     }
 
     public static EventChangePageDto MapEventChangePage(
@@ -140,6 +177,17 @@ public static class AgentContractMapper
                             ?? LongValue(counts, "lastSequence")
                             ?? 0;
         var maxConcurrentDevices = IntValue(root, "maxConcurrentDevices") ?? 1;
+        var features = ObjectValue(root, "features");
+        var readOnlyQueries = ObjectValue(features, "readOnlyQueries");
+        var readOnlyQueriesEnabled = BoolValue(readOnlyQueries, "enabled") ?? false;
+        var readOnlyQueryMaxCommandLength = Math.Clamp(
+            IntValue(readOnlyQueries, "maxCommandLength") ?? 128,
+            1,
+            4096);
+        var readOnlyQueryMaxOutputBytes = Math.Clamp(
+            IntValue(readOnlyQueries, "maxOutputBytes") ?? 65_536,
+            1,
+            16 * 1024 * 1024);
         var storageReady = BoolValue(storage, "ready");
         var storageCode = StringValue(storage, "errorCode");
         var storageSchemaVersion = IntValue(storage, "schemaVersion");
@@ -182,7 +230,10 @@ public static class AgentContractMapper
             apiStatus,
             realtimeStatus,
             operational,
-            MaxConcurrentDevices: Math.Max(1, maxConcurrentDevices));
+            MaxConcurrentDevices: Math.Max(1, maxConcurrentDevices),
+            ReadOnlyQueriesEnabled: readOnlyQueriesEnabled,
+            ReadOnlyQueryMaxCommandLength: readOnlyQueryMaxCommandLength,
+            ReadOnlyQueryMaxOutputBytes: readOnlyQueryMaxOutputBytes);
     }
 
     private static IReadOnlyList<OperationalStatusDto> BuildOperationalStatuses(

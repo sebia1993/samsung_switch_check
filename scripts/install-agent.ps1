@@ -14,6 +14,7 @@
     [ValidateRange(1, 65535)][int]$HttpPort = 18443,
     [ValidateCount(1, 32)][string[]]$ViewerRemoteAddress,
     [switch]$MockMode,
+    [switch]$EnableReadOnlyQueries,
     [switch]$DoNotStart,
     [switch]$Preflight,
     [switch]$Repair,
@@ -40,6 +41,7 @@ $existingReceipt = $null
 $existingReceiptVersion = 0
 $installedEnvironment = @()
 $legacyOwnedCertificateThumbprints = @()
+$enableReadOnlyQueriesWasSpecified = $PSBoundParameters.ContainsKey('EnableReadOnlyQueries')
 
 function ConvertTo-SswValidatedSwitch {
     param([Parameter(Mandatory = $true)][object]$InputSwitch)
@@ -104,6 +106,24 @@ function New-SswProductionConfiguration {
         $migrated.Agent | Add-Member -NotePropertyName MockMode -NotePropertyValue ([bool]$MockMode) -Force
         $migrated.Agent | Add-Member -NotePropertyName EnableSimulator -NotePropertyValue ([bool]$MockMode) -Force
         $migrated.Agent | Add-Member -NotePropertyName Switches -NotePropertyValue $Switches -Force
+        if ($enableReadOnlyQueriesWasSpecified) {
+            $migrated.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $true -Force
+        }
+        elseif (-not $migrated.Agent.PSObject.Properties['EnableReadOnlyQueries']) {
+            $migrated.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $false -Force
+        }
+        foreach ($readOnlyQueryDefault in ([ordered]@{
+            ReadOnlyQueryMaxCommandLength = 128
+            ReadOnlyQueryMaxOutputBytes = 65536
+            ReadOnlyQueryRateLimitPerMinute = 12
+            ReadOnlyQueryDeviceWaitSeconds = 5
+            ReadOnlyQueryTotalTimeoutSeconds = 60
+        }).GetEnumerator()) {
+            if (-not $migrated.Agent.PSObject.Properties[$readOnlyQueryDefault.Key]) {
+                $migrated.Agent | Add-Member -NotePropertyName $readOnlyQueryDefault.Key `
+                    -NotePropertyValue $readOnlyQueryDefault.Value
+            }
+        }
         return $migrated
     }
     return [ordered]@{
@@ -115,6 +135,12 @@ function New-SswProductionConfiguration {
             EnablePolling = $true
             EnableSimulator = [bool]$MockMode
             SchedulerTickSeconds = 1
+            EnableReadOnlyQueries = [bool]$EnableReadOnlyQueries
+            ReadOnlyQueryMaxCommandLength = 128
+            ReadOnlyQueryMaxOutputBytes = 65536
+            ReadOnlyQueryRateLimitPerMinute = 12
+            ReadOnlyQueryDeviceWaitSeconds = 5
+            ReadOnlyQueryTotalTimeoutSeconds = 60
             Retention = [ordered]@{ RawDays = 7; RawMaxMegabytes = 500; EventDays = 90; AuditDays = 180 }
             Switches = $Switches
         }
@@ -253,6 +279,7 @@ Write-Host "  data    : $data"
 Write-Host "  service : $serviceName (고정)"
 Write-Host "  HTTP    : TCP/$HttpPort (암호화·인증 없음)"
 Write-Host "  Viewer  : $($viewerRemoteAddresses -join ', ')"
+Write-Host "  조회 명령: $(if ($Repair -and -not $enableReadOnlyQueriesWasSpecified) { '기존 설정 보존' } elseif ($EnableReadOnlyQueries) { '사용' } else { '사용 안 함(기본값)' })"
 if ($Preflight) {
     Write-SswStep '사전 검사를 통과했습니다. 시스템은 변경되지 않았습니다.'
     return

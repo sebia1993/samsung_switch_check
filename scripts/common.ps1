@@ -97,6 +97,56 @@ function Get-SswAgentServiceName {
     return 'SamsungSwitchWatchAgent'
 }
 
+function Get-SswAgentBackgroundTaskName {
+    return 'SamsungSwitchWatchAgent-CurrentUser'
+}
+
+function Get-SswCurrentUserSid {
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function ConvertTo-SswIdentitySid {
+    param([Parameter(Mandatory = $true)][string]$Identity)
+
+    try {
+        if ($Identity -match '^S-1-') {
+            return (New-Object Security.Principal.SecurityIdentifier($Identity)).Value
+        }
+        return (New-Object Security.Principal.NTAccount($Identity)).Translate(
+            [Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw "Windows 사용자 SID를 확인하지 못했습니다: $Identity"
+    }
+}
+
+function Assert-SswBackgroundAgentReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$DataDirectory,
+        [Parameter(Mandatory = $true)][string]$OwnerSid
+    )
+
+    $expectedInstall = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
+    $expectedData = [IO.Path]::GetFullPath($DataDirectory).TrimEnd('\')
+    $receiptInstall = [IO.Path]::GetFullPath([string]$Receipt.installDirectory).TrimEnd('\')
+    $receiptData = [IO.Path]::GetFullPath([string]$Receipt.dataDirectory).TrimEnd('\')
+    $port = 0
+    if ($Receipt.product -ne 'SamsungSwitchWatchBackgroundAgent' -or
+        [int]$Receipt.receiptVersion -ne 1 -or
+        [string]$Receipt.mode -ne 'current-user-scheduled-task' -or
+        [string]$Receipt.taskName -ne (Get-SswAgentBackgroundTaskName) -or
+        [string]$Receipt.ownerSid -ne $OwnerSid -or
+        -not $receiptInstall.Equals($expectedInstall, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $receiptData.Equals($expectedData, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [int]::TryParse([string]$Receipt.httpPort, [ref]$port) -or $port -lt 1 -or $port -gt 65535 -or
+        [string]$Receipt.executableSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw '현재 사용자 Agent 설치 영수증의 제품·사용자·경로 결속을 확인하지 못했습니다.'
+    }
+    return $port
+}
+
 function Wait-SswServiceDeleted {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -303,6 +353,40 @@ function Invoke-SswLocalHealthProbe {
     }
 
     throw "Agent readiness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 마지막 상태: $lastStatus"
+}
+
+function Invoke-SswLocalLivenessProbe {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30
+    )
+
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object Net.Http.HttpClientHandler
+    $handler.UseProxy = $false
+    $client = New-Object Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(3)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    try {
+        do {
+            $response = $null
+            try {
+                $response = $client.GetAsync("http://127.0.0.1:$Port/health/live").GetAwaiter().GetResult()
+                if ($response.IsSuccessStatusCode) { return 'LIVE' }
+            }
+            catch {
+                # 예약 작업 시작 직후의 연결 거부는 제한 시간 동안 재시도합니다.
+            }
+            finally { if ($response) { $response.Dispose() } }
+            Start-Sleep -Milliseconds 500
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    }
+    finally {
+        $client.Dispose()
+        $handler.Dispose()
+    }
+
+    throw "Agent liveness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 진단 코드: AGENT_HTTP_UNREACHABLE"
 }
 
 function Set-SswInstallerBackupAcl {

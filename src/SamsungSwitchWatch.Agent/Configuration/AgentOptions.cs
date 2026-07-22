@@ -20,6 +20,12 @@ public sealed class AgentOptions
     public bool EnableSimulator { get; set; } = true;
     public int SchedulerTickSeconds { get; set; } = 1;
     public int MaxConcurrentDevices { get; set; } = 4;
+    public bool EnableReadOnlyQueries { get; set; }
+    public int ReadOnlyQueryMaxCommandLength { get; set; } = 128;
+    public int ReadOnlyQueryMaxOutputBytes { get; set; } = 65_536;
+    public int ReadOnlyQueryRateLimitPerMinute { get; set; } = 12;
+    public int ReadOnlyQueryDeviceWaitSeconds { get; set; } = 5;
+    public int ReadOnlyQueryTotalTimeoutSeconds { get; set; } = 60;
     public TelnetSessionOptions Telnet { get; set; } = new();
     public RetentionOptions Retention { get; set; } = new();
     public List<SwitchOptions> Switches { get; set; } = [];
@@ -89,6 +95,16 @@ public static class AgentOptionsValidator
             options.Telnet.ImmediateSessionCloseRetryDelaySeconds is < 1 or > 10)
         {
             throw new AgentConfigurationException("CONFIG_INVALID", "Telnet session recovery settings are invalid.");
+        }
+
+        if (options.ReadOnlyQueryMaxCommandLength is < 16 or > 128 ||
+            options.ReadOnlyQueryMaxOutputBytes is < 1024 or > 65_536 ||
+            options.ReadOnlyQueryRateLimitPerMinute is < 1 or > 120 ||
+            options.ReadOnlyQueryDeviceWaitSeconds is < 1 or > 30 ||
+            options.ReadOnlyQueryTotalTimeoutSeconds is < 1 or > 120)
+        {
+            throw new AgentConfigurationException("CONFIG_INVALID",
+                "Read-only query safety settings are invalid.");
         }
 
         if (options.Retention.RawDays is < 1 or > 30 ||

@@ -16,7 +16,7 @@ Windows-only Samsung iES switch monitoring proof of concept.
 dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
-.\scripts\build-release.ps1 -Version 0.6.0-poc
+.\scripts\build-release.ps1 -Version 0.7.0-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, and must keep trimming disabled.
@@ -24,8 +24,8 @@ Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, and 
 ## Safety
 
 - Never commit credentials, API tokens, certificates, real IPs, host names, MAC addresses, or company command output.
-- Agent CLI execution is limited to registered read-only command IDs. Do not add free-form configuration commands.
-- Raw Telnet output stays on the Agent PC and must not be returned by Viewer APIs.
+- Scheduled polling is limited to registered read-only command IDs. Viewer ad-hoc queries are disabled by default and, when explicitly enabled, must pass the Agent-side one-line `show` allowlist.
+- Scheduled raw Telnet output stays on the Agent PC. Opt-in ad-hoc query output is normalized, capped at 64 KiB, returned only to the requesting Viewer process, and must never be persisted or exported.
 - Agent-Viewer HTTP has no encryption or authentication; the exact fixed-IPv4 Windows Firewall allowlist is the sole access gate.
 - Keep all three supported models (`IES4224GP`, `IES4028XP`, `IES4226XP`) behind runtime capability checks; do not claim field validation from synthetic tests.
 - Keep API v1/v2 compatibility until v1.0 while Viewer prefers API v3.

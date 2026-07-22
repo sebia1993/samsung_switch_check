@@ -24,6 +24,11 @@ public static class AgentErrorCodes
     public const string CollectorInitializing = "COLLECTOR_INITIALIZING";
     public const string CollectorUnusable = "COLLECTOR_UNUSABLE";
     public const string CollectorStale = "COLLECTOR_STALE";
+    public const string QueryDisabled = "QUERY_DISABLED";
+    public const string QueryCommandBlocked = "QUERY_COMMAND_BLOCKED";
+    public const string DeviceBusy = "DEVICE_BUSY";
+    public const string QueryRateLimited = "QUERY_RATE_LIMITED";
+    public const string QueryTimeout = "QUERY_TIMEOUT";
 }
 
 public sealed class AgentOperationException(string code, string safeMessage, int statusCode = 400) : Exception(safeMessage)

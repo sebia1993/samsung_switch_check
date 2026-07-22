@@ -4,6 +4,7 @@ using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
+using SamsungSwitchWatch.Agent.Queries;
 using SamsungSwitchWatch.Agent.Security;
 using SamsungSwitchWatch.Core.Profiles;
 using SamsungSwitchWatch.Core.Telnet;
@@ -64,6 +65,12 @@ public static class AgentApplication
         builder.Services.AddSingleton<IDeviceCollector>(service => options.MockMode
             ? new MockDeviceCollector()
             : ActivatorUtilities.CreateInstance<CoreTelnetDeviceCollector>(service));
+        builder.Services.AddSingleton<DeviceExecutionGateRegistry>();
+        builder.Services.AddSingleton<IReadOnlyQueryCollector>(service => options.MockMode
+            ? new MockReadOnlyQueryCollector()
+            : ActivatorUtilities.CreateInstance<CoreTelnetReadOnlyQueryCollector>(service));
+        builder.Services.AddSingleton<ReadOnlyQueryRateLimiter>();
+        builder.Services.AddSingleton<ReadOnlyQueryExecutionService>();
         builder.Services.AddSingleton<EventPublisher>();
         builder.Services.AddSingleton<CommandExecutionService>();
         builder.Services.AddSingleton<SimulationService>();

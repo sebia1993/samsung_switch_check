@@ -4,6 +4,7 @@ using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Persistence;
 using SamsungSwitchWatch.Agent.Polling;
+using SamsungSwitchWatch.Agent.Queries;
 using SamsungSwitchWatch.Core.Profiles;
 
 namespace SamsungSwitchWatch.Agent.Api;
@@ -229,8 +230,32 @@ public static class ApiEndpoints
                         ready.CheckedUtc
                     }
                 },
+                features = new
+                {
+                    readOnlyQueries = new
+                    {
+                        enabled = options.EnableReadOnlyQueries,
+                        maxCommandLength = options.ReadOnlyQueryMaxCommandLength,
+                        maxOutputBytes = options.ReadOnlyQueryMaxOutputBytes
+                    }
+                },
                 devices
             });
+        });
+
+        app.MapPost("/api/v3/read-only-queries", async (
+            JsonElement request,
+            HttpContext context,
+            ReadOnlyQueryExecutionService execution,
+            CancellationToken token) =>
+        {
+            var query = ParseReadOnlyQueryRequest(request);
+            var viewerIp = context.Connection.RemoteIpAddress?.MapToIPv4().ToString() ?? "unknown";
+            return Results.Ok(await execution.ExecuteAsync(
+                query.DeviceId,
+                query.Command,
+                viewerIp,
+                token));
         });
 
         app.MapPost("/api/v3/check-runs", async (
@@ -442,6 +467,33 @@ public static class ApiEndpoints
         return new CheckRunSelection(devices, commandIds);
     }
 
+    private static ReadOnlyQueryRequest ParseReadOnlyQueryRequest(JsonElement request)
+    {
+        if (request.ValueKind != JsonValueKind.Object)
+        {
+            throw new AgentOperationException("REQUEST_INVALID",
+                "Read-only query request must be a JSON object.", 400);
+        }
+
+        var allowed = new HashSet<string>(["deviceId", "command"], StringComparer.Ordinal);
+        if (request.EnumerateObject().Any(property => !allowed.Contains(property.Name)) ||
+            !request.TryGetProperty("deviceId", out var deviceIdElement) ||
+            deviceIdElement.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(deviceIdElement.GetString()) ||
+            deviceIdElement.GetString()!.Length > 64 ||
+            deviceIdElement.GetString()!.Any(character =>
+                !char.IsLetterOrDigit(character) && character is not '-' and not '_') ||
+            !request.TryGetProperty("command", out var commandElement) ||
+            commandElement.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(commandElement.GetString()))
+        {
+            throw new AgentOperationException("REQUEST_INVALID",
+                "Read-only query accepts only non-empty deviceId and command strings.", 400);
+        }
+
+        return new ReadOnlyQueryRequest(deviceIdElement.GetString()!, commandElement.GetString()!);
+    }
+
     private static IReadOnlyList<string> ReadRequiredStringArray(JsonElement request, string propertyName)
     {
         if (!request.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Array)
@@ -469,6 +521,8 @@ public static class ApiEndpoints
     private sealed record CheckRunSelection(
         IReadOnlyList<SwitchOptions> Devices,
         IReadOnlyList<string> CommandIds);
+
+    private sealed record ReadOnlyQueryRequest(string DeviceId, string Command);
 }
 
 public sealed class ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandlingMiddleware> logger)

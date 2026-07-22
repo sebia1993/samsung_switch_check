@@ -73,7 +73,8 @@ public sealed class DemoAgentClient : IAgentClient
                 new("HTTP_UNPROTECTED", "통신 보호", "사내 관리망 전용 · 암호화/인증 없음", DeviceHealth.Warning),
                 new("POLLING", "수집 진행", "동시 장비 수집 상한 4대", DeviceHealth.Normal)
             ],
-            MaxConcurrentDevices: 4));
+            MaxConcurrentDevices: 4,
+            ReadOnlyQueriesEnabled: true));
     }
 
     public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken)
@@ -113,6 +114,33 @@ public sealed class DemoAgentClient : IAgentClient
         lock (_events) _changes.Add(created);
         EventChanged?.Invoke(this, created);
         return new CommandResultDto(true, "수동 점검이 완료되었습니다.");
+    }
+
+    public async Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+        string deviceId,
+        string command,
+        CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        await Task.Delay(350, cancellationToken);
+        var output = command.Trim().Equals("show port status", StringComparison.OrdinalIgnoreCase)
+            ? "Port  Admin  Link  Speed  Duplex\r\n1     Up     Up    1G     Full\r\n24    Up     Up    1G     Full"
+            : command.Contains("syslog", StringComparison.OrdinalIgnoreCase)
+              || command.Contains("sylog", StringComparison.OrdinalIgnoreCase)
+                ? "[100] 14:31:52 Port 24 link up\r\n[99] 14:20:01 System ready"
+                : $"Demo read-only result\r\nDevice: {DeviceName(deviceId)}\r\nCommand: {command.Trim()}";
+        var completed = DateTimeOffset.UtcNow;
+        return new ReadOnlyQueryResultDto(
+            3,
+            deviceId,
+            command.Trim(),
+            started,
+            completed,
+            Math.Max(0, (long)(completed - started).TotalMilliseconds),
+            output,
+            false,
+            1,
+            0);
     }
 
     public Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken)

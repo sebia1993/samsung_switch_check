@@ -152,8 +152,92 @@ public sealed class AgentContractMapperTests
         Assert.Equal("/api/v2/snapshot", AgentApiRoutes.SnapshotV2);
         Assert.Equal("/api/v2/events/recent?limit=500", AgentApiRoutes.RecentEventsV2(900));
         Assert.Equal("/api/v2/events/changes?after=0&limit=1", AgentApiRoutes.EventChangesV2(-5, 0));
+        Assert.Equal("/api/v3/read-only-queries", AgentApiRoutes.ReadOnlyQueriesV3);
         Assert.Equal("/api/v1/commands/SW%2001/log_ram", AgentApiRoutes.Command("SW 01", "log_ram"));
         Assert.Equal("/api/v1/events/event%2F42/ack", AgentApiRoutes.Acknowledge("event/42"));
+    }
+
+    [Fact]
+    public void MapSnapshotV3_NegotiatesReadOnlyQueryFeatureAndLimits()
+    {
+        const string json = """
+        {
+          "apiVersion":3,
+          "agentId":"agent-poc-01",
+          "mockMode":false,
+          "utc":"2026-07-20T08:31:00Z",
+          "counts":{"eventChangeHighWatermark":0},
+          "channels":{
+            "agent":{"status":"connected"},
+            "api":{"status":"available"},
+            "realtime":{"status":"available"},
+            "readiness":{"status":"ready","code":"READY"}
+          },
+          "features":{
+            "readOnlyQueries":{"enabled":true,"maxCommandLength":128,"maxOutputBytes":65536}
+          },
+          "devices":[]
+        }
+        """;
+
+        var snapshot = AgentContractMapper.MapSnapshotV3(json);
+
+        Assert.True(snapshot.ReadOnlyQueriesEnabled);
+        Assert.Equal(128, snapshot.ReadOnlyQueryMaxCommandLength);
+        Assert.Equal(65_536, snapshot.ReadOnlyQueryMaxOutputBytes);
+    }
+
+    [Fact]
+    public void MapSnapshotV3_AbsentReadOnlyQueryFeatureDefaultsToDisabled()
+    {
+        const string json = """
+        {
+          "apiVersion":3,
+          "agentId":"old-agent",
+          "mockMode":false,
+          "utc":"2026-07-20T08:31:00Z",
+          "counts":{},
+          "channels":{
+            "agent":{"status":"connected"},
+            "api":{"status":"available"},
+            "realtime":{"status":"available"},
+            "readiness":{"status":"ready","code":"READY"}
+          },
+          "devices":[]
+        }
+        """;
+
+        var snapshot = AgentContractMapper.MapSnapshotV3(json);
+
+        Assert.False(snapshot.ReadOnlyQueriesEnabled);
+    }
+
+    [Fact]
+    public void MapReadOnlyQueryResult_MapsNormalizedOutputAndSessionMetadata()
+    {
+        const string json = """
+        {
+          "apiVersion":3,
+          "deviceId":"ACCESS-SW-01",
+          "command":"show port status",
+          "startedUtc":"2026-07-20T08:31:00Z",
+          "completedUtc":"2026-07-20T08:31:01Z",
+          "elapsedMs":1234,
+          "output":"Port 24 UP",
+          "truncated":true,
+          "sessionCount":1,
+          "reconnectCount":0
+        }
+        """;
+
+        var result = AgentContractMapper.MapReadOnlyQueryResult(json);
+
+        Assert.Equal("ACCESS-SW-01", result.DeviceId);
+        Assert.Equal("show port status", result.Command);
+        Assert.Equal("Port 24 UP", result.Output);
+        Assert.True(result.Truncated);
+        Assert.Equal(1, result.SessionCount);
+        Assert.Equal(0, result.ReconnectCount);
     }
 
     [Fact]

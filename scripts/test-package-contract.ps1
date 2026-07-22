@@ -105,8 +105,10 @@ try {
             Exe = 'SamsungSwitchWatch.Agent.exe'
             Installer = 'install-agent.ps1'
             Required = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'set-switch-credential.ps1',
-                'set-viewer-access.ps1', 'diagnose-agent.ps1', 'INSTALL_KO.md', 'RELEASE_PROCESS_KO.md',
-                'switches.example.json', $releaseNotesName, 'BUILD-MANIFEST.json', 'SBOM.spdx.json', 'SBOM.cdx.json')
+                'set-viewer-access.ps1', 'diagnose-agent.ps1', 'install-agent-background.ps1',
+                'run-agent-background.ps1', 'uninstall-agent-background.ps1', 'INSTALL_KO.md',
+                'RELEASE_PROCESS_KO.md', 'switches.example.json', $releaseNotesName, 'BUILD-MANIFEST.json',
+                'SBOM.spdx.json', 'SBOM.cdx.json', 'appsettings.json')
         },
         [pscustomobject]@{
             Name = 'Viewer'
@@ -210,7 +212,52 @@ try {
             throw "$($package.Name) 설치·제거 경로의 제품 전용 경계 검사가 없습니다."
         }
         if ($package.Name -eq 'Agent') {
+            try {
+                $agentDefaults = Get-Content -LiteralPath (Join-Path $expanded 'appsettings.json') `
+                    -Raw -Encoding UTF8 | ConvertFrom-Json
+            }
+            catch { throw "Agent 기본 설정 JSON을 읽지 못했습니다: $($_.Exception.Message)" }
+            if (-not $agentDefaults.Agent.PSObject.Properties['EnableReadOnlyQueries'] -or
+                [bool]$agentDefaults.Agent.EnableReadOnlyQueries -ne $false -or
+                [int]$agentDefaults.Agent.ReadOnlyQueryMaxCommandLength -ne 128 -or
+                [int]$agentDefaults.Agent.ReadOnlyQueryMaxOutputBytes -ne 65536 -or
+                [int]$agentDefaults.Agent.ReadOnlyQueryRateLimitPerMinute -ne 12 -or
+                [int]$agentDefaults.Agent.ReadOnlyQueryDeviceWaitSeconds -ne 5 -or
+                [int]$agentDefaults.Agent.ReadOnlyQueryTotalTimeoutSeconds -ne 60) {
+                throw 'Agent 패키지의 읽기 전용 장비 명령 기본값이 비활성 안전 계약과 다릅니다.'
+            }
+            $backgroundInstallerText = Get-Content -LiteralPath (Join-Path $expanded 'install-agent-background.ps1') `
+                -Raw -Encoding UTF8
+            if ($backgroundInstallerText -notmatch '\[string\]\$SourceDirectory\s*=\s*\$PSScriptRoot' -or
+                $backgroundInstallerText -notmatch '\[switch\]\$Preflight') {
+                throw '현재 사용자 숨김 Agent 설치 스크립트의 ZIP 루트/비파괴 사전 검사 계약이 없습니다.'
+            }
             if ($installerText -notmatch '\[switch\]\$Repair') { throw 'Agent 설치 스크립트에 복구 설치 옵션이 없습니다.' }
+            foreach ($readOnlyQueryPattern in @(
+                '\[switch\]\$EnableReadOnlyQueries',
+                '\$enableReadOnlyQueriesWasSpecified\s*=\s*\$PSBoundParameters\.ContainsKey\(''EnableReadOnlyQueries''\)',
+                'EnableReadOnlyQueries\s*=\s*\[bool\]\$EnableReadOnlyQueries',
+                'ReadOnlyQueryMaxCommandLength\s*=\s*128',
+                'ReadOnlyQueryMaxOutputBytes\s*=\s*65536',
+                'ReadOnlyQueryRateLimitPerMinute\s*=\s*12',
+                'ReadOnlyQueryDeviceWaitSeconds\s*=\s*5',
+                'ReadOnlyQueryTotalTimeoutSeconds\s*=\s*60',
+                'elseif\s*\(-not\s+\$migrated\.Agent\.PSObject\.Properties\[''EnableReadOnlyQueries''\]\)'
+            )) {
+                if ($installerText -notmatch $readOnlyQueryPattern) {
+                    throw "Agent 옵트인 읽기 전용 장비 명령 설치 계약이 없습니다: $readOnlyQueryPattern"
+                }
+            }
+            foreach ($backgroundReadOnlyQueryPattern in @(
+                '\[switch\]\$EnableReadOnlyQueries',
+                'ReadOnlyQueryMaxCommandLength\s*=\s*128',
+                'ReadOnlyQueryMaxOutputBytes\s*=\s*65536',
+                'elseif\s*\(-not\s+\$result\.Agent\.PSObject\.Properties\[''EnableReadOnlyQueries''\]\)'
+            )) {
+                if ($backgroundInstallerText -notmatch $backgroundReadOnlyQueryPattern) {
+                    throw "숨김 Agent 옵트인 읽기 전용 장비 명령 설치 계약이 없습니다: $backgroundReadOnlyQueryPattern"
+                }
+            }
             if ($installerText -match '\[string\]\$ServiceName') { throw 'Agent 서비스 이름은 사용자 지정할 수 없어야 합니다.' }
             if ($installerText -notmatch 'Get-SswAgentServiceName') { throw 'Agent 고정 서비스 이름 계약이 없습니다.' }
             foreach ($validationPattern in @(
@@ -385,6 +432,10 @@ try {
                 throw 'Agent 설치와 자격 증명 검증은 v2 readiness를 구형 health 응답으로 우회할 수 없습니다.'
             }
             foreach ($credentialPattern in @(
+                '\[switch\]\$CurrentUser',
+                'Assert-SswBackgroundAgentReceipt',
+                'Get-SswAgentBackgroundTaskName',
+                'Invoke-SswLocalLivenessProbe',
                 '\$Username\s+-match',
                 '\$CredentialId\s+-notin\s+\$configuredCredentialIds',
                 '\[IO\.File\]::Copy\(\$credentialPath,\s*\$credentialBackup',
