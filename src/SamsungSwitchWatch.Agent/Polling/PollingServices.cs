@@ -671,10 +671,9 @@ public sealed class CommandExecutionService(
     IDeviceCollector collector,
     SqliteAgentStore store,
     EventPublisher publisher,
+    DeviceExecutionGateRegistry executionGates,
     ILogger<CommandExecutionService> logger)
 {
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _deviceGates = new(StringComparer.OrdinalIgnoreCase);
-
     public async Task<CommandExecutionResult> ExecuteAsync(
         string deviceId,
         string commandId,
@@ -690,9 +689,7 @@ public sealed class CommandExecutionService(
             throw new AgentOperationException(AgentErrorCodes.CommandNotAllowed, "Command id is not registered.", 400);
         }
 
-        var gate = _deviceGates.GetOrAdd(device.Id, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        try
+        await using (await executionGates.AcquireAsync(device.Id, cancellationToken))
         {
             EnsureStorageWritable();
             var previous = await store.GetSnapshotAsync(device.Id, command.Id, cancellationToken);
@@ -770,10 +767,6 @@ public sealed class CommandExecutionService(
                     "The collector could not process the read-only command output.", 503);
             }
         }
-        finally
-        {
-            gate.Release();
-        }
     }
 
     public async Task<IReadOnlyList<BatchCommandExecutionResult>> ExecuteBatchAsync(
@@ -797,9 +790,7 @@ public sealed class CommandExecutionService(
             return [];
         }
 
-        var gate = _deviceGates.GetOrAdd(device.Id, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken);
-        try
+        await using (await executionGates.AcquireAsync(device.Id, cancellationToken))
         {
             EnsureStorageWritable();
             var authCircuit = await store.GetSnapshotAsync(
@@ -925,10 +916,6 @@ public sealed class CommandExecutionService(
                 results.Add(new BatchCommandExecutionResult(command.Id, true, null));
             }
             return results;
-        }
-        finally
-        {
-            gate.Release();
         }
     }
 

@@ -1,4 +1,6 @@
 using SamsungSwitchWatch.Viewer.Services;
+using SamsungSwitchWatch.Viewer.Models;
+using System.Net;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
 
@@ -24,12 +26,45 @@ public sealed class ViewerConnectionTests
         Assert.Equal(destination, DirectWebProxy.Instance.GetProxy(destination));
     }
 
+    [Fact]
+    public void ReadOnlyQuery_UsesDedicatedSeventySecondViewerTimeout()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(70), HttpAgentClient.ReadOnlyQueryTimeout);
+    }
+
+    [Theory]
+    [InlineData("QUERY_DISABLED", "꺼져")]
+    [InlineData("QUERY_COMMAND_BLOCKED", "show")]
+    [InlineData("DEVICE_BUSY", "잠시")]
+    [InlineData("QUERY_RATE_LIMITED", "요청")]
+    [InlineData("QUERY_TIMEOUT", "초과")]
+    [InlineData("AUTH_FAILED", "로그인")]
+    public void ReadOnlyQueryErrors_AreActionableWithoutExposingRawOutput(string code, string expected)
+    {
+        var message = ViewerConnectionMessages.ForCode(code);
+
+        Assert.Contains(expected, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("community", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void QueryHttpError_PreservesStableAgentErrorCode()
+    {
+        var error = AgentClientErrors.FromStatus(
+            HttpStatusCode.BadRequest,
+            """{"error":{"code":"QUERY_COMMAND_BLOCKED","message":"blocked"}}""");
+
+        Assert.Equal("QUERY_COMMAND_BLOCKED", error.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, error.SuggestedConnectionState);
+    }
+
     [Theory]
     [InlineData("AGENT_DNS_FAILED", "이름")]
     [InlineData("AGENT_CONNECTION_REFUSED", "거부")]
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
-    [InlineData("AGENT_PROTOCOL_MISMATCH", "v0.6")]
+    [InlineData("AGENT_PROTOCOL_MISMATCH", "v0.7")]
     public void ConnectionMessages_AreActionableAndDoNotRequestSecrets(string code, string expected)
     {
         var message = ViewerConnectionMessages.ForCode(code);

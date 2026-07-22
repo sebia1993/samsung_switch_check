@@ -9,7 +9,10 @@ namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class HttpAgentClient : IAgentClient
 {
+    internal static readonly TimeSpan ReadOnlyQueryTimeout = TimeSpan.FromSeconds(70);
+
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _queryHttpClient;
     private readonly HubConnection _hub;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _startGate = new(1, 1);
@@ -33,7 +36,13 @@ public sealed class HttpAgentClient : IAgentClient
             BaseAddress = new Uri(clean.AgentUri),
             Timeout = TimeSpan.FromSeconds(20)
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.6");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.7");
+        _queryHttpClient = new HttpClient(CreateDirectHttpHandler())
+        {
+            BaseAddress = new Uri(clean.AgentUri),
+            Timeout = ReadOnlyQueryTimeout
+        };
+        _queryHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.7");
 
         _hub = new HubConnectionBuilder()
             .WithUrl(new Uri(new Uri(clean.AgentUri), "/hubs/events"), options =>
@@ -222,6 +231,41 @@ public sealed class HttpAgentClient : IAgentClient
         }
     }
 
+    public async Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+        string deviceId,
+        string command,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var body = JsonSerializer.Serialize(new { deviceId, command });
+        HttpResponseMessage response;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, AgentApiRoutes.ReadOnlyQueriesV3)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            };
+            response = await _queryHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw AgentClientErrors.Translate(exception);
+        }
+
+        using (response)
+        {
+            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            try { return AgentContractMapper.MapReadOnlyQueryResult(json); }
+            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+            { throw AgentClientErrors.Translate(exception); }
+        }
+    }
+
     public async Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken)
     {
         using var response = await SendAsync(HttpMethod.Post, AgentApiRoutes.Acknowledge(eventId), cancellationToken).ConfigureAwait(false);
@@ -361,6 +405,7 @@ public sealed class HttpAgentClient : IAgentClient
         try { await _hub.StopAsync(shutdown.Token).ConfigureAwait(false); } catch { }
         try { await _hub.DisposeAsync().ConfigureAwait(false); } catch { }
         _httpClient.Dispose();
+        _queryHttpClient.Dispose();
         _startGate.Dispose();
         _lifetime.Dispose();
     }

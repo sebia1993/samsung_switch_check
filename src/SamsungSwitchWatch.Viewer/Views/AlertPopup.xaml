@@ -13,18 +13,18 @@
             <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="3"/>
             <StackPanel Grid.Column="2">
                 <Grid>
-                    <TextBlock Text="Samsung Switch Watch" FontSize="11" Foreground="#64748B"/>
-                    <TextBlock HorizontalAlignment="Right" Text="{Binding OccurredAt, StringFormat={}{0:HH:mm:ss}}" FontSize="11" Foreground="#64748B"/>
+                    <TextBlock Text="Samsung Switch Watch" FontSize="12" Foreground="#64748B"/>
+                    <TextBlock HorizontalAlignment="Right" Text="{Binding OccurredAt, StringFormat={}{0:HH:mm:ss}}" FontSize="12" Foreground="#64748B"/>
                 </Grid>
                 <Grid Margin="0,8,0,0">
                     <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}"/>
                     <Border HorizontalAlignment="Right" Padding="7,2" CornerRadius="10" Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                        <TextBlock Text="{Binding StatusText}" FontSize="10" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding StatusText}" FontSize="12" FontWeight="SemiBold"/>
                     </Border>
                 </Grid>
                 <TextBlock Margin="0,4,0,0" Text="{Binding DeviceName}" FontWeight="SemiBold"/>
                 <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12" Foreground="#64748B" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
-                <Button Margin="0,8,0,0" HorizontalAlignment="Left" Padding="8,3" Content="대시보드에서 보기" Click="OpenDashboard_Click" FontSize="11"/>
+                <Button Margin="0,8,0,0" HorizontalAlignment="Left" Padding="8,3" Content="대시보드에서 보기" Click="OpenDashboard_Click" FontSize="12"/>
             </StackPanel>
             <Button Grid.Column="3" Width="24" Height="24" Content="×" Click="Close_Click" VerticalAlignment="Top"/>
         </Grid>

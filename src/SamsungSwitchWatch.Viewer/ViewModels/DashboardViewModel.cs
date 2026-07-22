@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Input;
 using SamsungSwitchWatch.Viewer.Infrastructure;
@@ -28,6 +29,7 @@ public static class StatusAggregator
 }
 
 public sealed record EventFilterOption(EventFilter Value, string Label);
+public sealed record RegisteredCheckOption(string Id, string DisplayName);
 
 public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 {
@@ -67,6 +69,20 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private EventFilterOption _selectedEventFilter;
     private long? _authoritativeUnacknowledged;
     private int _apiVersion = 2;
+    private bool _readOnlyQueriesEnabled;
+    private int _readOnlyQueryMaxCommandLength = 128;
+    private int _readOnlyQueryMaxOutputBytes = 65_536;
+    private string _readOnlyQueryCommand = "show port status";
+    private string _readOnlyQueryOutput = string.Empty;
+    private string _readOnlyQueryStatusText = "준비";
+    private string _readOnlyQueryResultMeta = "실행 결과가 없습니다.";
+    private bool _isReadOnlyQueryRunning;
+    private bool _readOnlyQueryTruncated;
+    private readonly List<string> _readOnlyQueryHistory = [];
+    private int _readOnlyQueryHistoryIndex;
+    private string _readOnlyQueryHistoryDraft = string.Empty;
+    private bool _movingReadOnlyQueryHistory;
+    private CancellationTokenSource? _readOnlyQueryCancellation;
     private IReadOnlyList<OperationalStatusDto> _snapshotOperationalStatuses = [];
     private long _changeCursor;
     private long _settingsGeneration;
@@ -93,7 +109,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         EventFilters =
         [
             new(EventFilter.All, "전체"),
-            new(EventFilter.Unacknowledged, "미확인"),
+            new(EventFilter.Unacknowledged, "미확인 이벤트"),
             new(EventFilter.NewLog, "새 로그"),
             new(EventFilter.Critical, "장애"),
             new(EventFilter.Recovered, "복구")
@@ -102,6 +118,17 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !IsBusy && ConnectionState != AgentConnectionState.NeedsConnection);
         ManualCheckCommand = new AsyncRelayCommand(ExecuteManualCheckAsync, () => !IsBusy && SelectedDevice is not null && ConnectionState != AgentConnectionState.NeedsConnection);
+        ExecuteReadOnlyQueryCommand = new AsyncRelayCommand(
+            ExecuteReadOnlyQueryAsync,
+            () => ReadOnlyQueriesEnabled
+                  && !IsBusy
+                  && !IsReadOnlyQueryRunning
+                  && SelectedDevice is not null
+                  && ConnectionState != AgentConnectionState.NeedsConnection
+                  && !string.IsNullOrWhiteSpace(ReadOnlyQueryCommand));
+        CancelReadOnlyQueryCommand = new RelayCommand(CancelReadOnlyQuery, () => IsReadOnlyQueryRunning);
+        ClearReadOnlyQueryOutputCommand = new RelayCommand(ClearReadOnlyQueryOutput,
+            () => !IsReadOnlyQueryRunning && (!string.IsNullOrEmpty(ReadOnlyQueryOutput) || ReadOnlyQueryStatusText != "준비"));
         AcknowledgeCommand = new RelayCommand<EventViewModel>(item => _ = AcknowledgeAsync(item), item => item is { Acknowledged: false });
         SelectDeviceCommand = new RelayCommand<DeviceViewModel>(item => SelectedDevice = item, item => item is not null);
     }
@@ -113,17 +140,27 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<EventViewModel> SelectedDeviceChanges { get; } = [];
     public ObservableCollection<DeviceMetricDto> CollectorHealth { get; } = [];
     public ObservableCollection<OperationalStatusDto> OperationalStatuses { get; } = [];
-    public IReadOnlyList<string> RegisteredChecks { get; } = ["interface_status", "system", "log_ram", "version"];
+    public IReadOnlyList<RegisteredCheckOption> RegisteredChecks { get; } =
+    [
+        new("interface_status", "포트 상태"),
+        new("system", "장비 상태"),
+        new("log_ram", "시스템 로그"),
+        new("version", "버전 정보")
+    ];
     public IReadOnlyList<EventFilterOption> EventFilters { get; }
 
     public ICommand RefreshCommand { get; }
     public ICommand ManualCheckCommand { get; }
+    public ICommand ExecuteReadOnlyQueryCommand { get; }
+    public ICommand CancelReadOnlyQueryCommand { get; }
+    public ICommand ClearReadOnlyQueryOutputCommand { get; }
     public ICommand AcknowledgeCommand { get; }
     public ICommand SelectDeviceCommand { get; }
 
     public event EventHandler<EventViewModel>? AlertRaised;
     public ViewerSettings CurrentSettings => _settings;
     public long AppliedChangeCursor => Interlocked.Read(ref _changeCursor);
+    internal int ReadOnlyQueryHistoryCount => _readOnlyQueryHistory.Count;
 
     public DeviceViewModel? SelectedDevice
     {
@@ -156,6 +193,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 OnPropertyChanged(nameof(ConnectionText));
                 OnPropertyChanged(nameof(ConnectionHealth));
+                OnPropertyChanged(nameof(MiniIssueHealth));
                 OnPropertyChanged(nameof(MiniCurrentStatusText));
                 OnPropertyChanged(nameof(MiniIssueTitle));
                 OnPropertyChanged(nameof(MiniIssueDetail));
@@ -277,8 +315,110 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public string SelectedCheckId
     {
         get => _selectedCheckId;
-        set => SetProperty(ref _selectedCheckId, value);
+        set
+        {
+            if (SetProperty(ref _selectedCheckId, value)) OnPropertyChanged(nameof(SelectedCheckDisplayName));
+        }
     }
+
+    public string SelectedCheckDisplayName => RegisteredChecks
+        .FirstOrDefault(item => item.Id.Equals(SelectedCheckId, StringComparison.Ordinal))?.DisplayName
+        ?? SelectedCheckId;
+
+    public bool ReadOnlyQueriesEnabled
+    {
+        get => _readOnlyQueriesEnabled;
+        private set
+        {
+            if (SetProperty(ref _readOnlyQueriesEnabled, value))
+            {
+                OnPropertyChanged(nameof(ReadOnlyQueryUnavailableText));
+                NotifyCommandStates();
+            }
+        }
+    }
+
+    public int ReadOnlyQueryMaxCommandLength
+    {
+        get => _readOnlyQueryMaxCommandLength;
+        private set => SetProperty(ref _readOnlyQueryMaxCommandLength, Math.Clamp(value, 1, 4096));
+    }
+
+    public int ReadOnlyQueryMaxOutputBytes
+    {
+        get => _readOnlyQueryMaxOutputBytes;
+        private set => SetProperty(ref _readOnlyQueryMaxOutputBytes, Math.Clamp(value, 1, 16 * 1024 * 1024));
+    }
+
+    public string ReadOnlyQueryCommand
+    {
+        get => _readOnlyQueryCommand;
+        set
+        {
+            var clean = value ?? string.Empty;
+            if (!SetProperty(ref _readOnlyQueryCommand, clean)) return;
+            if (!_movingReadOnlyQueryHistory)
+            {
+                _readOnlyQueryHistoryIndex = _readOnlyQueryHistory.Count;
+                _readOnlyQueryHistoryDraft = clean;
+            }
+            NotifyCommandStates();
+        }
+    }
+
+    public string ReadOnlyQueryOutput
+    {
+        get => _readOnlyQueryOutput;
+        private set
+        {
+            if (SetProperty(ref _readOnlyQueryOutput, value))
+            {
+                OnPropertyChanged(nameof(HasReadOnlyQueryOutput));
+                NotifyCommandStates();
+            }
+        }
+    }
+
+    public bool HasReadOnlyQueryOutput => !string.IsNullOrEmpty(ReadOnlyQueryOutput);
+
+    public string ReadOnlyQueryStatusText
+    {
+        get => _readOnlyQueryStatusText;
+        private set => SetProperty(ref _readOnlyQueryStatusText, value);
+    }
+
+    public string ReadOnlyQueryResultMeta
+    {
+        get => _readOnlyQueryResultMeta;
+        private set => SetProperty(ref _readOnlyQueryResultMeta, value);
+    }
+
+    public bool ReadOnlyQueryTruncated
+    {
+        get => _readOnlyQueryTruncated;
+        private set => SetProperty(ref _readOnlyQueryTruncated, value);
+    }
+
+    public bool IsReadOnlyQueryRunning
+    {
+        get => _isReadOnlyQueryRunning;
+        private set
+        {
+            if (SetProperty(ref _isReadOnlyQueryRunning, value))
+            {
+                OnPropertyChanged(nameof(CanEditReadOnlyQuery));
+                NotifyCommandStates();
+            }
+        }
+    }
+
+    public bool CanEditReadOnlyQuery => !IsReadOnlyQueryRunning;
+
+    public string ReadOnlyQueryUnavailableText => !_hasSnapshot
+        ? "Agent 기능 정보를 확인하는 중입니다."
+        : _apiVersion < 3
+        ? "현재 Agent 버전은 장비 명령 기능을 지원하지 않습니다. Agent를 최신 버전으로 업데이트해 주세요."
+        : "Agent에서 장비 명령 기능이 꺼져 있습니다. Agent 설치 또는 복구 설정에서 읽기 전용 명령을 사용하도록 설정해 주세요.";
 
     public string EventSearchText
     {
@@ -312,24 +452,44 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         int.MaxValue);
     public long? AuthoritativeUnacknowledgedCount => _authoritativeUnacknowledged;
     public int VisibleEventCount => FilteredEvents.Count;
-    public string EventCountText => $"미확인 {UnacknowledgedCount:N0} · 표시 {VisibleEventCount:N0}";
+    public string UnacknowledgedDisplayText => $"미확인 이벤트 {UnacknowledgedCount:N0}건";
+    public string EventCountText => $"{UnacknowledgedDisplayText} · 표시 {VisibleEventCount:N0}건";
     public string ApiVersionText => $"API v{_apiVersion}";
     public string MiniCurrentStatusText => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
         ? "현재 상태 확인됨"
         : "현재 상태 미확인";
+    public DeviceHealth MiniIssueHealth => ConnectionState switch
+    {
+        AgentConnectionState.NeedsConnection or AgentConnectionState.Offline => DeviceHealth.Disconnected,
+        AgentConnectionState.Connecting => DeviceHealth.Loading,
+        AgentConnectionState.Reconnecting or AgentConnectionState.Stale => DeviceHealth.Warning,
+        _ when CriticalCount > 0 => DeviceHealth.Critical,
+        _ when DisconnectedCount > 0 => DeviceHealth.Disconnected,
+        _ when WarningCount > 0 => DeviceHealth.Warning,
+        _ => DeviceHealth.Normal
+    };
     public string MiniIssueTitle => ConnectionState switch
     {
-        AgentConnectionState.NeedsConnection => "Viewer 연결 설정 필요",
-        AgentConnectionState.Offline => "원격 수집기 연결 끊김",
+        AgentConnectionState.NeedsConnection => "연결 설정 필요",
+        AgentConnectionState.Connecting => "원격 수집 PC 연결 중",
+        AgentConnectionState.Offline => "원격 수집 PC 연결 끊김",
         AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
         AgentConnectionState.Stale => "원격 상태 수신 지연",
-        _ when CriticalDisplayCount > 0 => $"장애 장비 {CriticalDisplayCount}대",
+        _ when CriticalCount > 0 && DisconnectedCount > 0 => $"장애 {CriticalCount}대 · 접속 끊김 {DisconnectedCount}대",
+        _ when CriticalCount > 0 => $"장애 장비 {CriticalCount}대",
+        _ when DisconnectedCount > 0 => $"접속 끊김 장비 {DisconnectedCount}대",
         _ when WarningCount > 0 => $"경고 장비 {WarningCount}대",
         _ => "모든 장비 정상"
     };
-    public string MiniIssueDetail => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-        ? $"새 로그 {NewLogCount}건 · 미확인 {UnacknowledgedCount}건"
-        : "정상 캐시는 유지 · 신규 상태 수신 안 됨";
+    public string MiniIssueDetail => ConnectionState switch
+    {
+        AgentConnectionState.Connected or AgentConnectionState.Demo =>
+            $"새 로그 {NewLogCount}건 · 미확인 이벤트 {UnacknowledgedCount}건",
+        AgentConnectionState.Connecting => "첫 상태를 기다리는 중",
+        AgentConnectionState.NeedsConnection => "연결 설정 후 상태를 확인할 수 있습니다.",
+        _ when _hasSnapshot => "마지막 상태 유지 · 새 상태 수신 안 됨",
+        _ => "수신된 상태 없음"
+    };
     public DeviceHealthSummary HealthSummary => StatusAggregator.Aggregate(Devices);
 
     public bool NavigateToEvent(string? eventId)
@@ -420,10 +580,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             if (snapshot is not null && hubStarted && changeFeedSynchronized &&
                 Interlocked.Read(ref _feedResetCount) == 0)
             {
-                await RunOnUiAsync(() =>
-                {
-                    OperationMessage = _settings.DemoMode ? "오프라인 데모가 실행 중입니다." : "실시간 모니터링 중입니다.";
-                }).ConfigureAwait(false);
+                await RunOnUiAsync(() => SetReadyOperationMessageIfHealthy(_settings)).ConfigureAwait(false);
             }
         }
         finally
@@ -513,6 +670,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public async Task SwitchClientAsync(ViewerSettings settings, CancellationToken cancellationToken = default)
     {
+        if (IsReadOnlyQueryRunning) CancelReadOnlyQuery();
         await _initializeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -572,9 +730,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     _syncGate.Release();
                 }
 
+                var feedResetBefore = Interlocked.Read(ref _feedResetCount);
+                var synchronized = false;
                 try
                 {
                     await SynchronizeChangesAsync(hasCursor, cancellationToken).ConfigureAwait(false);
+                    synchronized = true;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -595,6 +756,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         try { await previous.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false); }
                         catch (Exception exception) when (exception is TimeoutException or OperationCanceledException) { }
                     }
+                }
+                if (synchronized && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
+                {
+                    await RunOnUiAsync(() => SetReadyOperationMessageIfHealthy(clean)).ConfigureAwait(false);
                 }
             }
             catch
@@ -681,7 +846,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             if (await RefreshSnapshotAndChangesAsync(true, _lifetime.Token).ConfigureAwait(false)
                 && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
             {
-                await RunOnUiAsync(() => OperationMessage = "최신 상태로 갱신했습니다.").ConfigureAwait(false);
+                await RunOnUiAsync(() =>
+                {
+                    if (ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo)
+                    {
+                        OperationMessage = "최신 상태로 갱신했습니다.";
+                    }
+                }).ConfigureAwait(false);
             }
         }
         finally
@@ -725,6 +896,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 _syncGate.Release();
             }
+            await RunOnUiAsync(ClearConnectionFailureMessageIfHealthy).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return false; }
@@ -742,7 +914,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         await RunOnUiAsync(() =>
         {
             IsBusy = true;
-            OperationMessage = $"{device.Name} · {SelectedCheckId} 점검 요청 중";
+            OperationMessage = $"{device.Name} · {SelectedCheckDisplayName} 점검 요청 중";
         }).ConfigureAwait(false);
         try
         {
@@ -758,6 +930,121 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             await RunOnUiAsync(() => IsBusy = false).ConfigureAwait(false);
         }
+    }
+
+    private async Task ExecuteReadOnlyQueryAsync()
+    {
+        var device = SelectedDevice;
+        var command = ReadOnlyQueryCommand.Trim();
+        if (device is null || !ReadOnlyQueriesEnabled || command.Length == 0) return;
+
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _readOnlyQueryCancellation?.Dispose();
+        _readOnlyQueryCancellation = cancellation;
+        await RunOnUiAsync(() =>
+        {
+            IsReadOnlyQueryRunning = true;
+            ReadOnlyQueryOutput = string.Empty;
+            ReadOnlyQueryTruncated = false;
+            ReadOnlyQueryStatusText = "장비 연결 및 조회 중";
+            ReadOnlyQueryResultMeta = $"{device.Name} · {command}";
+        }).ConfigureAwait(false);
+
+        try
+        {
+            var result = await _client.ExecuteReadOnlyQueryAsync(device.Id, command, cancellation.Token).ConfigureAwait(false);
+            await RunOnUiAsync(() =>
+            {
+                AddReadOnlyQueryHistory(result.Command);
+                ReadOnlyQueryOutput = result.Output;
+                ReadOnlyQueryTruncated = result.Truncated;
+                ReadOnlyQueryStatusText = result.Truncated
+                    ? "완료 · 연결 종료됨 · 출력 일부 생략"
+                    : "완료 · 연결 종료됨";
+                var bytes = Encoding.UTF8.GetByteCount(result.Output);
+                var reconnect = result.ReconnectCount > 0 ? $" · 재연결 {result.ReconnectCount}회" : string.Empty;
+                ReadOnlyQueryResultMeta =
+                    $"{device.Name} · {result.Command} · {result.ElapsedMs:N0}ms · {bytes:N0}바이트 · 세션 {result.SessionCount}회{reconnect}";
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            await RunOnUiAsync(() =>
+            {
+                ReadOnlyQueryStatusText = "취소됨 · 연결 종료 요청됨";
+                ReadOnlyQueryResultMeta = $"{device.Name} · {command} · 사용자가 취소했습니다.";
+            }).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            var code = SafeMessage(exception);
+            await RunOnUiAsync(() =>
+            {
+                ReadOnlyQueryStatusText = $"실패 · {code}";
+                ReadOnlyQueryResultMeta = ViewerConnectionMessages.ForCode(code);
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            await RunOnUiAsync(() => IsReadOnlyQueryRunning = false).ConfigureAwait(false);
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _readOnlyQueryCancellation, null, cancellation), cancellation))
+            {
+                cancellation.Dispose();
+            }
+        }
+    }
+
+    private void CancelReadOnlyQuery()
+    {
+        if (!IsReadOnlyQueryRunning) return;
+        ReadOnlyQueryStatusText = "취소 요청 중";
+        _readOnlyQueryCancellation?.Cancel();
+    }
+
+    private void ClearReadOnlyQueryOutput()
+    {
+        if (IsReadOnlyQueryRunning) return;
+        ReadOnlyQueryOutput = string.Empty;
+        ReadOnlyQueryTruncated = false;
+        ReadOnlyQueryStatusText = "준비";
+        ReadOnlyQueryResultMeta = "실행 결과가 없습니다.";
+    }
+
+    private void AddReadOnlyQueryHistory(string command)
+    {
+        if (_readOnlyQueryHistory.Count == 0
+            || !_readOnlyQueryHistory[^1].Equals(command, StringComparison.Ordinal))
+        {
+            _readOnlyQueryHistory.Add(command);
+            if (_readOnlyQueryHistory.Count > 20) _readOnlyQueryHistory.RemoveAt(0);
+        }
+        _readOnlyQueryHistoryIndex = _readOnlyQueryHistory.Count;
+        _readOnlyQueryHistoryDraft = string.Empty;
+    }
+
+    public bool MoveReadOnlyQueryHistory(int direction)
+    {
+        if (IsReadOnlyQueryRunning || _readOnlyQueryHistory.Count == 0 || direction == 0) return false;
+        if (_readOnlyQueryHistoryIndex >= _readOnlyQueryHistory.Count)
+        {
+            _readOnlyQueryHistoryDraft = ReadOnlyQueryCommand;
+        }
+
+        var next = Math.Clamp(_readOnlyQueryHistoryIndex + Math.Sign(direction), 0, _readOnlyQueryHistory.Count);
+        if (next == _readOnlyQueryHistoryIndex) return false;
+        _readOnlyQueryHistoryIndex = next;
+        _movingReadOnlyQueryHistory = true;
+        try
+        {
+            ReadOnlyQueryCommand = next == _readOnlyQueryHistory.Count
+                ? _readOnlyQueryHistoryDraft
+                : _readOnlyQueryHistory[next];
+        }
+        finally
+        {
+            _movingReadOnlyQueryHistory = false;
+        }
+        return true;
     }
 
     private async Task AcknowledgeAsync(EventViewModel? item)
@@ -976,10 +1263,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         CollectorSummary = snapshot.CollectorSummary;
         _authoritativeUnacknowledged = snapshot.AuthoritativeUnacknowledged;
         _apiVersion = snapshot.ApiVersion;
+        ReadOnlyQueriesEnabled = snapshot.ApiVersion >= 3 && snapshot.ReadOnlyQueriesEnabled;
+        ReadOnlyQueryMaxCommandLength = snapshot.ReadOnlyQueryMaxCommandLength;
+        ReadOnlyQueryMaxOutputBytes = snapshot.ReadOnlyQueryMaxOutputBytes;
+        OnPropertyChanged(nameof(ReadOnlyQueryUnavailableText));
         _snapshotOperationalStatuses = snapshot.OperationalStatuses ?? [];
         _lastRefreshedAt = snapshot.GeneratedAt;
         _lastSuccessfulReceiptAt = DateTimeOffset.Now;
         _hasSnapshot = true;
+        OnPropertyChanged(nameof(ReadOnlyQueryUnavailableText));
         OnPropertyChanged(nameof(LastRefreshText));
         OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
         OnPropertyChanged(nameof(LastSuccessfulReceiptText));
@@ -1108,6 +1400,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
         CollectorHealth.Add(new("마지막 성공 수신", LastSuccessfulReceiptText));
         CollectorHealth.Add(new("수집기 버전", CollectorVersion));
+        CollectorHealth.Add(new("API 버전", $"v{_apiVersion}"));
+        CollectorHealth.Add(new("수집기 요약", CollectorSummary));
         CollectorHealth.Add(new("마지막 상태 생성", generatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")));
         CollectorHealth.Add(new("데이터 범위", "구조화 이벤트만 수신 · 원문 미수신"));
 
@@ -1202,6 +1496,29 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }).ConfigureAwait(false);
     }
 
+    private static string ReadyOperationMessage(ViewerSettings settings) => settings.DemoMode
+        ? "오프라인 데모가 실행 중입니다."
+        : "실시간 모니터링 중입니다.";
+
+    private void SetReadyOperationMessageIfHealthy(ViewerSettings settings)
+    {
+        if (ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo)
+        {
+            OperationMessage = ReadyOperationMessage(settings);
+        }
+    }
+
+    private void ClearConnectionFailureMessageIfHealthy()
+    {
+        if (ConnectionState is not (AgentConnectionState.Connected or AgentConnectionState.Demo)
+            || !OperationMessage.StartsWith("Agent 상태 미확인", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        OperationMessage = ReadyOperationMessage(_settings);
+    }
+
     private void UpdateCombinedConnectionState()
     {
         AgentConnectionState combined;
@@ -1254,9 +1571,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(CriticalCount));
         OnPropertyChanged(nameof(DisconnectedCount));
         OnPropertyChanged(nameof(CriticalDisplayCount));
+        OnPropertyChanged(nameof(MiniIssueHealth));
         OnPropertyChanged(nameof(NewLogCount));
         OnPropertyChanged(nameof(RecoveredCount));
         OnPropertyChanged(nameof(UnacknowledgedCount));
+        OnPropertyChanged(nameof(UnacknowledgedDisplayText));
         OnPropertyChanged(nameof(AuthoritativeUnacknowledgedCount));
         OnPropertyChanged(nameof(VisibleEventCount));
         OnPropertyChanged(nameof(EventCountText));
@@ -1270,6 +1589,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         (RefreshCommand as AsyncRelayCommand)?.NotifyCanExecuteChanged();
         (ManualCheckCommand as AsyncRelayCommand)?.NotifyCanExecuteChanged();
+        (ExecuteReadOnlyQueryCommand as AsyncRelayCommand)?.NotifyCanExecuteChanged();
+        (CancelReadOnlyQueryCommand as RelayCommand)?.NotifyCanExecuteChanged();
+        (ClearReadOnlyQueryOutputCommand as RelayCommand)?.NotifyCanExecuteChanged();
     }
 
     private void RunOnUi(Action action)
@@ -1338,6 +1660,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _disposed = true;
         _allowLiveAlerts = false;
         _lifetime.Cancel();
+        _readOnlyQueryCancellation?.Cancel();
         Interlocked.Increment(ref _settingsGeneration);
         UnsubscribeClient(_client);
 
@@ -1356,6 +1679,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         try { await _client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
         catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
+        Interlocked.Exchange(ref _readOnlyQueryCancellation, null)?.Dispose();
         try { lock (_settingsSync) _settingsStore.Save(_settings); } catch { }
 
         if (initializeQuiesced) _initializeGate.Dispose();

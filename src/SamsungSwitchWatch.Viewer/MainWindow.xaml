@@ -8,7 +8,7 @@
         Title="Samsung Switch Watch"
         Width="1440" Height="900" MinWidth="1280" MinHeight="720"
         WindowStartupLocation="CenterScreen"
-        Closing="OnClosing" Loaded="OnLoaded"
+        Closing="OnClosing" Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown"
         KeyboardNavigation.TabNavigation="Continue"
         AutomationProperties.Name="삼성 스위치 모니터링 운영 대시보드">
     <Window.Resources>
@@ -26,6 +26,45 @@
             </Border>
         </DataTemplate>
 
+        <Style x:Key="AccessibleEventItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="AutomationProperties.Name" Value="{Binding AccessibilityName}" />
+            <Setter Property="AutomationProperties.HelpText" Value="{Binding AlertDetail}" />
+            <Setter Property="AutomationProperties.ItemStatus" Value="{Binding AccessibilityStatus}" />
+        </Style>
+
+        <DataTemplate x:Key="DeviceEventTemplate">
+            <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="4" />
+                        <ColumnDefinition Width="10" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
+                    <StackPanel Grid.Column="2">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                            <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding Severity, Converter={StaticResource HealthText}}"
+                                       FontSize="12" FontWeight="SemiBold"
+                                       Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}" />
+                            <TextBlock Grid.Column="2" Margin="8,0,0,0" Text="{Binding TimeText}" FontSize="12"
+                                       Foreground="{StaticResource MutedTextBrush}" />
+                        </Grid>
+                        <TextBlock Margin="0,4,0,0" Text="{Binding AlertDetail}" FontSize="12"
+                                   Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
         <DataTemplate DataType="{x:Type models:DeviceMetricDto}">
             <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10">
                 <Grid>
@@ -38,7 +77,7 @@
                     <TextBlock Grid.Column="1" Text="{Binding Value}" FontWeight="SemiBold" />
                     <Border Grid.Column="2" Padding="8,3" CornerRadius="12"
                             Background="{Binding Health, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                        <TextBlock FontSize="11" FontWeight="SemiBold"
+                    <TextBlock FontSize="12" FontWeight="SemiBold"
                                    Foreground="{Binding Health, Converter={StaticResource HealthBrush}}"
                                    Text="{Binding Health, Converter={StaticResource HealthText}}" />
                     </Border>
@@ -61,12 +100,17 @@
                     <Border Background="{Binding Health, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
                     <StackPanel Grid.Column="2">
                         <Grid>
-                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                            <TextBlock HorizontalAlignment="Right" Text="{Binding Code}" FontSize="10"
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                            <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding Code}" FontSize="12"
                                        Foreground="{StaticResource MutedTextBrush}" />
                         </Grid>
                         <TextBlock Margin="0,4,0,0" Text="{Binding Detail}" FontSize="12"
-                                   Foreground="{StaticResource MutedTextBrush}" />
+                                   Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Grid>
             </Border>
@@ -78,6 +122,10 @@
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
     </Window.Resources>
+
+    <Window.InputBindings>
+        <KeyBinding Key="F5" Command="{Binding RefreshCommand}" />
+    </Window.InputBindings>
 
     <Grid Background="{StaticResource CanvasBrush}">
         <Grid.RowDefinitions>
@@ -97,7 +145,7 @@
                 <StackPanel VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="Samsung Switch Watch" FontSize="20" FontWeight="SemiBold" />
-                        <TextBlock Margin="10,0,0,0" Text="원격 수집기" FontSize="12"
+                        <TextBlock Margin="10,0,0,0" Text="원격 수집 PC" FontSize="12"
                                    Foreground="{StaticResource MutedTextBrush}" />
                         <Border Margin="8,0,0,0" Padding="9,4" CornerRadius="12"
                                 Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
@@ -109,21 +157,27 @@
                             </StackPanel>
                         </Border>
                     </StackPanel>
-                    <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" FontSize="12">
-                        <Run Text="{Binding LastSuccessfulReceiptText, Mode=OneWay}" /><Run Text=" · " />
-                        <Run Text="{Binding HttpConnectionText, Mode=OneWay}" /><Run Text=" · " />
-                        <Run Text="{Binding RealtimeConnectionText, Mode=OneWay}" />
-                    </TextBlock>
+                    <TextBlock Margin="0,4,0,0" Text="{Binding LastSuccessfulReceiptText}"
+                               Foreground="{StaticResource MutedTextBrush}" FontSize="12" />
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ComboBox Width="132" Margin="0,0,8,0" ItemsSource="{Binding RegisteredChecks}"
-                              SelectedItem="{Binding SelectedCheckId}"
-                              AutomationProperties.Name="등록된 읽기 전용 점검 선택" />
-                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="_전체 점검"
+                    <TextBlock Margin="0,0,8,0" Text="점검" FontSize="12"
+                               Foreground="{StaticResource MutedTextBrush}" />
+                    <ComboBox x:Name="RegisteredCheckComboBox" Width="132" Margin="0,0,8,0"
+                              ItemsSource="{Binding RegisteredChecks}" DisplayMemberPath="DisplayName"
+                              SelectedValuePath="Id" SelectedValue="{Binding SelectedCheckId}"
+                              AutomationProperties.Name="등록된 읽기 전용 점검 선택">
+                        <ComboBox.ItemContainerStyle>
+                            <Style TargetType="ComboBoxItem">
+                                <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName}" />
+                            </Style>
+                        </ComboBox.ItemContainerStyle>
+                    </ComboBox>
+                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="선택 점검 _실행"
                             Command="{Binding ManualCheckCommand}"
                             AutomationProperties.HelpText="선택한 장비에서 등록된 읽기 전용 점검만 실행합니다." />
-                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="_최신 결과"
+                    <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="화면 _새로고침"
                             Command="{Binding RefreshCommand}" />
                     <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="_미니 창"
                             Click="ShowMiniWindow_Click" />
@@ -144,29 +198,32 @@
             <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#BBF7D0">
                 <StackPanel>
                     <TextBlock Text="정상" Foreground="#15803D" />
-                    <TextBlock Text="{Binding NormalCount}" Style="{StaticResource SummaryValue}" Foreground="#15803D" />
-                    <TextBlock Text="현재 정상 장비" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="{Binding NormalCount, StringFormat={}{0:N0}대}" Style="{StaticResource SummaryValue}" Foreground="#15803D" />
+                    <TextBlock Text="현재 정상 장비" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="2" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FDE68A">
                 <StackPanel>
                     <TextBlock Text="경고" Foreground="#B45309" />
-                    <TextBlock Text="{Binding WarningCount}" Style="{StaticResource SummaryValue}" Foreground="#B45309" />
-                    <TextBlock Text="확인 필요 장비" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="{Binding WarningCount, StringFormat={}{0:N0}대}" Style="{StaticResource SummaryValue}" Foreground="#B45309" />
+                    <TextBlock Text="확인 필요 장비" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="4" Style="{StaticResource CardStyle}" Padding="16,12" BorderBrush="#FECACA">
                 <StackPanel>
-                    <TextBlock Text="장애" Foreground="#B91C1C" />
-                    <TextBlock Text="{Binding CriticalDisplayCount}" Style="{StaticResource SummaryValue}" Foreground="#B91C1C" />
-                    <TextBlock Text="장애·접속 실패" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="문제" Foreground="#B91C1C" />
+                    <TextBlock Text="{Binding CriticalDisplayCount, StringFormat={}{0:N0}대}" Style="{StaticResource SummaryValue}" Foreground="#B91C1C" />
+                    <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}">
+                        <Run Text="장애 " /><Run Text="{Binding CriticalCount, Mode=OneWay}" /><Run Text="대 · 접속 끊김 " />
+                        <Run Text="{Binding DisconnectedCount, Mode=OneWay}" /><Run Text="대" />
+                    </TextBlock>
                 </StackPanel>
             </Border>
             <Border Grid.Column="6" Style="{StaticResource CardStyle}" Padding="16,12">
                 <StackPanel>
-                    <TextBlock Text="미확인" Foreground="{StaticResource MutedTextBrush}" />
-                    <TextBlock Text="{Binding UnacknowledgedCount}" Style="{StaticResource SummaryValue}" />
-                    <TextBlock Text="Agent authoritative 총계" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="미확인 이벤트" Foreground="{StaticResource MutedTextBrush}" />
+                    <TextBlock Text="{Binding UnacknowledgedCount, StringFormat={}{0:N0}건}" Style="{StaticResource SummaryValue}" />
+                    <TextBlock Text="확인 처리 전 이벤트" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
                 </StackPanel>
             </Border>
             <Border Grid.Column="8" Style="{StaticResource CardStyle}" Padding="18,12">
@@ -174,19 +231,17 @@
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Grid>
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="Agent · 채널 상태" FontWeight="SemiBold" />
-                            <TextBlock Margin="8,0,0,0" Text="{Binding ApiVersionText}" FontSize="11"
-                                       Foreground="{StaticResource MutedTextBrush}" />
+                            <TextBlock Text="수집 상태" FontWeight="SemiBold" />
                         </StackPanel>
                         <Border HorizontalAlignment="Right" Padding="8,3" CornerRadius="12"
                                 Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                            <TextBlock Text="{Binding ConnectionText}" FontSize="11" FontWeight="SemiBold"
+                            <TextBlock Text="{Binding ConnectionText}" FontSize="12" FontWeight="SemiBold"
                                        Foreground="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}}" />
                         </Border>
                     </Grid>
                     <StackPanel Grid.Row="1" Margin="0,7,0,0">
-                        <TextBlock Text="{Binding CollectorSummary}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                        <TextBlock Margin="0,4,0,0" Text="{Binding LastSuccessfulReceiptText}" FontSize="11"
+                        <TextBlock Text="{Binding MiniCurrentStatusText}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                        <TextBlock Margin="0,4,0,0" Text="{Binding LastSuccessfulReceiptText}" FontSize="12"
                                    Foreground="{StaticResource MutedTextBrush}" />
                     </StackPanel>
                 </Grid>
@@ -207,56 +262,73 @@
                     <Grid.RowDefinitions><RowDefinition Height="54" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,0">
                         <Grid>
-                            <TextBlock Text="장비 · 3모델" FontWeight="SemiBold" />
+                            <TextBlock Text="장비" FontWeight="SemiBold" />
                             <TextBlock HorizontalAlignment="Right" Text="{Binding TotalCount, StringFormat={}{0}대}"
                                        Foreground="{StaticResource MutedTextBrush}" />
                         </Grid>
                     </Border>
-                    <ListBox Grid.Row="1" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}"
-                             BorderThickness="0" Background="Transparent"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             KeyboardNavigation.DirectionalNavigation="Contained"
-                             AutomationProperties.Name="IES4224GP IES4028XP IES4226XP 장비 목록">
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="BorderThickness" Value="0" />
-                                <Style.Triggers>
-                                    <Trigger Property="IsSelected" Value="True">
-                                        <Setter Property="Background" Value="#EFF6FF" />
-                                        <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
-                                        <Setter Property="BorderThickness" Value="3,0,0,0" />
-                                    </Trigger>
-                                </Style.Triggers>
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <Border Padding="16,12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1"
-                                        AutomationProperties.Name="{Binding Name}" AutomationProperties.ItemStatus="{Binding Summary}">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
-                                            <TextBlock Margin="0,3,0,0" Text="{Binding Model}" FontSize="12"
-                                                       Foreground="{StaticResource MutedTextBrush}" />
-                                            <TextBlock Margin="0,5,0,0" Text="{Binding CapabilityText}" FontSize="11"
-                                                       Foreground="{StaticResource MutedTextBrush}" />
-                                            <TextBlock Margin="0,3,0,0" Text="{Binding Summary}" FontSize="11"
-                                                       Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis"
-                                                       TextWrapping="NoWrap" />
-                                        </StackPanel>
-                                        <StackPanel Grid.Column="1" HorizontalAlignment="Right">
-                                            <ContentControl Content="{Binding}" ContentTemplate="{StaticResource HealthBadgeTemplate}" />
-                                            <TextBlock Margin="0,8,0,0" Text="{Binding LastCheckedText}" FontSize="11"
-                                                       Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Right" />
-                                        </StackPanel>
-                                    </Grid>
-                                </Border>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
+                    <Grid Grid.Row="1">
+                        <ListBox x:Name="DevicesList" ItemsSource="{Binding Devices}" SelectedItem="{Binding SelectedDevice}"
+                                 BorderThickness="0" Background="Transparent"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 KeyboardNavigation.DirectionalNavigation="Contained"
+                                 AutomationProperties.Name="관리 장비 목록">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="BorderThickness" Value="0" />
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding Name}" />
+                                    <Setter Property="AutomationProperties.HelpText" Value="{Binding Summary}" />
+                                    <Setter Property="AutomationProperties.ItemStatus" Value="{Binding CollectionStatusText}" />
+                                    <Style.Triggers>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter Property="Background" Value="#EFF6FF" />
+                                            <Setter Property="BorderBrush" Value="{StaticResource PrimaryBrush}" />
+                                            <Setter Property="BorderThickness" Value="3,0,0,0" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Padding="16,12" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                                                <TextBlock Margin="0,3,0,0" Text="{Binding Model}" FontSize="12"
+                                                           Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBlock Margin="0,5,0,0" Text="{Binding CapabilityText}" FontSize="12"
+                                                           Foreground="#B45309"
+                                                           Visibility="{Binding HasCapabilityIssue, Converter={StaticResource BoolVisibility}}" />
+                                                <TextBlock Margin="0,3,0,0" Text="{Binding Summary}" FontSize="12"
+                                                           Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis"
+                                                           TextWrapping="NoWrap" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                                <ContentControl Content="{Binding}" ContentTemplate="{StaticResource HealthBadgeTemplate}" />
+                                                <TextBlock Margin="0,8,0,0" Text="{Binding LastCheckedText}" FontSize="12"
+                                                           Foreground="{StaticResource MutedTextBrush}" HorizontalAlignment="Right" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="DevicesEmptyStateText" Text="현재 상태를 확인할 장비가 없습니다. 연결 설정을 확인해 주세요.">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasItems, ElementName=DevicesList}" Value="False">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
                 </Grid>
             </Border>
 
@@ -270,8 +342,7 @@
                                 <TextBlock Text="{Binding SelectedDevice.Name, TargetNullValue=스위치를 선택하세요}"
                                            FontSize="18" FontWeight="SemiBold" />
                                 <TextBlock Margin="0,5,0,0" Foreground="{StaticResource MutedTextBrush}">
-                                    <Run Text="{Binding SelectedDevice.Model, Mode=OneWay}" /><Run Text=" · " />
-                                    <Run Text="{Binding SelectedDevice.CapabilityText, Mode=OneWay}" /><Run Text=" · 가동 시간 " />
+                                    <Run Text="{Binding SelectedDevice.Model, Mode=OneWay}" /><Run Text=" · 가동 시간 " />
                                     <Run Text="{Binding SelectedDevice.Uptime, Mode=OneWay}" />
                                 </TextBlock>
                             </StackPanel>
@@ -287,31 +358,205 @@
                                 <Border Background="#F8FAFC" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                                     <TextBlock Text="{Binding SelectedDevice.Summary, TargetNullValue=왼쪽 목록에서 장비를 선택하면 상태가 표시됩니다.}" />
                                 </Border>
-                                <ListBox Grid.Row="1" ItemsSource="{Binding SelectedDevice.Metrics}" BorderThickness="0"
-                                         Background="Transparent" AutomationProperties.Name="선택 장비 구조화 상태 지표" />
+                                <Grid Grid.Row="1">
+                                    <ListBox x:Name="SelectedDeviceMetricsList" ItemsSource="{Binding SelectedDevice.Metrics}" BorderThickness="0"
+                                             Background="Transparent" AutomationProperties.Name="선택 장비 구조화 상태 지표">
+                                        <ListBox.ItemContainerStyle>
+                                            <Style TargetType="ListBoxItem">
+                                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                                <Setter Property="Padding" Value="0" />
+                                                <Setter Property="AutomationProperties.Name" Value="{Binding Label}" />
+                                                <Setter Property="AutomationProperties.HelpText" Value="{Binding Value}" />
+                                                <Setter Property="AutomationProperties.ItemStatus"
+                                                        Value="{Binding Health, Converter={StaticResource HealthText}}" />
+                                            </Style>
+                                        </ListBox.ItemContainerStyle>
+                                    </ListBox>
+                                    <TextBlock Text="수집된 상태 정보가 없습니다." HorizontalAlignment="Center"
+                                               VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding HasItems, ElementName=SelectedDeviceMetricsList}" Value="False">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
                             </Grid>
                         </TabItem>
                         <TabItem Header="새 _로그">
-                            <ListBox Margin="8,12,8,8" ItemsSource="{Binding SelectedDeviceLogs}" BorderThickness="0"
-                                     Background="Transparent" AutomationProperties.Name="선택 장비 신규 로그">
-                                <ListBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="4,10">
-                                            <StackPanel>
-                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
-                                                <TextBlock Margin="0,3,0,0" Text="{Binding Detail}" Foreground="{StaticResource MutedTextBrush}" />
-                                                <TextBlock Margin="0,4,0,0" Text="{Binding TimeText}" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
-                                            </StackPanel>
-                                        </Border>
-                                    </DataTemplate>
-                                </ListBox.ItemTemplate>
-                            </ListBox>
+                            <Grid Margin="8,12,8,8">
+                                <ListBox x:Name="SelectedDeviceLogsList" ItemsSource="{Binding SelectedDeviceLogs}" BorderThickness="0"
+                                         Background="Transparent" AutomationProperties.Name="선택 장비 신규 로그"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         ItemContainerStyle="{StaticResource AccessibleEventItemStyle}"
+                                         ItemTemplate="{StaticResource DeviceEventTemplate}" />
+                                <TextBlock Text="새로 수신된 로그가 없습니다.">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasItems, ElementName=SelectedDeviceLogsList}" Value="False">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="변경 _이력">
-                            <ListBox Margin="8,12,8,8" ItemsSource="{Binding SelectedDeviceChanges}" BorderThickness="0"
-                                     Background="Transparent" AutomationProperties.Name="선택 장비 변경 이력" />
+                            <Grid Margin="8,12,8,8">
+                                <ListBox x:Name="SelectedDeviceChangesList" ItemsSource="{Binding SelectedDeviceChanges}" BorderThickness="0"
+                                         Background="Transparent" AutomationProperties.Name="선택 장비 변경 이력"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         ItemContainerStyle="{StaticResource AccessibleEventItemStyle}"
+                                         ItemTemplate="{StaticResource DeviceEventTemplate}" />
+                                <TextBlock Text="상태 변경 이력이 없습니다.">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasItems, ElementName=SelectedDeviceChangesList}" Value="False">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </Grid>
                         </TabItem>
-                        <TabItem Header="수집기 _건강">
+                        <TabItem Header="장비 _명령"
+                                 AutomationProperties.Name="장비 명령"
+                                 AutomationProperties.HelpText="선택한 장비에서 Agent가 허용한 읽기 전용 show 명령 한 개를 실행합니다.">
+                            <Grid Margin="8,12,8,8">
+                                <Grid x:Name="ReadOnlyQueryEnabledPanel">
+                                    <Grid.Style>
+                                        <Style TargetType="Grid">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ReadOnlyQueriesEnabled}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Grid.Style>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="*" />
+                                    </Grid.RowDefinitions>
+
+                                    <Border Background="#FFFBEB" BorderBrush="#FDE68A" BorderThickness="1"
+                                            CornerRadius="4" Padding="12" Margin="0,0,0,10">
+                                        <StackPanel>
+                                            <TextBlock FontWeight="SemiBold" Foreground="#92400E"
+                                                       Text="조회 전용 show 명령만 실행됩니다." />
+                                            <TextBlock Margin="0,4,0,0" FontSize="12" Foreground="#92400E"
+                                                       Text="설정 변경 명령과 자격 증명 출력 명령은 Agent가 차단합니다. 결과는 이 Viewer 창의 메모리에만 유지됩니다." />
+                                        </StackPanel>
+                                    </Border>
+
+                                    <Grid Grid.Row="1" Margin="2,0,2,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="선택 장비" FontSize="12" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBlock Grid.Column="1" Margin="10,0,0,0" Text="{Binding SelectedDevice.Name, TargetNullValue=장비를 선택해 주세요.}"
+                                                   FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                    </Grid>
+
+                                    <Grid Grid.Row="2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox x:Name="ReadOnlyQueryTextBox" Height="38" Padding="10,6"
+                                                 VerticalContentAlignment="Center" FontFamily="Roboto Mono, Consolas"
+                                                 Text="{Binding ReadOnlyQueryCommand, UpdateSourceTrigger=PropertyChanged}"
+                                                 MaxLength="{Binding ReadOnlyQueryMaxCommandLength}"
+                                                 IsEnabled="{Binding CanEditReadOnlyQuery}"
+                                                 KeyDown="ReadOnlyQueryTextBox_OnKeyDown"
+                                                 AutomationProperties.Name="읽기 전용 show 명령"
+                                                 AutomationProperties.HelpText="Enter 실행, 위아래 화살표 최근 명령, 실행 중 Esc 취소" />
+                                        <Button Grid.Column="1" Margin="8,0,0,0" MinWidth="76"
+                                                Style="{StaticResource PrimaryButton}" Content="_실행"
+                                                Command="{Binding ExecuteReadOnlyQueryCommand}"
+                                                AutomationProperties.Name="장비 명령 실행" />
+                                        <Button Grid.Column="2" Margin="8,0,0,0" MinWidth="76"
+                                                Style="{StaticResource SecondaryButton}" Content="_취소"
+                                                Command="{Binding CancelReadOnlyQueryCommand}"
+                                                AutomationProperties.Name="장비 명령 취소" />
+                                    </Grid>
+
+                                    <Grid Grid.Row="3" Margin="2,10,2,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock x:Name="ReadOnlyQueryStatusTextBlock"
+                                                   Text="{Binding ReadOnlyQueryStatusText}" FontWeight="SemiBold"
+                                                   AutomationProperties.Name="장비 명령 실행 상태"
+                                                   AutomationProperties.LiveSetting="Polite" />
+                                        <TextBlock Grid.Column="1" Margin="10,0,8,0" Text="{Binding ReadOnlyQueryResultMeta}"
+                                                   FontSize="12" Foreground="{StaticResource MutedTextBrush}"
+                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                        <Button Grid.Column="2" Padding="10,5" Margin="0,0,6,0"
+                                                Style="{StaticResource SecondaryButton}" Content="복_사"
+                                                Click="CopyReadOnlyQueryOutput_Click"
+                                                IsEnabled="{Binding HasReadOnlyQueryOutput}"
+                                                AutomationProperties.Name="장비 명령 결과 복사" />
+                                        <Button Grid.Column="3" Padding="10,5"
+                                                Style="{StaticResource SecondaryButton}" Content="_지우기"
+                                                Command="{Binding ClearReadOnlyQueryOutputCommand}"
+                                                AutomationProperties.Name="장비 명령 결과 지우기" />
+                                    </Grid>
+
+                                    <TextBox x:Name="ReadOnlyQueryOutputTextBox" Grid.Row="4"
+                                             Text="{Binding ReadOnlyQueryOutput, Mode=OneWay}" IsReadOnly="True"
+                                             AcceptsReturn="True" AcceptsTab="True" TextWrapping="NoWrap"
+                                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                             FontFamily="Roboto Mono, Consolas" FontSize="12" Padding="10"
+                                             Background="#0F172A" Foreground="#E2E8F0" BorderThickness="0"
+                                             AutomationProperties.Name="장비 명령 실행 결과"
+                                             AutomationProperties.HelpText="Viewer 메모리에만 유지되는 읽기 전용 결과입니다." />
+                                </Grid>
+
+                                <Border x:Name="ReadOnlyQueryUnavailablePanel" Background="#F8FAFC"
+                                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="4" Padding="20">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ReadOnlyQueriesEnabled}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <TextBlock Text="장비 명령을 사용할 수 없습니다." FontWeight="SemiBold"
+                                                   HorizontalAlignment="Center" />
+                                        <TextBlock Margin="0,7,0,0" MaxWidth="440" Text="{Binding ReadOnlyQueryUnavailableText}"
+                                                   FontSize="12" Foreground="{StaticResource MutedTextBrush}"
+                                                   TextAlignment="Center"
+                                                   AutomationProperties.Name="장비 명령 사용 불가 안내" />
+                                    </StackPanel>
+                                </Border>
+                            </Grid>
+                        </TabItem>
+                        <TabItem Header="수집 _진단">
                             <Grid Margin="8,12,8,8">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
@@ -320,13 +565,29 @@
                                     <RowDefinition Height="*" />
                                 </Grid.RowDefinitions>
                                 <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12">
-                                    <TextBlock Text="구조화된 상태와 이벤트만 수신합니다. Telnet 원문·자격 증명은 Agent PC에만 남습니다."
-                                               Foreground="#1E40AF" />
+                                    <StackPanel>
+                                        <TextBlock Text="구조화된 상태와 이벤트만 수신합니다. Telnet 원문·자격 증명은 원격 수집 PC에만 남습니다."
+                                                   Foreground="#1E40AF" />
+                                        <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="#1E40AF">
+                                            <Run Text="{Binding CollectorVersion, Mode=OneWay}" /><Run Text=" · " />
+                                            <Run Text="{Binding ApiVersionText, Mode=OneWay}" /><Run Text=" · " />
+                                            <Run Text="{Binding CollectorSummary, Mode=OneWay}" />
+                                        </TextBlock>
+                                    </StackPanel>
                                 </Border>
                                 <TextBlock Grid.Row="1" Text="장비별 명령 자동 선택" FontWeight="SemiBold" Margin="2,0,0,8"/>
                                 <ListBox Grid.Row="2" ItemsSource="{Binding SelectedDevice.Capabilities}" BorderThickness="0"
                                          Background="Transparent" MaxHeight="210"
                                          AutomationProperties.Name="선택 장비 명령 지원 및 대체 상태">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="Padding" Value="0" />
+                                            <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName}" />
+                                            <Setter Property="AutomationProperties.HelpText" Value="{Binding SelectedCommandText}" />
+                                            <Setter Property="AutomationProperties.ItemStatus" Value="{Binding StateText}" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,9">
@@ -338,11 +599,11 @@
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
                                                     <StackPanel Grid.Column="1">
-                                                        <TextBlock Text="{Binding SelectedCommandText}" FontFamily="Roboto Mono, Consolas" FontSize="11"/>
-                                                        <TextBlock Text="{Binding FallbackText}" Margin="0,3,0,0" FontSize="10"
+                                                        <TextBlock Text="{Binding SelectedCommandText}" FontFamily="Roboto Mono, Consolas" FontSize="12"/>
+                                                        <TextBlock Text="{Binding FallbackText}" Margin="0,3,0,0" FontSize="12"
                                                                    Foreground="{StaticResource MutedTextBrush}"/>
                                                     </StackPanel>
-                                                    <TextBlock Grid.Column="2" Text="{Binding StateText}" Margin="12,0,0,0" FontSize="11"
+                                                    <TextBlock Grid.Column="2" Text="{Binding StateText}" Margin="12,0,0,0" FontSize="12"
                                                                Foreground="{StaticResource MutedTextBrush}"/>
                                                 </Grid>
                                             </Border>
@@ -355,6 +616,9 @@
                                         <Style TargetType="ListBoxItem">
                                             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                                             <Setter Property="Padding" Value="0"/>
+                                            <Setter Property="AutomationProperties.Name" Value="{Binding Title}" />
+                                            <Setter Property="AutomationProperties.HelpText" Value="{Binding Detail}" />
+                                            <Setter Property="AutomationProperties.ItemStatus" Value="{Binding Code}" />
                                         </Style>
                                     </ListBox.ItemContainerStyle>
                                 </ListBox>
@@ -368,73 +632,108 @@
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="54" />
-                        <RowDefinition Height="92" />
+                        <RowDefinition Height="82" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="46" />
                     </Grid.RowDefinitions>
                     <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,0">
                         <Grid>
-                            <TextBlock Text="이벤트 · 검색/필터" FontWeight="SemiBold" />
+                            <TextBlock Text="최근 이벤트" FontWeight="SemiBold" />
                             <TextBlock HorizontalAlignment="Right" Text="{Binding EventCountText}"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        AutomationProperties.LiveSetting="Polite" />
                         </Grid>
                     </Border>
-                    <Grid Grid.Row="1" Margin="12,10">
-                        <Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="36" /></Grid.RowDefinitions>
-                        <TextBox Grid.Row="0" Padding="10,6" Text="{Binding EventSearchText, UpdateSourceTrigger=PropertyChanged}"
+                    <Grid Grid.Row="1" Margin="12,7">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="36" /></Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="132" /></Grid.ColumnDefinitions>
+                        <Label Padding="0,0,0,4" Content="_검색" FontSize="12" Target="{Binding ElementName=EventSearchBox}" />
+                        <Label Grid.Column="1" Padding="8,0,0,4" Content="_상태" FontSize="12"
+                               Target="{Binding ElementName=EventFilterComboBox}" />
+                        <TextBox x:Name="EventSearchBox" Grid.Row="1" Padding="10,6"
+                                 Text="{Binding EventSearchText, UpdateSourceTrigger=PropertyChanged}"
                                  AutomationProperties.Name="이벤트 텍스트 검색"
-                                 AutomationProperties.HelpText="장비 별칭, 제목, 상세, 이벤트 유형에서 검색합니다." />
-                        <ComboBox Grid.Row="1" Margin="0,6,0,0" ItemsSource="{Binding EventFilters}"
-                                  DisplayMemberPath="Label" SelectedItem="{Binding SelectedEventFilter}"
-                                  AutomationProperties.Name="이벤트 필터 전체 미확인 새 로그 장애 복구" />
+                                 AutomationProperties.HelpText="장비 이름, 제목, 상세, 이벤트 유형에서 검색합니다." />
+                        <ComboBox x:Name="EventFilterComboBox" Grid.Row="1" Grid.Column="1" Margin="8,0,0,0"
+                                  ItemsSource="{Binding EventFilters}" DisplayMemberPath="Label"
+                                  SelectedItem="{Binding SelectedEventFilter}"
+                                  AutomationProperties.Name="이벤트 상태 필터">
+                            <ComboBox.ItemContainerStyle>
+                                <Style TargetType="ComboBoxItem">
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding Label}" />
+                                </Style>
+                            </ComboBox.ItemContainerStyle>
+                        </ComboBox>
                     </Grid>
-                    <ListBox x:Name="RecentEventsList" Grid.Row="2" ItemsSource="{Binding FilteredEvents}"
-                             SelectedItem="{Binding SelectedEvent}" BorderThickness="0" Background="Transparent"
-                             KeyboardNavigation.DirectionalNavigation="Contained"
-                             AutomationProperties.Name="필터된 최근 이벤트 목록">
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14"
-                                        Opacity="{Binding Acknowledged, Converter={StaticResource BoolOpacity}}"
-                                        AutomationProperties.Name="{Binding Title}" AutomationProperties.ItemStatus="{Binding StatusText}">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="5" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                                        <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
-                                        <StackPanel Grid.Column="2">
-                                            <Grid>
-                                                <TextBlock Text="{Binding DeviceName}" FontSize="12" FontWeight="SemiBold" />
-                                                <TextBlock HorizontalAlignment="Right" Text="{Binding TimeText}" FontSize="11"
-                                                           Foreground="{StaticResource MutedTextBrush}" />
-                                            </Grid>
-                                            <TextBlock Margin="0,6,0,0" Text="{Binding Title}" FontWeight="SemiBold" />
-                                            <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12"
-                                                       Foreground="{StaticResource MutedTextBrush}" />
-                                            <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
-                                                <Border Padding="7,3" CornerRadius="12"
-                                                        Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
-                                                    <TextBlock Text="{Binding Severity, Converter={StaticResource HealthText}}" FontSize="11"
-                                                               Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}" />
-                                                </Border>
-                                                <Border Margin="6,0,0,0" Padding="7,3" CornerRadius="12" Background="#F1F5F9">
-                                                    <TextBlock Text="{Binding StatusText}" FontSize="11" />
-                                                </Border>
-                                                <Button Margin="8,0,0,0" Padding="8,3" FontSize="11" Content="_확인"
-                                                        Command="{Binding DataContext.AcknowledgeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                                        CommandParameter="{Binding}" AutomationProperties.Name="이벤트 확인 처리" />
+                    <Grid Grid.Row="2">
+                        <ListBox x:Name="RecentEventsList" ItemsSource="{Binding FilteredEvents}"
+                                 SelectedItem="{Binding SelectedEvent}" BorderThickness="0" Background="Transparent"
+                                 KeyboardNavigation.DirectionalNavigation="Contained"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 AutomationProperties.Name="필터된 최근 이벤트 목록">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="Padding" Value="0" />
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="AutomationProperties.Name" Value="{Binding AccessibilityName}" />
+                                    <Setter Property="AutomationProperties.HelpText" Value="{Binding AlertDetail}" />
+                                    <Setter Property="AutomationProperties.ItemStatus" Value="{Binding AccessibilityStatus}" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14"
+                                            Opacity="{Binding Acknowledged, Converter={StaticResource BoolOpacity}}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="5" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                            <Border Background="{Binding Severity, Converter={StaticResource HealthBrush}}" CornerRadius="2" />
+                                            <StackPanel Grid.Column="2">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding DeviceName}" FontSize="12" FontWeight="SemiBold"
+                                                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                                    <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding TimeText}" FontSize="12"
+                                                               Foreground="{StaticResource MutedTextBrush}" />
+                                                </Grid>
+                                                <TextBlock Margin="0,6,0,0" Text="{Binding Title}" FontWeight="SemiBold" />
+                                                <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12"
+                                                           Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                                <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
+                                                    <Border Padding="7,3" CornerRadius="12"
+                                                            Background="{Binding Severity, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
+                                                        <TextBlock Text="{Binding Severity, Converter={StaticResource HealthText}}" FontSize="12"
+                                                                   Foreground="{Binding Severity, Converter={StaticResource HealthBrush}}" />
+                                                    </Border>
+                                                    <Border Margin="6,0,0,0" Padding="7,3" CornerRadius="12" Background="#F1F5F9">
+                                                        <TextBlock Text="{Binding StatusText}" FontSize="12" />
+                                                    </Border>
+                                                    <Button Margin="8,0,0,0" Padding="8,3" FontSize="12" Content="_확인 처리"
+                                                            Visibility="{Binding CanAcknowledge, Converter={StaticResource BoolVisibility}}"
+                                                            Command="{Binding DataContext.AcknowledgeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                            CommandParameter="{Binding}" AutomationProperties.Name="이벤트 확인 처리" />
+                                                </StackPanel>
                                             </StackPanel>
-                                        </StackPanel>
-                                    </Grid>
-                                </Border>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock Text="조건에 맞는 이벤트가 없습니다.">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasItems, ElementName=RecentEventsList}" Value="False">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
                     <Border Grid.Row="3" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="12,6">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button Style="{StaticResource SecondaryButton}" Padding="10,5" Content="_CSV"
@@ -450,16 +749,19 @@
         <Border Grid.Row="3" Background="#F1F5F9" BorderBrush="{StaticResource BorderBrush}"
                 BorderThickness="0,1,0,0" Padding="24,0">
             <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal">
                     <ProgressBar Width="90" Height="4" Margin="0,0,12,0" IsIndeterminate="True"
                                  Visibility="{Binding IsBusy, Converter={StaticResource BoolVisibility}}" />
                     <TextBlock Text="{Binding OperationMessage}" FontSize="12" Foreground="{StaticResource MutedTextBrush}"
                                AutomationProperties.LiveSetting="Polite" />
                 </StackPanel>
-                <TextBlock HorizontalAlignment="Right" FontSize="11" Foreground="{StaticResource MutedTextBrush}">
-                    <Run Text="{Binding CollectorVersion, Mode=OneWay}" /><Run Text=" · " />
-                    <Run Text="원문 미수신" />
-                </TextBlock>
+                <TextBlock Grid.Column="1" HorizontalAlignment="Right" FontSize="12"
+                           Text="구조화 상태만 표시 · 원문은 원격 수집 PC에 보관"
+                           Foreground="{StaticResource MutedTextBrush}" />
             </Grid>
         </Border>
     </Grid>

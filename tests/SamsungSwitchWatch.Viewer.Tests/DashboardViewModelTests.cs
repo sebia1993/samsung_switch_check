@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Collections.Concurrent;
+using System.Text.Json;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
@@ -575,6 +576,7 @@ public sealed class DashboardViewModelTests
 
             Assert.Equal("http://replacement.example.test:18443", viewModel.CurrentSettings.AgentUri);
             Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+            Assert.Contains("AGENT_UNREACHABLE", viewModel.OperationMessage, StringComparison.Ordinal);
             Assert.True(original.DisposeCalled);
             Assert.False(replacement.DisposeCalled);
             await viewModel.DisposeAsync();
@@ -696,6 +698,341 @@ public sealed class DashboardViewModelTests
         await viewModel.DisposeAsync();
     }
 
+    [Fact]
+    public async Task RegisteredChecks_ShowKoreanLabelsButExecuteRawCommandId()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0,
+            [Device("a", DeviceHealth.Normal, DateTimeOffset.UtcNow)]);
+        var viewModel = fixture.CreateViewModel();
+        await viewModel.InitializeAsync();
+
+        Assert.Collection(viewModel.RegisteredChecks,
+            item => Assert.Equal(("interface_status", "포트 상태"), (item.Id, item.DisplayName)),
+            item => Assert.Equal(("system", "장비 상태"), (item.Id, item.DisplayName)),
+            item => Assert.Equal(("log_ram", "시스템 로그"), (item.Id, item.DisplayName)),
+            item => Assert.Equal(("version", "버전 정보"), (item.Id, item.DisplayName)));
+
+        viewModel.SelectedCheckId = "log_ram";
+        viewModel.ManualCheckCommand.Execute(null);
+        await WaitUntilAsync(() => fixture.Client.LastExecutedCommandId is not null && !viewModel.IsBusy);
+
+        Assert.Equal("시스템 로그", viewModel.SelectedCheckDisplayName);
+        Assert.Equal("a", fixture.Client.LastExecutedDeviceId);
+        Assert.Equal("log_ram", fixture.Client.LastExecutedCommandId);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task InitializeAsync_ChangeGapKeepsStaleStatusAndDiagnosticMessage()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 1, []);
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+        Assert.Contains("EVENT_CHANGE_GAP", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("모니터링 중", viewModel.OperationMessage, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ManualRefresh_ChangeGapDoesNotOverwriteDiagnosticWithSuccess()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, []);
+        var viewModel = fixture.CreateViewModel(CursorSettings(0));
+        await viewModel.InitializeAsync();
+
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow.AddSeconds(1), 1, []);
+        viewModel.RefreshCommand.Execute(null);
+        await WaitUntilAsync(() => fixture.Client.ChangePageCalls >= 2 && !viewModel.IsBusy);
+
+        Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+        Assert.Contains("EVENT_CHANGE_GAP", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("최신 상태로 갱신", viewModel.OperationMessage, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SwitchClient_ChangeGapDoesNotOverwriteDiagnosticWithSuccess()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var original = new FakeAgentClient
+            {
+                Snapshot = Snapshot(DateTimeOffset.UtcNow, 0, [])
+            };
+            var replacement = new FakeAgentClient
+            {
+                Snapshot = Snapshot(DateTimeOffset.UtcNow.AddSeconds(1), 1, [])
+            };
+            var settings = CursorSettings(0);
+            var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(settings, store, new QueueFactory(original, replacement));
+            await viewModel.InitializeAsync();
+
+            await viewModel.SwitchClientAsync(CursorSettings(0));
+
+            Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
+            Assert.Contains("EVENT_CHANGE_GAP", viewModel.OperationMessage, StringComparison.Ordinal);
+            Assert.DoesNotContain("모니터링 중", viewModel.OperationMessage, StringComparison.Ordinal);
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ReadOnlyQuery_OldAgentSnapshotKeepsFeatureDisabled()
+    {
+        using var fixture = new ViewModelFixture();
+        fixture.Client.Snapshot = Snapshot(DateTimeOffset.UtcNow, 0,
+            [Device("a", DeviceHealth.Normal, DateTimeOffset.UtcNow)]);
+        var viewModel = fixture.CreateViewModel();
+
+        await viewModel.InitializeAsync();
+
+        Assert.False(viewModel.ReadOnlyQueriesEnabled);
+        Assert.False(viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null));
+        Assert.Contains("업데이트", viewModel.ReadOnlyQueryUnavailableText, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ReadOnlyQuery_UsesSelectedDeviceAndKeepsOutputInViewerMemoryOnly()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0, [Device("a", DeviceHealth.Normal, now)]) with
+        {
+            ApiVersion = 3,
+            ReadOnlyQueriesEnabled = true,
+            ReadOnlyQueryMaxCommandLength = 128,
+            ReadOnlyQueryMaxOutputBytes = 65_536
+        };
+        fixture.Client.ReadOnlyQueryResult = new ReadOnlyQueryResultDto(
+            3, "a", "show port status", now, now.AddMilliseconds(42),
+            42, "Port 24 UP", false, 1, 0);
+        var viewModel = fixture.CreateViewModel();
+        await viewModel.InitializeAsync();
+        viewModel.ReadOnlyQueryCommand = "  show port status  ";
+
+        viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+        await WaitUntilAsync(() => fixture.Client.ReadOnlyQueryCalls == 1 && !viewModel.IsReadOnlyQueryRunning);
+
+        Assert.Equal("a", fixture.Client.LastReadOnlyQueryDeviceId);
+        Assert.Equal("show port status", fixture.Client.LastReadOnlyQueryCommand);
+        Assert.Equal("Port 24 UP", viewModel.ReadOnlyQueryOutput);
+        Assert.Equal("완료 · 연결 종료됨", viewModel.ReadOnlyQueryStatusText);
+        Assert.Empty(viewModel.RecentEvents);
+        var persistedSettings = JsonSerializer.Serialize(viewModel.CurrentSettings);
+        Assert.DoesNotContain("show port status", persistedSettings, StringComparison.Ordinal);
+        Assert.DoesNotContain("Port 24 UP", persistedSettings, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ReadOnlyQuery_CancelStopsPendingRequestAndHistoryKeepsLastTwentyCommands()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0, [Device("a", DeviceHealth.Normal, now)]) with
+        {
+            ApiVersion = 3,
+            ReadOnlyQueriesEnabled = true
+        };
+        var viewModel = fixture.CreateViewModel();
+        await viewModel.InitializeAsync();
+
+        for (var index = 1; index <= 21; index++)
+        {
+            viewModel.ReadOnlyQueryCommand = $"show port status {index}";
+            viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+            var expectedCalls = index;
+            await WaitUntilAsync(() => fixture.Client.ReadOnlyQueryCalls == expectedCalls && !viewModel.IsReadOnlyQueryRunning);
+        }
+
+        Assert.Equal(20, viewModel.ReadOnlyQueryHistoryCount);
+        Assert.True(viewModel.MoveReadOnlyQueryHistory(-1));
+        Assert.Equal("show port status 21", viewModel.ReadOnlyQueryCommand);
+        for (var index = 0; index < 19; index++) Assert.True(viewModel.MoveReadOnlyQueryHistory(-1));
+        Assert.Equal("show port status 2", viewModel.ReadOnlyQueryCommand);
+        Assert.False(viewModel.MoveReadOnlyQueryHistory(-1));
+
+        fixture.Client.BlockReadOnlyQuery = true;
+        viewModel.ReadOnlyQueryCommand = "show system";
+        viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+        await WaitUntilAsync(() => viewModel.IsReadOnlyQueryRunning);
+        viewModel.CancelReadOnlyQueryCommand.Execute(null);
+        await WaitUntilAsync(() => !viewModel.IsReadOnlyQueryRunning);
+
+        Assert.StartsWith("취소됨", viewModel.ReadOnlyQueryStatusText, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public void CapabilitySummary_IsHiddenWhenHealthyAndShownWhenAttentionIsNeeded()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var healthy = new DeviceViewModel(Device("healthy", DeviceHealth.Normal, now) with
+        {
+            Capabilities =
+            [
+                new("interface_status", true, "Healthy"),
+                new("log_ram", true, "Healthy")
+            ]
+        });
+        var degraded = new DeviceViewModel(Device("degraded", DeviceHealth.Warning, now) with
+        {
+            Capabilities =
+            [
+                new("interface_status", true, "Healthy"),
+                new("log_ram", false, "Unsupported", "COMMAND_UNSUPPORTED")
+            ]
+        });
+        var initializing = new DeviceViewModel(Device("initializing", DeviceHealth.Loading, now));
+
+        Assert.False(healthy.HasCapabilityIssue);
+        Assert.True(degraded.HasCapabilityIssue);
+        Assert.Equal(1, degraded.CapabilityIssueCount);
+        Assert.Equal("수집 기능 확인 필요 · 1개", degraded.CapabilityText);
+        Assert.True(initializing.HasCapabilityIssue);
+        Assert.Equal("수집 기능 확인 중", initializing.CapabilityText);
+    }
+
+    [Fact]
+    public async Task MiniIssueHealth_UsesDeviceSeverityWhenAgentIsConnected()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0, []);
+        var viewModel = fixture.CreateViewModel();
+        await viewModel.InitializeAsync();
+
+        viewModel.ApplySnapshot(Snapshot(now.AddSeconds(1), 0,
+        [
+            Device("critical", DeviceHealth.Critical, now),
+            Device("disconnected", DeviceHealth.Disconnected, now)
+        ]));
+        Assert.Equal(DeviceHealth.Critical, viewModel.MiniIssueHealth);
+        Assert.Equal(1, viewModel.CriticalCount);
+        Assert.Equal(1, viewModel.DisconnectedCount);
+        Assert.Contains("장애 1대", viewModel.MiniIssueTitle, StringComparison.Ordinal);
+        Assert.Contains("접속 끊김 1대", viewModel.MiniIssueTitle, StringComparison.Ordinal);
+
+        viewModel.ApplySnapshot(Snapshot(now.AddSeconds(2), 0,
+            [Device("disconnected", DeviceHealth.Disconnected, now)]));
+        Assert.Equal(DeviceHealth.Disconnected, viewModel.MiniIssueHealth);
+
+        viewModel.ApplySnapshot(Snapshot(now.AddSeconds(3), 0,
+            [Device("warning", DeviceHealth.Warning, now)]));
+        Assert.Equal(DeviceHealth.Warning, viewModel.MiniIssueHealth);
+
+        viewModel.ApplySnapshot(Snapshot(now.AddSeconds(4), 0,
+            [Device("normal", DeviceHealth.Normal, now)]));
+        Assert.Equal(DeviceHealth.Normal, viewModel.MiniIssueHealth);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task MiniWindow_ConnectingStateDoesNotClaimDevicesAreNormalOrCached()
+    {
+        using var fixture = new ViewModelFixture();
+        var viewModel = fixture.CreateViewModel();
+
+        Assert.Equal(AgentConnectionState.Connecting, viewModel.ConnectionState);
+        Assert.Equal("원격 수집 PC 연결 중", viewModel.MiniIssueTitle);
+        Assert.Equal("첫 상태를 기다리는 중", viewModel.MiniIssueDetail);
+        Assert.DoesNotContain("정상", viewModel.MiniIssueTitle, StringComparison.Ordinal);
+        Assert.DoesNotContain("유지", viewModel.MiniIssueDetail, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public void EventAccessibility_ContainsSeverityAndAcknowledgementState()
+    {
+        var item = new EventViewModel(new SwitchEventDto(
+            1, "event-1", "sw-1", "ACCESS-SW-01", DateTimeOffset.UtcNow,
+            DeviceHealth.Critical, "상태 변경", "업링크 Down", "UP → DOWN"));
+
+        Assert.Contains("장애", item.AccessibilityName, StringComparison.Ordinal);
+        Assert.Equal("장애 · 미확인 이벤트", item.AccessibilityStatus);
+
+        item.Update(new SwitchEventDto(
+            1, "event-1", "sw-1", "ACCESS-SW-01", DateTimeOffset.UtcNow,
+            DeviceHealth.Normal, "상태 변경", "업링크 복구", "DOWN → UP",
+            Acknowledged: true, Recovered: true));
+
+        Assert.Contains("정상", item.AccessibilityName, StringComparison.Ordinal);
+        Assert.Equal("정상 · 복구됨", item.AccessibilityStatus);
+    }
+
+    [Fact]
+    public async Task NeedsConnection_OverridesCachedDeviceSeverityInMiniWindow()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(folder);
+            var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(new ViewerSettings
+            {
+                DemoMode = false,
+                AgentUri = string.Empty
+            }, store);
+
+            await viewModel.InitializeAsync();
+
+            Assert.Equal(AgentConnectionState.NeedsConnection, viewModel.ConnectionState);
+            Assert.Equal(DeviceHealth.Disconnected, viewModel.MiniIssueHealth);
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, "오프라인 데모가 실행 중입니다.")]
+    [InlineData(false, "실시간 모니터링 중입니다.")]
+    public async Task SwitchClient_SuccessClearsPreviousConnectionFailure(bool demoMode, string expectedMessage)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var original = new FakeAgentClient();
+            var replacement = new FakeAgentClient();
+            var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(new ViewerSettings { DemoMode = true }, store,
+                new QueueFactory(original, replacement));
+            await viewModel.InitializeAsync();
+            viewModel.ReportOperation("Agent 상태 미확인 · AGENT_CONNECTION_REFUSED");
+
+            await viewModel.SwitchClientAsync(new ViewerSettings
+            {
+                DemoMode = demoMode,
+                AgentUri = "http://replacement.example.test:18443"
+            });
+
+            Assert.Equal(expectedMessage, viewModel.OperationMessage);
+            Assert.DoesNotContain("AGENT_CONNECTION_REFUSED", viewModel.OperationMessage, StringComparison.Ordinal);
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+
     private static ViewerSettings CursorSettings(long cursor)
     {
         var settings = new ViewerSettings { DemoMode = true };
@@ -774,6 +1111,17 @@ public sealed class DashboardViewModelTests
         public TaskCompletionSource RecentBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseRecent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool DisposeCalled { get; private set; }
+        public string? LastExecutedDeviceId { get; private set; }
+        public string? LastExecutedCommandId { get; private set; }
+        public string? LastReadOnlyQueryDeviceId { get; private set; }
+        public string? LastReadOnlyQueryCommand { get; private set; }
+        public int ReadOnlyQueryCalls { get; private set; }
+        public bool BlockReadOnlyQuery { get; set; }
+        public TaskCompletionSource ReadOnlyQueryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseReadOnlyQuery { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ReadOnlyQueryResultDto ReadOnlyQueryResult { get; set; } = new(
+            3, "a", "show port status", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+            25, "Port 1 UP", false, 1, 0);
         public event EventHandler<AgentEventChangeDto>? EventChanged;
         public event EventHandler<AgentConnectionState>? ConnectionStateChanged;
 
@@ -838,8 +1186,28 @@ public sealed class DashboardViewModelTests
             return Task.FromResult(new EventChangePageDto(high, next, next < high, items));
         }
 
-        public Task<CommandResultDto> ExecuteRegisteredCheckAsync(string deviceId, string commandId, CancellationToken cancellationToken) =>
-            Task.FromResult(new CommandResultDto(true, "ok"));
+        public Task<CommandResultDto> ExecuteRegisteredCheckAsync(string deviceId, string commandId, CancellationToken cancellationToken)
+        {
+            LastExecutedDeviceId = deviceId;
+            LastExecutedCommandId = commandId;
+            return Task.FromResult(new CommandResultDto(true, "ok"));
+        }
+
+        public async Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+            string deviceId,
+            string command,
+            CancellationToken cancellationToken)
+        {
+            ReadOnlyQueryCalls++;
+            LastReadOnlyQueryDeviceId = deviceId;
+            LastReadOnlyQueryCommand = command;
+            ReadOnlyQueryStarted.TrySetResult();
+            if (BlockReadOnlyQuery)
+            {
+                await ReleaseReadOnlyQuery.Task.WaitAsync(cancellationToken);
+            }
+            return ReadOnlyQueryResult with { DeviceId = deviceId, Command = command };
+        }
 
         public Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken) => Task.FromResult(true);
 

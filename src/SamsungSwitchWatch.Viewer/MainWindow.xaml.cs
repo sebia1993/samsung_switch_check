@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Input;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
 
@@ -36,7 +37,72 @@ public partial class MainWindow : Window
         });
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e) => (Application.Current as App)?.RestoreMainWindowBounds(this);
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        (Application.Current as App)?.RestoreMainWindowBounds(this);
+        FocusManager.SetFocusedElement(this, DevicesList);
+        _ = DevicesList.Focus();
+    }
+
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape
+            && DataContext is DashboardViewModel { IsReadOnlyQueryRunning: true } queryViewModel)
+        {
+            if (queryViewModel.CancelReadOnlyQueryCommand.CanExecute(null))
+            {
+                queryViewModel.CancelReadOnlyQueryCommand.Execute(null);
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (e.Key != Key.F || (Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
+        EventSearchBox.Focus();
+        EventSearchBox.SelectAll();
+        e.Handled = true;
+    }
+
+    private void ReadOnlyQueryTextBox_OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (DataContext is not DashboardViewModel viewModel) return;
+        if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            if (viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null))
+            {
+                viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+                e.Handled = true;
+            }
+            return;
+        }
+
+        var direction = e.Key switch
+        {
+            Key.Up => -1,
+            Key.Down => 1,
+            _ => 0
+        };
+        if (direction != 0 && viewModel.MoveReadOnlyQueryHistory(direction))
+        {
+            ReadOnlyQueryTextBox.CaretIndex = ReadOnlyQueryTextBox.Text.Length;
+            e.Handled = true;
+        }
+    }
+
+    private void CopyReadOnlyQueryOutput_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is not DashboardViewModel viewModel
+            || string.IsNullOrEmpty(viewModel.ReadOnlyQueryOutput)) return;
+        try
+        {
+            System.Windows.Clipboard.SetText(viewModel.ReadOnlyQueryOutput);
+            viewModel.ReportOperation("장비 명령 결과를 클립보드에 복사했습니다.");
+        }
+        catch (Exception)
+        {
+            viewModel.ReportOperation("장비 명령 결과 복사 실패 · CLIPBOARD_UNAVAILABLE");
+        }
+    }
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {

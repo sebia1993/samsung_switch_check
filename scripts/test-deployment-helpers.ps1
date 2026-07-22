@@ -38,6 +38,9 @@ try {
     $agentUninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-agent.ps1') -Raw -Encoding UTF8
     $viewerAccess = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'set-viewer-access.ps1') -Raw -Encoding UTF8
     $credentialUpdate = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'set-switch-credential.ps1') -Raw -Encoding UTF8
+    $backgroundInstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-agent-background.ps1') -Raw -Encoding UTF8
+    $backgroundRunner = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-agent-background.ps1') -Raw -Encoding UTF8
+    $backgroundUninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-agent-background.ps1') -Raw -Encoding UTF8
 
     Write-SswStep 'Agent 패키지·데이터·방화벽·롤백 계약 확인'
     $commonText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'common.ps1') -Raw -Encoding UTF8
@@ -61,6 +64,31 @@ try {
         $agentInstall.Contains('$previousServiceWasRunning -and -not $DoNotStart') -and
         $agentInstall.Contains('readiness (clean environment)')) `
         -Message 'Repair가 서비스 시작 상태와 무관하게 readiness/schema를 검증한 뒤 이전 상태를 복원하지 않습니다.'
+
+    Write-SswStep '옵트인 읽기 전용 장비 명령 설치 계약 확인'
+    foreach ($queryInstallText in @(
+        '[switch]$EnableReadOnlyQueries',
+        "`$enableReadOnlyQueriesWasSpecified = `$PSBoundParameters.ContainsKey('EnableReadOnlyQueries')",
+        'EnableReadOnlyQueries = [bool]$EnableReadOnlyQueries',
+        'ReadOnlyQueryMaxCommandLength = 128',
+        'ReadOnlyQueryMaxOutputBytes = 65536',
+        'ReadOnlyQueryRateLimitPerMinute = 12',
+        'ReadOnlyQueryDeviceWaitSeconds = 5',
+        'ReadOnlyQueryTotalTimeoutSeconds = 60',
+        "elseif (-not `$migrated.Agent.PSObject.Properties['EnableReadOnlyQueries'])"
+    )) {
+        Assert-DeploymentTest -Condition $agentInstall.Contains($queryInstallText) `
+            -Message "Agent 읽기 전용 장비 명령 설치 계약 누락: $queryInstallText"
+    }
+    foreach ($backgroundQueryText in @(
+        '[switch]$EnableReadOnlyQueries',
+        'ReadOnlyQueryMaxCommandLength = 128',
+        'ReadOnlyQueryMaxOutputBytes = 65536',
+        "elseif (-not `$result.Agent.PSObject.Properties['EnableReadOnlyQueries'])"
+    )) {
+        Assert-DeploymentTest -Condition $backgroundInstall.Contains($backgroundQueryText) `
+            -Message "숨김 Agent 읽기 전용 장비 명령 설치 계약 누락: $backgroundQueryText"
+    }
     Assert-DeploymentTest -Condition ($agentInstall.IndexOf('Invoke-SswLocalHealthProbe') -lt
         $agentInstall.IndexOf("Write-SswStep '검증 성공 후 구 인증서 서비스 secret 제거'")) `
         -Message 'Repair가 새 Agent readiness/schema 검증 전에 구 인증서 서비스 secret을 제거합니다.'
@@ -93,6 +121,84 @@ try {
     Assert-DeploymentTest -Condition (-not $agentInstall.Contains('[switch]$SkipFirewall') -and
         -not $agentInstall.Contains('$HttpsPort') -and -not $agentInstall.Contains('[switch]$RotateCertificate')) `
         -Message '제거된 HTTPS/방화벽 우회 설치 옵션이 남아 있습니다.'
+
+    Write-SswStep '비관리자 현재 사용자 숨김 Agent 계약 확인'
+    foreach ($requiredText in @(
+        '[string]$SourceDirectory = $PSScriptRoot', '[switch]$Repair', '[switch]$Preflight',
+        'Programs\SamsungSwitchWatch\Agent', 'SamsungSwitchWatch\AgentData',
+        'Get-SswAgentBackgroundTaskName', 'Get-SswCurrentUserSid',
+        'New-ScheduledTaskTrigger -AtLogOn', "`$taskTrigger.Delay = 'PT15S'",
+        'New-ScheduledTaskPrincipal -UserId $ownerSid -LogonType Interactive -RunLevel Limited',
+        '-WindowStyle Hidden', '-MultipleInstances IgnoreNew', '-RestartCount 3',
+        '-InstallDirectory `"$install`"',
+        "Get-Service -Name (Get-SswAgentServiceName)", 'Test-SswTcpPortAvailable',
+        'Invoke-SswLocalLivenessProbe', 'Register-ScheduledTask', 'rollback-completed',
+        'restore-data', 'restore-program', 'restore-old-task', 'background-install-receipt.json',
+        'Test-SswBackgroundTaskRegistrationMarker'
+    )) {
+        Assert-DeploymentTest -Condition $backgroundInstall.Contains($requiredText) `
+            -Message "현재 사용자 숨김 Agent 설치 계약 누락: $requiredText"
+    }
+    Assert-DeploymentTest -Condition ($backgroundInstall.IndexOf("if (`$Preflight)") -lt
+        $backgroundInstall.IndexOf('Write-SswOperationJournal')) `
+        -Message '숨김 Agent Preflight가 작업 저널이나 설치 변경보다 먼저 종료되지 않습니다.'
+    Assert-DeploymentTest -Condition ($backgroundInstall.IndexOf('Invoke-SswLocalLivenessProbe') -lt
+        $backgroundInstall.IndexOf('Write-SswAtomicText -Path $receiptPath')) `
+        -Message '숨김 Agent 설치가 /health/live 확인 전에 설치 영수증을 확정합니다.'
+    foreach ($forbiddenPattern in @('Assert-SswAdministrator', 'New-NetFirewallRule', 'Set-NetFirewall',
+        'Remove-NetFirewall', 'Get-Process\s+-Name\s+[''"]SamsungSwitchWatch\.Agent')) {
+        Assert-DeploymentTest -Condition ($backgroundInstall -notmatch $forbiddenPattern -and
+            $backgroundUninstall -notmatch $forbiddenPattern) `
+            -Message "현재 사용자 숨김 모드에 관리자·방화벽·광범위 프로세스 변경이 포함되어 있습니다: $forbiddenPattern"
+    }
+    foreach ($runnerText in @('DOTNET_ENVIRONMENT', '& $exe', 'Global\SamsungSwitchWatchAgent-CurrentUser-',
+        'if ($exitCode -eq 0) { $exitCode = 1 }', 'background-runner.log',
+        'AGENT_START_FAILED', 'RUNNER_FAILED')) {
+        Assert-DeploymentTest -Condition $backgroundRunner.Contains($runnerText) `
+            -Message "숨김 Agent 실행기 수명주기 계약 누락: $runnerText"
+    }
+    Assert-DeploymentTest -Condition (-not $backgroundRunner.Contains('Start-Process')) `
+        -Message '숨김 실행기가 Agent를 분리 실행해 예약 작업이 수명주기를 추적하지 못합니다.'
+    foreach ($uninstallText in @('[switch]$RemoveData', 'Assert-SswBackgroundAgentReceipt',
+        'Test-SswOwnedBackgroundTask', 'Stop-SswOwnedBackgroundProcesses', 'Unregister-ScheduledTask',
+        'if ($RemoveData', '보존했습니다')) {
+        Assert-DeploymentTest -Condition $backgroundUninstall.Contains($uninstallText) `
+            -Message "현재 사용자 숨김 Agent 제거 계약 누락: $uninstallText"
+    }
+    Assert-DeploymentTest -Condition ($backgroundUninstall.IndexOf('if ($shutdownErrors.Count -gt 0)') -lt
+        $backgroundUninstall.IndexOf('Unregister-ScheduledTask')) `
+        -Message '숨김 Agent 제거가 중지 오류를 확인하기 전에 예약 작업을 제거할 수 있습니다.'
+    foreach ($credentialBackgroundText in @('[switch]$CurrentUser', 'Assert-SswBackgroundAgentReceipt',
+        'Get-SswAgentBackgroundTaskName', 'Stop-ScheduledTask', 'Invoke-SswLocalLivenessProbe')) {
+        Assert-DeploymentTest -Condition $credentialUpdate.Contains($credentialBackgroundText) `
+            -Message "현재 사용자 자격 증명 갱신 계약 누락: $credentialBackgroundText"
+    }
+
+    Write-SswStep '비파괴 예약 작업 정의 직렬화 확인'
+    Import-Module ScheduledTasks -ErrorAction Stop
+    $testIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $testInstall = Join-Path $env:LOCALAPPDATA 'Programs\SamsungSwitchWatch\Agent'
+    $testRunner = Join-Path $testInstall 'run-agent-background.ps1'
+    $testPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $testArguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$testRunner`" -InstallDirectory `"$testInstall`""
+    $testAction = New-ScheduledTaskAction -Execute $testPowerShell -Argument $testArguments -WorkingDirectory $testInstall
+    $testTrigger = New-ScheduledTaskTrigger -AtLogOn -User $testIdentity.Name
+    $testTrigger.Delay = 'PT15S'
+    $testPrincipal = New-ScheduledTaskPrincipal -UserId $testIdentity.User.Value -LogonType Interactive -RunLevel Limited
+    $testSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -Hidden -DontStopOnIdleEnd -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1))
+    $testTask = New-ScheduledTask -Action $testAction -Trigger $testTrigger -Principal $testPrincipal `
+        -Settings $testSettings -Description 'Owned by SamsungSwitchWatch current-user background installer v1'
+    $testTaskXml = Export-ScheduledTask -InputObject $testTask
+    foreach ($xmlFragment in @('<LogonType>InteractiveToken</LogonType>', '<RunLevel>LeastPrivilege</RunLevel>',
+        '<Delay>PT15S</Delay>', '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+        '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>', '<Interval>PT1M</Interval>', '<Count>3</Count>',
+        '<Hidden>true</Hidden>', '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+        '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>')) {
+        Assert-DeploymentTest -Condition $testTaskXml.Contains($xmlFragment) `
+            -Message "예약 작업 정의 XML 계약 누락: $xmlFragment"
+    }
 
     Write-SswStep '복수 고정 IPv4 정규화 및 서브넷 거부 계약 확인'
     $normalized = @(ConvertTo-SswViewerRemoteAddresses -Address @('10.0.0.10', '10.0.0.2', '10.0.0.10'))

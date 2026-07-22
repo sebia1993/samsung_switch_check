@@ -162,12 +162,27 @@ public sealed record AgentSnapshotDto(
     string ApiChannelStatus = "unknown",
     string RealtimeChannelStatus = "unknown",
     IReadOnlyList<OperationalStatusDto>? OperationalStatuses = null,
-    int MaxConcurrentDevices = 1)
+    int MaxConcurrentDevices = 1,
+    bool ReadOnlyQueriesEnabled = false,
+    int ReadOnlyQueryMaxCommandLength = 128,
+    int ReadOnlyQueryMaxOutputBytes = 65_536)
 {
     public long HighWatermark => LastEventSequence;
 }
 
 public sealed record CommandResultDto(bool Accepted, string Message, string? ErrorCode = null);
+
+public sealed record ReadOnlyQueryResultDto(
+    int ApiVersion,
+    string DeviceId,
+    string Command,
+    DateTimeOffset StartedUtc,
+    DateTimeOffset CompletedUtc,
+    long ElapsedMs,
+    string Output,
+    bool Truncated,
+    int SessionCount,
+    int ReconnectCount);
 
 public sealed class DeviceViewModel : Infrastructure.ObservableObject
 {
@@ -202,9 +217,18 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
     public ObservableCollection<CollectorCapabilityDto> Capabilities { get; }
     public int SupportedCapabilityCount => Capabilities.Count(item => item.Supported);
     public int CapabilityCount => Capabilities.Count;
+    public int CapabilityIssueCount => Capabilities.Count(item =>
+        !item.Supported
+        || item.State.Equals("Initializing", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("Unknown", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("Unsupported", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("Degraded", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("Failed", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("AuthBlocked", StringComparison.OrdinalIgnoreCase));
+    public bool HasCapabilityIssue => CapabilityCount == 0 || CapabilityIssueCount > 0;
     public string CapabilityText => CapabilityCount == 0
-        ? "기능 확인 중"
-        : $"수집 기능 {SupportedCapabilityCount}/{CapabilityCount}";
+        ? "수집 기능 확인 중"
+        : $"수집 기능 확인 필요 · {CapabilityIssueCount}개";
 
     public string CollectionState
     {
@@ -277,6 +301,8 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         foreach (var capability in source.Capabilities ?? []) Capabilities.Add(capability);
         OnPropertyChanged(nameof(SupportedCapabilityCount));
         OnPropertyChanged(nameof(CapabilityCount));
+        OnPropertyChanged(nameof(CapabilityIssueCount));
+        OnPropertyChanged(nameof(HasCapabilityIssue));
         OnPropertyChanged(nameof(CapabilityText));
     }
 }
@@ -318,13 +344,24 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
     public DeviceHealth Severity
     {
         get => _severity;
-        private set => SetProperty(ref _severity, value);
+        private set
+        {
+            if (SetProperty(ref _severity, value))
+            {
+                OnPropertyChanged(nameof(SeverityText));
+                OnPropertyChanged(nameof(AccessibilityName));
+                OnPropertyChanged(nameof(AccessibilityStatus));
+            }
+        }
     }
     public string Kind { get; }
     public string Title
     {
         get => _title;
-        private set => SetProperty(ref _title, value);
+        private set
+        {
+            if (SetProperty(ref _title, value)) OnPropertyChanged(nameof(AccessibilityName));
+        }
     }
     public string Detail
     {
@@ -339,7 +376,13 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
         get => _recovered;
         private set
         {
-            if (SetProperty(ref _recovered, value)) OnPropertyChanged(nameof(AlertDetail));
+            if (SetProperty(ref _recovered, value))
+            {
+                OnPropertyChanged(nameof(AlertDetail));
+                OnPropertyChanged(nameof(StatusText));
+                OnPropertyChanged(nameof(AccessibilityStatus));
+                OnPropertyChanged(nameof(CanAcknowledge));
+            }
         }
     }
     public string? ConditionKey { get; }
@@ -347,7 +390,19 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
     public string TimeText => OccurredAt.LocalDateTime.ToString("MM-dd HH:mm:ss");
     public bool IsLogEvent => Kind.Contains("로그", StringComparison.Ordinal)
                               || Kind.Contains("log", StringComparison.OrdinalIgnoreCase);
-    public string StatusText => Recovered ? "복구됨" : Acknowledged ? "확인됨" : "미확인";
+    public string SeverityText => Severity switch
+    {
+        DeviceHealth.Normal => "정상",
+        DeviceHealth.Warning => "경고",
+        DeviceHealth.Critical => "장애",
+        DeviceHealth.Disconnected => "접속 끊김",
+        DeviceHealth.Loading => "확인 중",
+        _ => "상태 없음"
+    };
+    public string AccessibilityName => $"{DeviceName} · {SeverityText} · {Title}";
+    public string StatusText => Recovered ? "복구됨" : Acknowledged ? "확인됨" : "미확인 이벤트";
+    public string AccessibilityStatus => $"{SeverityText} · {StatusText}";
+    public bool CanAcknowledge => !Acknowledged && !Recovered;
     public DateTimeOffset? RecoveredAt
     {
         get => _recoveredAt;
@@ -374,7 +429,12 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
         get => _acknowledged;
         set
         {
-            if (SetProperty(ref _acknowledged, value)) OnPropertyChanged(nameof(StatusText));
+            if (SetProperty(ref _acknowledged, value))
+            {
+                OnPropertyChanged(nameof(StatusText));
+                OnPropertyChanged(nameof(AccessibilityStatus));
+                OnPropertyChanged(nameof(CanAcknowledge));
+            }
         }
     }
 
@@ -389,6 +449,8 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
         RecoveredAt = source.RecoveredAt;
         OnPropertyChanged(nameof(AlertDetail));
         OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(AccessibilityName));
+        OnPropertyChanged(nameof(AccessibilityStatus));
     }
 
     private static string FormatDuration(TimeSpan value) => value.TotalHours >= 1

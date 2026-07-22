@@ -12,6 +12,7 @@ public interface IAgentClient : IAsyncDisposable
     Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken);
     Task<EventChangePageDto> GetEventChangesAsync(long cursor, int limit, CancellationToken cancellationToken);
     Task<CommandResultDto> ExecuteRegisteredCheckAsync(string deviceId, string commandId, CancellationToken cancellationToken);
+    Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(string deviceId, string command, CancellationToken cancellationToken);
     Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken);
 }
 

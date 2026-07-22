@@ -4,6 +4,8 @@
 **/obj/
 artifacts/
 release/
+output/
+tmp/
 TestResults/
 *.user
 *.suo
