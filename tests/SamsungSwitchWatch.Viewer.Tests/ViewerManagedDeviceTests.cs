@@ -482,6 +482,151 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
+    public void MonitoringStore_RetentionPreservesActiveConditionsUntilRecovery()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            var device = Profile();
+            var store = new ViewerMonitoringStore(path);
+
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up"))));
+            var interfaceEvent = Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Down"))));
+            var failureEvent = Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
+            store.EndSession();
+
+            var state = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            state["LastStoppedUtc"] = "2000-01-01T00:00:00+00:00";
+            state["LastHeartbeatUtc"] = "2000-01-01T00:00:00+00:00";
+            File.WriteAllText(
+                path,
+                state.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+            var restarted = new ViewerMonitoringStore(path);
+            var fillerDevices = Enumerable.Range(1, 600)
+                .Select(index => new ManagedDeviceProfile
+                {
+                    Id = $"filler-{index:D4}",
+                    DisplayName = $"FILLER-{index:D4}",
+                    Model = "IES4224GP",
+                    Host = "192.0.2.20",
+                    Port = 23,
+                    ProtectedUsername = "protected",
+                    ProtectedPassword = "protected",
+                    ConnectionVerified = true,
+                    MonitoringEnabled = true
+                })
+                .ToArray();
+
+            var gapEvents = restarted.BeginSession(fillerDevices);
+            var retained = restarted.LoadEvents();
+
+            Assert.Equal(600, gapEvents.Count);
+            Assert.Equal(500, retained.Count);
+            Assert.Contains(retained, item => item.AgentEventId == interfaceEvent.AgentEventId);
+            Assert.Contains(retained, item => item.AgentEventId == failureEvent.AgentEventId);
+            Assert.DoesNotContain(retained, item => item.AgentEventId == gapEvents[0].AgentEventId);
+            Assert.Contains(retained, item => item.AgentEventId == gapEvents[^1].AgentEventId);
+            Assert.True(restarted.Acknowledge(interfaceEvent.AgentEventId));
+            Assert.True(restarted.Acknowledge(failureEvent.AgentEventId));
+
+            var reloaded = new ViewerMonitoringStore(path);
+            Assert.Equal(1, reloaded.GetActiveInterfaceConditionCount(device.Id));
+            Assert.Equal("TCP_TIMEOUT", reloaded.GetActiveFailureCode(device.Id));
+            Assert.True(reloaded.LoadEvents().Single(item =>
+                item.AgentEventId == interfaceEvent.AgentEventId).Acknowledged);
+            Assert.True(reloaded.LoadEvents().Single(item =>
+                item.AgentEventId == failureEvent.AgentEventId).Acknowledged);
+
+            var changedFailure = Assert.Single(
+                reloaded.RecordFailure(device, "TELNET_SESSION_CLOSED"));
+            Assert.Equal(failureEvent.AgentEventId, changedFailure.AgentEventId);
+            Assert.Equal("TELNET_SESSION_CLOSED", changedFailure.Detail);
+
+            var interfaceRecovery = reloaded.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up")));
+            var failureRecovery = reloaded.RecordSuccess(device);
+
+            Assert.Equal(2, interfaceRecovery.Count);
+            Assert.Equal(2, failureRecovery.Count);
+            Assert.All(interfaceRecovery, item => Assert.True(item.Recovered));
+            Assert.All(failureRecovery, item => Assert.True(item.Recovered));
+            Assert.Equal(0, reloaded.GetActiveInterfaceConditionCount(device.Id));
+            Assert.Null(reloaded.GetActiveFailureCode(device.Id));
+
+            var finalState = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            Assert.Equal(500, finalState["Events"]!.AsArray().Count);
+            Assert.Empty(finalState["ActiveFailures"]!.AsObject());
+            Assert.Empty(finalState["ActiveInterfaceConditions"]!.AsObject());
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_RetentionNeverDeletesActiveInterfaceConditionsWhenLimitIsExhausted()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            var store = new ViewerMonitoringStore(path);
+            var device = Profile();
+            var upPorts = Enumerable.Range(1, 501)
+                .Select(index => (PortId: index.ToString(), Link: "Up"))
+                .ToArray();
+            var downPorts = Enumerable.Range(1, 500)
+                .Select(index => (PortId: index.ToString(), Link: "Down"))
+                .ToArray();
+
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(upPorts)));
+            var interfaceEvents = store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(downPorts));
+            var lastInterfaceEvent = Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("501", "Down"))));
+
+            Assert.Equal(500, interfaceEvents.Count);
+            var state = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            Assert.Equal(501, state["Events"]!.AsArray().Count);
+            Assert.Equal(501, state["ActiveInterfaceConditions"]!.AsObject().Count);
+            Assert.Empty(state["ActiveFailures"]!.AsObject());
+            Assert.True(store.Acknowledge(interfaceEvents[0].AgentEventId));
+            Assert.True(store.Acknowledge(lastInterfaceEvent.AgentEventId));
+
+            var reloaded = new ViewerMonitoringStore(path);
+            Assert.Equal(501, reloaded.GetActiveInterfaceConditionCount(device.Id));
+            var recovery = reloaded.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up")));
+            Assert.Equal(2, recovery.Count);
+            Assert.All(recovery, item => Assert.True(item.Recovered));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void MonitoringStore_InitialDownAndPortSetChangesDoNotCreateFalseEvents()
     {
         var folder = TemporaryFolder();

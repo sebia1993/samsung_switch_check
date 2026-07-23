@@ -11,6 +11,7 @@ namespace SamsungSwitchWatch.Viewer.Services;
 public sealed class ViewerMonitoringStore
 {
     private const int CurrentSchemaVersion = 3;
+    private const int MaximumStoredEventCount = 500;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly object _sync = new();
     private readonly string _path;
@@ -297,7 +298,6 @@ public sealed class ViewerMonitoringStore
             recoveredAt,
             active.EventId);
         _state.Events.Add(recovery);
-        TrimEvents();
         created.Add(recovery);
     }
 
@@ -386,7 +386,7 @@ public sealed class ViewerMonitoringStore
         {
             return _state.Events
                 .OrderByDescending(item => item.Sequence)
-                .Take(Math.Clamp(limit, 1, 500))
+                .Take(Math.Clamp(limit, 1, MaximumStoredEventCount))
                 .ToArray();
         }
     }
@@ -514,16 +514,32 @@ public sealed class ViewerMonitoringStore
             conditionKey ?? $"{device.Id}:{kind}:{title}",
             isActiveCondition);
         _state.Events.Add(item);
-        TrimEvents();
         return item;
     }
 
     private void TrimEvents()
     {
-        if (_state.Events.Count > 500)
+        var remainingToRemove = _state.Events.Count - MaximumStoredEventCount;
+        if (remainingToRemove <= 0)
         {
-            _state.Events.RemoveRange(0, _state.Events.Count - 500);
+            return;
         }
+
+        var activeEventIds = _state.ActiveFailures.Values
+            .Select(item => item.EventId)
+            .Concat(_state.ActiveInterfaceConditions.Values.Select(item => item.EventId))
+            .ToHashSet(StringComparer.Ordinal);
+
+        _state.Events.RemoveAll(item =>
+        {
+            if (remainingToRemove <= 0 || activeEventIds.Contains(item.AgentEventId))
+            {
+                return false;
+            }
+
+            remainingToRemove--;
+            return true;
+        });
     }
 
     private List<SwitchEventDto> ResolveFailure(ManagedDeviceProfile device)
@@ -606,6 +622,7 @@ public sealed class ViewerMonitoringStore
         try
         {
             result = mutation();
+            TrimEvents();
         }
         finally
         {
