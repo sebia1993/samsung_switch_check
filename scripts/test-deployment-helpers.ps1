@@ -173,6 +173,112 @@ Assert-DeploymentTest -Condition (
     -not $mockSmoke.Contains("-ArgumentList '--background'")
 ) -Message 'Mock smoke test must exercise the service-only Agent runtime.'
 
+Write-SswStep 'Viewer transactional rollback and commit boundary contract'
+Assert-ContainsAll -Name 'Viewer transaction boundary' -Text $viewerInstall -Needles @(
+    '$shortcutBackupsReady = $false',
+    '$shortcutMutationStarted = $false',
+    '$transactionCommitted = $false',
+    '$shortcutBackupsReady = $true',
+    '$shortcutMutationStarted = $true',
+    'if (-not $shortcutMutationStarted) { return }',
+    'if (-not $shortcutBackupsReady) { throw',
+    'if ($transactionCommitted) {',
+    "Name = 'cleanup-program-backup'",
+    "Name = 'cleanup-shortcut-backup'"
+)
+$shortcutBackupReadyIndex = $viewerInstall.IndexOf('$shortcutBackupsReady = $true')
+$shortcutMutationIndex = $viewerInstall.IndexOf('$shortcutMutationStarted = $true')
+Assert-DeploymentTest -Condition (
+    $shortcutBackupReadyIndex -ge 0 -and
+    $shortcutMutationIndex -gt $shortcutBackupReadyIndex
+) -Message 'Viewer shortcut mutation must begin only after every previous shortcut is backed up.'
+
+$viewerCommitIndex = $viewerInstall.IndexOf("-Stage 'completed' -Status 'succeeded'")
+$viewerCommittedFlagIndex = $viewerInstall.IndexOf(
+    '$transactionCommitted = $true',
+    $viewerCommitIndex)
+$viewerProgramCleanupIndex = $viewerInstall.IndexOf(
+    "Name = 'cleanup-program-backup'",
+    $viewerCommittedFlagIndex)
+Assert-DeploymentTest -Condition (
+    $viewerCommitIndex -ge 0 -and
+    $viewerCommittedFlagIndex -gt $viewerCommitIndex -and
+    $viewerProgramCleanupIndex -gt $viewerCommittedFlagIndex
+) -Message 'Viewer must durably commit before deleting the previous program backup.'
+
+$viewerCatchIndex = $viewerInstall.IndexOf('catch {', $viewerProgramCleanupIndex)
+$viewerCommittedCatchIndex = $viewerInstall.IndexOf(
+    'if ($transactionCommitted) {',
+    $viewerCatchIndex)
+$viewerRollbackPlanIndex = $viewerInstall.IndexOf(
+    '$rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(',
+    $viewerCatchIndex)
+Assert-DeploymentTest -Condition (
+    $viewerCatchIndex -ge 0 -and
+    $viewerCommittedCatchIndex -gt $viewerCatchIndex -and
+    $viewerRollbackPlanIndex -gt $viewerCommittedCatchIndex
+) -Message 'Viewer post-commit failures must not enter the pre-commit rollback plan.'
+
+Write-SswStep 'Operation journal cleanup is best effort'
+Assert-ContainsAll -Name 'Operation journal cleanup' -Text $common -Needles @(
+    'function Remove-SswOperationJournalArtifactBestEffort',
+    'Remove-SswOperationJournalArtifactBestEffort -Path $temporary',
+    'Remove-SswOperationJournalArtifactBestEffort -Path $replaceBackup'
+)
+Assert-DeploymentTest -Condition (
+    -not $common.Contains(
+        'if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) { Remove-Item -LiteralPath $replaceBackup -Force }')
+) -Message 'Journal replacement backup cleanup must not throw after a durable commit.'
+$journalHelperIndex = $common.IndexOf('function Remove-SswOperationJournalArtifactBestEffort')
+$journalWriterIndex = $common.IndexOf('function Write-SswOperationJournal')
+$journalCleanupTryIndex = $common.IndexOf('try {', $journalHelperIndex)
+$journalCleanupProbeIndex = $common.IndexOf(
+    'if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }',
+    $journalHelperIndex)
+Assert-DeploymentTest -Condition (
+    $journalHelperIndex -ge 0 -and
+    $journalCleanupTryIndex -gt $journalHelperIndex -and
+    $journalCleanupProbeIndex -gt $journalCleanupTryIndex -and
+    $journalWriterIndex -gt $journalCleanupProbeIndex
+) -Message 'The full journal artifact probe and deletion must be best effort before journal writes.'
+
+$journalTestRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'SamsungSwitchWatch-deployment-helper-{0}' -f [Guid]::NewGuid().ToString('N'))
+$lockedJournalArtifact = Join-Path $journalTestRoot 'locked-journal-artifact.tmp'
+$lockedJournalHandle = $null
+try {
+    New-Item -ItemType Directory -Path $journalTestRoot | Out-Null
+    [IO.File]::WriteAllText($lockedJournalArtifact, 'locked', (New-Object Text.UTF8Encoding($false)))
+    $lockedJournalHandle = [IO.File]::Open(
+        $lockedJournalArtifact,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::None)
+    Remove-SswOperationJournalArtifactBestEffort -Path $lockedJournalArtifact
+    Assert-DeploymentTest -Condition (Test-Path -LiteralPath $lockedJournalArtifact -PathType Leaf) `
+        -Message 'A locked journal artifact must be preserved without failing the completed operation.'
+    $lockedJournalHandle.Dispose()
+    $lockedJournalHandle = $null
+    Remove-SswOperationJournalArtifactBestEffort -Path $lockedJournalArtifact
+    Assert-DeploymentTest -Condition (-not (Test-Path -LiteralPath $lockedJournalArtifact)) `
+        -Message 'An unlocked journal artifact must be removed by best-effort cleanup.'
+}
+finally {
+    if ($lockedJournalHandle) { $lockedJournalHandle.Dispose() }
+    if (Test-Path -LiteralPath $journalTestRoot -PathType Container) {
+        Remove-Item -LiteralPath $journalTestRoot -Recurse -Force
+    }
+}
+
+$shortcutBackupValidationIndex = $viewerInstall.IndexOf('$requiredShortcutBackups = @()')
+$shortcutRemovalIndex = $viewerInstall.IndexOf(
+    'foreach ($link in @($startMenu, $startup))',
+    $shortcutBackupValidationIndex)
+Assert-DeploymentTest -Condition (
+    $shortcutBackupValidationIndex -ge 0 -and
+    $shortcutRemovalIndex -gt $shortcutBackupValidationIndex
+) -Message 'Viewer rollback must validate every required shortcut backup before removing current links.'
+
 Write-SswStep 'CIDR canonicalization'
 $normalized = @(ConvertTo-SswIpv4Cidrs -Cidr @('10.20.30.9/24', '10.20.30.0/24', '10.40.0.10/32'))
 Assert-DeploymentTest -Condition (($normalized -join ',') -eq '10.20.30.0/24,10.40.0.10/32') `

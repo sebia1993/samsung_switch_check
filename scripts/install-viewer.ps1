@@ -49,6 +49,9 @@ $backup = "$install.__backup_$transactionId"
 $shortcutBackup = Join-Path ([IO.Path]::GetTempPath()) "SamsungSwitchWatch-Viewer-$transactionId"
 $journalPath = Join-Path $env:LOCALAPPDATA 'SamsungSwitchWatch-Operations\viewer-install.json'
 $installSwapped = $false
+$shortcutBackupsReady = $false
+$shortcutMutationStarted = $false
+$transactionCommitted = $false
 $smokeProcess = $null
 $startMenuExisted = Test-Path -LiteralPath $startMenu -PathType Leaf
 $startupExisted = Test-Path -LiteralPath $startup -PathType Leaf
@@ -65,6 +68,7 @@ try {
     }
     if ($startMenuExisted) { Copy-Item -LiteralPath $startMenu -Destination (Join-Path $shortcutBackup 'start-menu.lnk') -Force }
     if ($startupExisted) { Copy-Item -LiteralPath $startup -Destination (Join-Path $shortcutBackup 'startup.lnk') -Force }
+    $shortcutBackupsReady = $true
 
     $viewerProcesses = @(Get-Process -Name 'SamsungSwitchWatch.Viewer' -ErrorAction SilentlyContinue)
     if ($viewerProcesses.Count -gt 0) {
@@ -82,6 +86,7 @@ try {
     $installSwapped = $true
 
     $viewerExe = Join-Path $install 'SamsungSwitchWatch.Viewer.exe'
+    $shortcutMutationStarted = $true
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($startMenu)
     $shortcut.TargetPath = $viewerExe
@@ -102,15 +107,30 @@ try {
         if (-not $smokeProcess.WaitForExit(5000)) { $smokeProcess.Kill(); $smokeProcess.WaitForExit(5000) | Out-Null }
     }
 
-    # 새 실행 파일과 바로 가기 검증이 모두 끝난 뒤에만 이전 버전 백업을 삭제합니다.
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-    if (Test-Path -LiteralPath $shortcutBackup) { Remove-Item -LiteralPath $shortcutBackup -Recurse -Force }
+    # 성공 상태를 먼저 영구 기록한 뒤 백업을 정리합니다. 이후 정리 실패는 새 설치를 롤백하지 않습니다.
     Write-SswOperationJournal -Path $journalPath -Operation 'viewer-install' -TransactionId $transactionId `
         -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
+    $transactionCommitted = $true
+    $cleanupErrors = @(Invoke-SswBestEffortPlan -Plan @(
+        [pscustomobject]@{ Name = 'cleanup-program-backup'; Action = {
+            if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+        } },
+        [pscustomobject]@{ Name = 'cleanup-shortcut-backup'; Action = {
+            if (Test-Path -LiteralPath $shortcutBackup) { Remove-Item -LiteralPath $shortcutBackup -Recurse -Force }
+        } }
+    ))
+    if ($cleanupErrors.Count -gt 0) {
+        Write-Warning ("Viewer 설치는 완료됐지만 이전 버전 백업 정리에 실패했습니다: {0}" -f
+            ($cleanupErrors -join ', '))
+    }
     Write-SswStep "Viewer 설치 완료: $viewerExe"
 }
 catch {
     $failure = $_
+    if ($transactionCommitted) {
+        Write-Warning "Viewer 설치는 완료됐지만 후속 정리에 실패했습니다: $($failure.Exception.Message)"
+        return
+    }
     Write-Warning 'Viewer 설치 실패를 감지해 이전 버전과 바로 가기를 복구합니다.'
     $rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'stop-new-viewer'; Action = {
@@ -122,6 +142,17 @@ catch {
             if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
         } },
         [pscustomobject]@{ Name = 'restore-shortcuts'; Action = {
+            if (-not $shortcutMutationStarted) { return }
+            if (-not $shortcutBackupsReady) { throw '기존 Viewer 바로 가기 백업이 완료되지 않았습니다.' }
+            $requiredShortcutBackups = @()
+            if ($startMenuExisted) { $requiredShortcutBackups += (Join-Path $shortcutBackup 'start-menu.lnk') }
+            if ($startupExisted) { $requiredShortcutBackups += (Join-Path $shortcutBackup 'startup.lnk') }
+            $missingShortcutBackups = @($requiredShortcutBackups | Where-Object {
+                -not (Test-Path -LiteralPath $_ -PathType Leaf)
+            })
+            if ($missingShortcutBackups.Count -gt 0) {
+                throw '기존 Viewer 바로 가기 백업 파일을 확인하지 못했습니다.'
+            }
             foreach ($link in @($startMenu, $startup)) { if (Test-Path -LiteralPath $link -PathType Leaf) { Remove-Item -LiteralPath $link -Force } }
             if ($startMenuExisted) { Copy-Item -LiteralPath (Join-Path $shortcutBackup 'start-menu.lnk') -Destination $startMenu -Force }
             if ($startupExisted) { Copy-Item -LiteralPath (Join-Path $shortcutBackup 'startup.lnk') -Destination $startup -Force }
