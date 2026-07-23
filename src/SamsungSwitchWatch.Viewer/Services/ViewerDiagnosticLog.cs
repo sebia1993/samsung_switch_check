@@ -24,13 +24,22 @@ internal sealed class ViewerDiagnosticLog
         "settings-save-interactive",
         "settings-save-connection",
         "settings-save-background",
-        "settings-save-shutdown"
+        "settings-save-shutdown",
+        "device-management-load",
+        "device-management-save",
+        "device-management-delete",
+        "device-management-close"
     ];
     private static readonly HashSet<string> AllowedErrorCodes =
     [
         "VIEWER_MONITOR_STATE_WRITE_FAILED",
         "VIEWER_MONITOR_CYCLE_FAILED",
         "VIEWER_SETTINGS_WRITE_FAILED",
+        "VIEWER_DEVICE_STORE_CORRUPT",
+        "VIEWER_DEVICE_STORE_UNAVAILABLE",
+        "VIEWER_DEVICE_STORE_WRITE_FAILED",
+        "VIEWER_DEVICE_NOT_FOUND",
+        "VIEWER_CREDENTIAL_CORRUPT",
         "VIEWER_UNEXPECTED_ERROR"
     ];
     private readonly IViewerDiagnosticFileSystem _fileSystem;

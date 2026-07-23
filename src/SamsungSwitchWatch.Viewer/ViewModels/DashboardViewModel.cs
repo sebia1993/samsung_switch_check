@@ -128,6 +128,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private bool _initialized;
     private bool _disposed;
     private bool _statelessV4;
+    private ManagedDeviceLoadStatus _managedDeviceLoadStatus = ManagedDeviceLoadStatus.Missing;
+    private IReadOnlyList<ManagedDeviceProfile> _lastManagedDeviceProfiles = [];
     private Task? _snapshotLoop;
     private Task? _monitorLoop;
     private readonly SemaphoreSlim _monitorGate = new(1, 1);
@@ -253,23 +255,63 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    public IReadOnlyList<ManagedDeviceProfile> GetManagedDevices() => _deviceStore?.Load() ?? [];
+    public IReadOnlyList<ManagedDeviceProfile> GetManagedDevices()
+    {
+        if (_deviceStore is null)
+        {
+            return [];
+        }
+
+        var result = _deviceStore.LoadWithStatus();
+        return result.Status switch
+        {
+            ManagedDeviceLoadStatus.Corrupt =>
+                throw new InvalidDataException("VIEWER_DEVICE_STORE_CORRUPT"),
+            ManagedDeviceLoadStatus.StorageUnavailable =>
+                throw new IOException("VIEWER_DEVICE_STORE_UNAVAILABLE"),
+            _ => result.Devices
+        };
+    }
 
     public ManagedDeviceDraft GetManagedDeviceDraft(string id) =>
         _deviceStore?.CreateEditDraft(id)
         ?? throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
 
-    public ManagedDeviceProfile SaveManagedDevice(ManagedDeviceDraft draft)
+    public ManagedDeviceProfile SaveManagedDevice(ManagedDeviceDraft draft) =>
+        SaveManagedDevice(draft, out _);
+
+    internal ManagedDeviceProfile SaveManagedDevice(
+        ManagedDeviceDraft draft,
+        out string? warningCode)
     {
         if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
         var result = _deviceStore.Save(draft);
+        warningCode = null;
         if (result.ConnectionVerified)
         {
             ClearMonitoringCredentialBlock(result.Id);
-            _monitoringStore?.ClearCapabilities(result.Id);
+            warningCode = RunPostSaveCleanup(
+                () => _monitoringStore?.ClearCapabilities(result.Id),
+                warningCode);
         }
-        if (!result.MonitoringEnabled) _monitoringStore?.ClearActiveFailure(result.Id);
-        ReloadManagedDevices(result.Id);
+        if (!result.MonitoringEnabled)
+        {
+            warningCode = RunPostSaveCleanup(
+                () => _monitoringStore?.ClearActiveFailure(result.Id),
+                warningCode);
+        }
+        try
+        {
+            ReloadManagedDevices(result.Id);
+        }
+        catch
+        {
+            warningCode ??= "VIEWER_UNEXPECTED_ERROR";
+        }
+        if (warningCode is not null)
+        {
+            ReportDeviceManagementFailure("device-management-save", warningCode);
+        }
         return result;
     }
 
@@ -352,7 +394,19 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public void ReloadManagedDevices(string? preferredId = null)
     {
         if (_deviceStore is null) return;
-        var profiles = _deviceStore.Load();
+        var loadResult = _deviceStore.LoadWithStatus();
+        _managedDeviceLoadStatus = loadResult.Status;
+        if (loadResult.Status is ManagedDeviceLoadStatus.Corrupt
+            or ManagedDeviceLoadStatus.StorageUnavailable)
+        {
+            if (ManagedDeviceStoreWarning(loadResult.Status) is { } loadWarning)
+            {
+                OperationMessage = loadWarning;
+            }
+            return;
+        }
+        var profiles = loadResult.Devices;
+        _lastManagedDeviceProfiles = profiles;
         var selectedId = preferredId ?? SelectedDevice?.Id;
         Devices.Clear();
         foreach (var snapshot in profiles
@@ -366,9 +420,23 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                          ?? Devices.FirstOrDefault();
         NotifySummaryChanged();
         ReadOnlyQueriesEnabled = _statelessV4 && Devices.Count > 0;
-        if (ManagedDeviceStoreWarning() is { } warning)
+    }
+
+    private static string? RunPostSaveCleanup(
+        Action action,
+        string? currentWarning)
+    {
+        try
         {
-            OperationMessage = warning;
+            action();
+            return currentWarning;
+        }
+        catch (Exception exception)
+        {
+            return currentWarning
+                   ?? (IsMonitoringPersistenceFailure(exception)
+                       ? "VIEWER_MONITOR_STATE_WRITE_FAILED"
+                       : "VIEWER_UNEXPECTED_ERROR");
         }
     }
 
@@ -754,6 +822,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public void ReportOperation(string message) => OperationMessage = message;
 
+    internal void ReportDeviceManagementFailure(string stage, string errorCode)
+    {
+        TryWriteDiagnostic(stage, errorCode);
+        ReportOperation($"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}");
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
@@ -794,7 +868,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     if (_monitoringStore is not null)
                     {
                         ApplyEvents(_monitoringStore.LoadEvents(), false);
-                        ApplyEvents(_monitoringStore.BeginSession(_deviceStore?.Load() ?? []), false);
+                        ApplyEvents(_monitoringStore.BeginSession(_lastManagedDeviceProfiles), false);
                     }
                     RebuildCollectorHealth(DateTimeOffset.UtcNow);
                 }).ConfigureAwait(false);
@@ -828,7 +902,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
                         RebuildCollectorHealth(DateTimeOffset.UtcNow);
                         OperationMessage = settingsSaved
-                            ? "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다."
+                            ? ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                              ?? "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다."
                             : SettingsWriteFailureOperationMessage(settingsSaveErrorCode);
                         OnPropertyChanged(nameof(LastRefreshText));
                         OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
@@ -1020,10 +1095,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     SubscribeClient(replacement);
                     await RunOnUiAsync(() =>
                     {
-                        Devices.Clear();
                         RecentEvents.Clear();
                         _eventsById.Clear();
-                        SelectedDevice = null;
                         _apiVersion = 4;
                         _hasSnapshot = true;
                         _lastRefreshedAt = DateTimeOffset.UtcNow;
@@ -1039,7 +1112,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                             ApplyEvents(_monitoringStore.LoadEvents(), false);
                         }
                         RebuildCollectorHealth(DateTimeOffset.UtcNow);
-                        OperationMessage = "Agent 연결 설정을 저장했습니다.";
+                        OperationMessage = ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                                           ?? "Agent 연결 설정을 저장했습니다.";
                     }).ConfigureAwait(false);
                     if (_monitoringStore is not null
                         && _deviceStore is not null
@@ -1331,7 +1405,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 IsBusy = true;
                 ReloadManagedDevices();
-                OperationMessage = "Agent 연결 상태를 확인하는 중입니다.";
+                OperationMessage = ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                                   ?? "Agent 연결 상태를 확인하는 중입니다.";
             }).ConfigureAwait(false);
             try
             {
@@ -1360,7 +1435,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
                     RebuildCollectorHealth(DateTimeOffset.UtcNow);
                     OperationMessage = settingsSaved
-                        ? "Agent 연결 확인 완료 · Viewer 장비 목록을 새로고침했습니다."
+                        ? ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                          ?? "Agent 연결 확인 완료 · Viewer 장비 목록을 새로고침했습니다."
                         : SettingsWriteFailureOperationMessage(settingsSaveErrorCode);
                     OnPropertyChanged(nameof(LastRefreshText));
                     OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
@@ -2670,7 +2746,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : $"Agent 연결됨 · 장비 {MonitoredCount}대 주기 감시 중";
     }
 
-    private string? ManagedDeviceStoreWarning() => _deviceStore?.LastLoadStatus switch
+    private string? ManagedDeviceStoreWarning() =>
+        ManagedDeviceStoreWarning(_managedDeviceLoadStatus);
+
+    private static string? ManagedDeviceStoreWarning(ManagedDeviceLoadStatus status) => status switch
     {
         ManagedDeviceLoadStatus.Corrupt =>
             "장비 목록 파일 손상 · 안전하게 격리했습니다. 장비를 다시 등록하세요. · VIEWER_DEVICE_STORE_CORRUPT",

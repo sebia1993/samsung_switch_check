@@ -94,6 +94,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal("Viewer 로컬 주기 감시",
                     AutomationProperties.GetName(devices.MonitoringCheckBox));
                 devices.Close();
+                VerifyDeviceManagementFailuresStayInsideWindow(folder);
                 var mini = new MiniWindow(viewModel, true);
                 mini.Show();
                 mini.UpdateLayout();
@@ -120,8 +121,286 @@ public sealed class WpfSmokeTests
         });
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "WPF smoke thread did not finish.");
+        Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke thread did not finish.");
         Assert.Null(failure);
+    }
+
+    private static void VerifyDeviceManagementFailuresStayInsideWindow(string folder)
+    {
+        var persistence = new FaultingManagedDevicePersistence();
+        var deviceStore = new ManagedDeviceStore(
+            Path.Combine(folder, "fault-devices.json"),
+            new TestSecretProtector(),
+            persistence);
+        var firstDraft = DeviceDraft("ACCESS-SW-01", "192.0.2.11");
+        firstDraft.ConnectionVerified = true;
+        firstDraft.LastConnectionTestUtc = DateTimeOffset.UtcNow;
+        firstDraft.LastConnectionTestCode = "OK";
+        var firstSaved = deviceStore.Save(firstDraft);
+        _ = deviceStore.Save(DeviceDraft("ACCESS-SW-02", "192.0.2.12"));
+        var monitoringPersistence = new FaultingMonitoringPersistence();
+        var monitoringStore = new ViewerMonitoringStore(
+            Path.Combine(folder, "fault-monitor.json"),
+            monitoringPersistence);
+        monitoringStore.RecordCapability(
+            firstSaved.Id,
+            new CollectorCapabilityDto(
+                "interface_status",
+                true,
+                "Supported"));
+        var diagnosticEntries = new List<(string Stage, string ErrorCode)>();
+        var settingsStore =
+            new ViewerSettingsStore(Path.Combine(folder, "fault-settings.json"));
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            clientFactory: null,
+            synchronizationContext: SynchronizationContext.Current,
+            deviceStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+
+        persistence.ReadException =
+            new IOException("private path host=192.0.2.15 password=initial-secret");
+        var initialFailureWindow = new DeviceManagementWindow(viewModel);
+        initialFailureWindow.Show();
+        initialFailureWindow.UpdateLayout();
+
+        Assert.True(initialFailureWindow.IsVisible);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            initialFailureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
+            diagnosticEntries);
+        Assert.DoesNotContain(
+            "192.0.2.15",
+            initialFailureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "initial-secret",
+            initialFailureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        initialFailureWindow.Close();
+
+        persistence.ReadException = null;
+        var window = new DeviceManagementWindow(viewModel);
+        window.Show();
+        window.UpdateLayout();
+
+        var original = Assert.IsType<ManagedDeviceProfile>(window.DeviceList.SelectedItem);
+        var originalName = window.DisplayNameTextBox.Text;
+        var other = window.DeviceList.Items
+            .OfType<ManagedDeviceProfile>()
+            .Single(item => item.Id != original.Id);
+
+        persistence.ReadException =
+            new IOException("private path host=192.0.2.11 password=secret");
+        Assert.Throws<IOException>(() => window.Reload());
+        Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
+            window.DeviceList.SelectedItem).Id);
+        Assert.Equal(originalName, window.DisplayNameTextBox.Text);
+
+        window.DeviceList.SelectedItem = other;
+        window.UpdateLayout();
+
+        Assert.True(window.IsVisible);
+        Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
+            window.DeviceList.SelectedItem).Id);
+        Assert.Equal(originalName, window.DisplayNameTextBox.Text);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.11", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", window.ResultText.Text, StringComparison.Ordinal);
+
+        window.DisplayNameTextBox.Text = "UNSAVED-READ-FAILURE";
+        window.SaveButton.RaiseEvent(
+            new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+
+        Assert.True(window.IsVisible);
+        Assert.Equal("UNSAVED-READ-FAILURE", window.DisplayNameTextBox.Text);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "VIEWER_DEVICE_STORE_WRITE_FAILED",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
+            diagnosticEntries);
+
+        persistence.ReadException = null;
+        persistence.WriteException =
+            new UnauthorizedAccessException("private path user=operator");
+        window.DisplayNameTextBox.Text = "UNSAVED-LOCAL-NAME";
+        window.SaveButton.RaiseEvent(
+            new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+
+        Assert.True(window.IsVisible);
+        Assert.Equal("UNSAVED-LOCAL-NAME", window.DisplayNameTextBox.Text);
+        Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
+            window.DeviceList.SelectedItem).Id);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_WRITE_FAILED",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("operator", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_WRITE_FAILED",
+            viewModel.OperationMessage,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
+            diagnosticEntries);
+        Assert.Contains(
+            ("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
+            diagnosticEntries);
+
+        const string injectedInvalidData =
+            "host=192.0.2.11 user=operator password=secret-invalid-data";
+        persistence.WriteException = new InvalidDataException(injectedInvalidData);
+        window.SaveButton.RaiseEvent(
+            new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+
+        Assert.True(window.IsVisible);
+        Assert.Equal("UNSAVED-LOCAL-NAME", window.DisplayNameTextBox.Text);
+        Assert.Contains(
+            "VIEWER_UNEXPECTED_ERROR",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "VIEWER_UNEXPECTED_ERROR",
+            viewModel.OperationMessage,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.11", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-invalid-data", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.11", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-invalid-data", viewModel.OperationMessage, StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-save", "VIEWER_UNEXPECTED_ERROR"),
+            diagnosticEntries);
+
+        persistence.WriteException = null;
+        monitoringPersistence.WriteException =
+            new IOException("private monitor path host=192.0.2.11 password=monitor-secret");
+        window.SaveButton.RaiseEvent(
+            new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+
+        Assert.True(window.IsVisible);
+        Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
+            window.DeviceList.SelectedItem).Id);
+        Assert.Equal(
+            "UNSAVED-LOCAL-NAME",
+            Assert.Single(
+                deviceStore.Load(),
+                item => item.Id.Equals(original.Id, StringComparison.Ordinal)).DisplayName);
+        Assert.Contains(
+            "장비를 저장했습니다.",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "VIEWER_MONITOR_STATE_WRITE_FAILED",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-save", "VIEWER_MONITOR_STATE_WRITE_FAILED"),
+            diagnosticEntries);
+        Assert.DoesNotContain("192.0.2.11", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("monitor-secret", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.Single(monitoringStore.LoadCapabilities(original.Id));
+
+        monitoringPersistence.WriteException = null;
+        persistence.WriteException =
+            new UnauthorizedAccessException("private path user=operator");
+        Assert.False(window.DeleteConfirmed(original));
+        Assert.True(window.IsVisible);
+        Assert.Equal("UNSAVED-LOCAL-NAME", window.DisplayNameTextBox.Text);
+        Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
+            window.DeviceList.SelectedItem).Id);
+        Assert.Equal(2, deviceStore.Load().Count);
+        Assert.Contains(
+            ("device-management-delete", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
+            diagnosticEntries);
+        Assert.DoesNotContain(
+            diagnosticEntries,
+            entry => entry.Stage.Contains("192.0.2.11", StringComparison.Ordinal)
+                     || entry.Stage.Contains("secret", StringComparison.Ordinal)
+                     || entry.ErrorCode.Contains("operator", StringComparison.Ordinal));
+
+        persistence.WriteException = null;
+        Assert.True(window.DeleteConfirmed(original));
+        Assert.Single(deviceStore.Load());
+
+        window.Close();
+        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    private static ManagedDeviceDraft DeviceDraft(string name, string host) => new()
+    {
+        DisplayName = name,
+        Model = "IES4224GP",
+        Host = host,
+        Username = "operator",
+        Password = "test-password"
+    };
+
+    private sealed class TestSecretProtector : IViewerSecretProtector
+    {
+        public string Protect(string plainText) =>
+            Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(plainText));
+
+        public string Unprotect(string protectedText) =>
+            System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(protectedText));
+    }
+
+    private sealed class FaultingManagedDevicePersistence : IManagedDevicePersistence
+    {
+        public string? Content { get; private set; }
+        public Exception? ReadException { get; set; }
+        public Exception? WriteException { get; set; }
+
+        public string? ReadIfExists(string path)
+        {
+            if (ReadException is not null) throw ReadException;
+            return Content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination) => Content = null;
+    }
+
+    private sealed class FaultingMonitoringPersistence : IViewerMonitoringPersistence
+    {
+        public string? Content { get; private set; }
+        public Exception? WriteException { get; set; }
+
+        public string? ReadIfExists(string path) => Content;
+
+        public void WriteAtomically(string path, string content)
+        {
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination) => Content = null;
     }
 
     private static string? AutomationNameBindingPath(System.Windows.Style? style)

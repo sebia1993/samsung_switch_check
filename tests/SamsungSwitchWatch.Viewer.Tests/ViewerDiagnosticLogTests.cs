@@ -114,6 +114,45 @@ public sealed class ViewerDiagnosticLogTests
     }
 
     [Fact]
+    public void DiagnosticLog_AcceptsDeviceManagementStagesAndStableCodes()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(folder);
+            log.Write("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE");
+            log.Write("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED");
+            log.Write("device-management-delete", "VIEWER_DEVICE_NOT_FOUND");
+            log.Write("device-management-close", "VIEWER_DEVICE_STORE_CORRUPT");
+
+            var lines = File.ReadAllLines(log.CurrentPath);
+            Assert.Equal(4, lines.Length);
+            var expected = new[]
+            {
+                ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
+                ("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
+                ("device-management-delete", "VIEWER_DEVICE_NOT_FOUND"),
+                ("device-management-close", "VIEWER_DEVICE_STORE_CORRUPT")
+            };
+            for (var index = 0; index < expected.Length; index++)
+            {
+                using var document = JsonDocument.Parse(lines[index]);
+                Assert.Equal(3, document.RootElement.EnumerateObject().Count());
+                Assert.Equal(
+                    expected[index].Item1,
+                    document.RootElement.GetProperty("stage").GetString());
+                Assert.Equal(
+                    expected[index].Item2,
+                    document.RootElement.GetProperty("errorCode").GetString());
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void DiagnosticLog_WriteFailureNeverEscapes()
     {
         var fileSystem = new ThrowingDiagnosticFileSystem();

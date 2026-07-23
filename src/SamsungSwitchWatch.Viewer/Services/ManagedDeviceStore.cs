@@ -36,27 +36,30 @@ public class ManagedDeviceStore
     public string Path => _path;
     public ManagedDeviceLoadStatus LastLoadStatus { get; private set; } = ManagedDeviceLoadStatus.Ok;
 
-    public IReadOnlyList<ManagedDeviceProfile> Load()
+    public IReadOnlyList<ManagedDeviceProfile> Load() => LoadWithStatus().Devices;
+
+    internal ManagedDeviceLoadResult LoadWithStatus()
     {
         lock (_sync)
         {
             try
             {
-                return LoadUnsafe(allowMigrationWriteFailure: true)
+                var devices = LoadUnsafe(allowMigrationWriteFailure: true)
                     .Select(item => item.Copy())
                     .OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase)
                     .ToArray();
+                return new ManagedDeviceLoadResult(devices, LastLoadStatus);
             }
             catch (DeviceStoreCorruptException)
             {
-                return [];
+                return new ManagedDeviceLoadResult([], LastLoadStatus);
             }
             catch (Exception exception) when (IsStorageException(exception))
             {
                 // A locked, read-only, or temporarily unavailable file is not
                 // corrupt. Preserve it and expose a non-normal load state.
                 LastLoadStatus = ManagedDeviceLoadStatus.StorageUnavailable;
-                return [];
+                return new ManagedDeviceLoadResult([], LastLoadStatus);
             }
         }
     }
@@ -489,6 +492,10 @@ public enum ManagedDeviceLoadStatus
     Corrupt,
     StorageUnavailable
 }
+
+internal sealed record ManagedDeviceLoadResult(
+    IReadOnlyList<ManagedDeviceProfile> Devices,
+    ManagedDeviceLoadStatus Status);
 
 internal interface IManagedDevicePersistence
 {
