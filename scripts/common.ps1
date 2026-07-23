@@ -480,6 +480,20 @@ function Set-SswInstallerBackupAcl {
     }
 }
 
+function Remove-SswOperationJournalArtifactBestEffort {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("작업 journal 임시 파일을 정리하지 못했습니다: {0}" -f $Path) -WarningAction Continue
+    }
+}
+
 function Write-SswOperationJournal {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -513,15 +527,15 @@ function Write-SswOperationJournal {
         [IO.File]::WriteAllText($temporary, $payload, (New-Object Text.UTF8Encoding($false)))
         if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
             [IO.File]::Replace($temporary, $journalPath, $replaceBackup, $true)
-            if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) { Remove-Item -LiteralPath $replaceBackup -Force }
         }
         else {
             Move-Item -LiteralPath $temporary -Destination $journalPath
         }
     }
     finally {
-        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary -Force }
-        if (Test-Path -LiteralPath $replaceBackup -PathType Leaf) { Remove-Item -LiteralPath $replaceBackup -Force }
+        # journal 교체가 이미 성공한 뒤의 임시 백업 정리 실패는 완료된 작업을 실패로 바꾸지 않습니다.
+        Remove-SswOperationJournalArtifactBestEffort -Path $temporary
+        Remove-SswOperationJournalArtifactBestEffort -Path $replaceBackup
     }
 }
 
