@@ -8,7 +8,7 @@ on:
       version:
         description: Build-only semantic version (manual runs never publish)
         required: true
-        default: 0.9.1-poc
+        default: 0.9.2-poc
         type: string
 
 permissions:
@@ -418,9 +418,16 @@ jobs:
             $releaseAttestationVerified = $false
             $mutableObservations = 0
             foreach ($attempt in 1..8) {
-              $releaseJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
-                "repos/$($env:SSW_REPOSITORY)/releases/tags/$tag" 2>$null
-              $releaseLookupExitCode = $LASTEXITCODE
+              $releaseJson = @()
+              $releaseLookupExitCode = 1
+              $oldPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              try {
+                $releaseJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+                  "repos/$($env:SSW_REPOSITORY)/releases/tags/$tag" 2>$null
+                $releaseLookupExitCode = $LASTEXITCODE
+              }
+              finally { $ErrorActionPreference = $oldPreference }
               if ($releaseLookupExitCode -eq 0) {
                 $release = ($releaseJson -join "`n") | ConvertFrom-Json
                 if ($release.draft) { throw 'Published release unexpectedly returned to draft state.' }
@@ -435,15 +442,23 @@ jobs:
 
               $assetVerificationSucceeded = $serverConfirmedImmutable
               if ($serverConfirmedImmutable) {
-                gh release verify $tag --repo $env:SSW_REPOSITORY *> $null
-                $assetVerificationSucceeded = $LASTEXITCODE -eq 0
-                if ($assetVerificationSucceeded) {
-                  foreach ($name in $publicAssetNames) {
-                    gh release verify-asset $tag (Join-Path 'artifacts/release' $name) `
-                      --repo $env:SSW_REPOSITORY *> $null
-                    if ($LASTEXITCODE -ne 0) { $assetVerificationSucceeded = $false; break }
+                $releaseVerifyExitCode = 1
+                $oldPreference = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                try {
+                  gh release verify $tag --repo $env:SSW_REPOSITORY *> $null
+                  $releaseVerifyExitCode = $LASTEXITCODE
+                  $assetVerificationSucceeded = $releaseVerifyExitCode -eq 0
+                  if ($assetVerificationSucceeded) {
+                    foreach ($name in $publicAssetNames) {
+                      gh release verify-asset $tag (Join-Path 'artifacts/release' $name) `
+                        --repo $env:SSW_REPOSITORY *> $null
+                      $assetVerifyExitCode = $LASTEXITCODE
+                      if ($assetVerifyExitCode -ne 0) { $assetVerificationSucceeded = $false; break }
+                    }
                   }
                 }
+                finally { $ErrorActionPreference = $oldPreference }
               }
               if ($serverConfirmedImmutable -and $assetVerificationSucceeded) {
                 $releaseAttestationVerified = $true
