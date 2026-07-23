@@ -318,6 +318,150 @@ public sealed class ViewerSettingsTests
     }
 
     [Fact]
+    public async Task SaveCoordinator_ConcurrentWritersAreSerializedAndLaterSnapshotWins()
+    {
+        var persistence = new BlockingSettingsPersistence();
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+        var coordinator = new ViewerSettingsSaveCoordinator(store);
+        var first = new ViewerSettings
+        {
+            AgentUri = "https://first.example.test:18443",
+            MiniTopmost = false
+        };
+        first.SetEventCursor("agent", 10);
+        var second = new ViewerSettings
+        {
+            AgentUri = "https://second.example.test:18443",
+            MiniTopmost = true
+        };
+        second.SetEventCursor("agent", 20);
+
+        var firstSave = Task.Factory.StartNew(
+            () => coordinator.TrySave(
+                first,
+                "settings-save-background",
+                out _),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(persistence.FirstWriteEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        var secondCallStarted = new ManualResetEventSlim();
+        var secondSave = Task.Factory.StartNew(
+            () =>
+            {
+                secondCallStarted.Set();
+                coordinator.SaveOrThrow(second, "settings-save-shutdown");
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(secondCallStarted.Wait(TimeSpan.FromSeconds(2)));
+        Assert.False(persistence.SecondWriteEntered.Wait(TimeSpan.FromMilliseconds(250)));
+
+        persistence.ReleaseFirstWrite.Set();
+        Assert.True(await firstSave.WaitAsync(TimeSpan.FromSeconds(2)));
+        await secondSave.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var loaded = store.Load();
+        Assert.Equal(1, persistence.MaximumConcurrentWrites);
+        Assert.Equal("https://second.example.test:18443", loaded.AgentUri);
+        Assert.True(loaded.MiniTopmost);
+        Assert.True(loaded.TryGetEventCursor("agent", out var cursor));
+        Assert.Equal(20, cursor);
+    }
+
+    [Fact]
+    public async Task SaveCoordinator_FirstWriteFailureReleasesSerializationLock()
+    {
+        var persistence = new BlockingSettingsPersistence
+        {
+            FirstWriteException = new IOException("simulated first write failure")
+        };
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+        var coordinator = new ViewerSettingsSaveCoordinator(store);
+        var first = new ViewerSettings { AgentUri = "https://first.example.test:18443" };
+        var second = new ViewerSettings { AgentUri = "https://second.example.test:18443" };
+
+        var firstSave = Task.Factory.StartNew(
+            () => coordinator.TrySave(
+                first,
+                "settings-save-background",
+                out var errorCode)
+                ? string.Empty
+                : errorCode,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(persistence.FirstWriteEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        var secondSave = Task.Factory.StartNew(
+            () => coordinator.SaveOrThrow(second, "settings-save-shutdown"),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        persistence.ReleaseFirstWrite.Set();
+
+        Assert.Equal(
+            "VIEWER_SETTINGS_WRITE_FAILED",
+            await firstSave.WaitAsync(TimeSpan.FromSeconds(2)));
+        await secondSave.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, persistence.MaximumConcurrentWrites);
+        Assert.Equal("https://second.example.test:18443", store.Load().AgentUri);
+    }
+
+    [Fact]
+    public async Task Sanitize_WaitsForSynchronizedTrustPinMutationAndCopiesStableSnapshot()
+    {
+        var settings = new ViewerSettings
+        {
+            AgentUri = "https://agent.example.test:18443"
+        };
+        var mutationEntered = new ManualResetEventSlim();
+        var releaseMutation = new ManualResetEventSlim();
+        var sanitizeStarted = new ManualResetEventSlim();
+        var pin = new string('A', 64);
+
+        var mutation = Task.Factory.StartNew(
+            () => settings.Synchronize(current =>
+            {
+                mutationEntered.Set();
+                Assert.True(releaseMutation.Wait(TimeSpan.FromSeconds(2)));
+                current.AgentTrustPins[current.BuildAgentAuthority()] = pin;
+            }),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(mutationEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        var sanitize = Task.Factory.StartNew(
+            () =>
+            {
+                sanitizeStarted.Set();
+                return ViewerSettingsSanitizer.Sanitize(settings);
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        try
+        {
+            Assert.True(sanitizeStarted.Wait(TimeSpan.FromSeconds(2)));
+            var completed = await Task.WhenAny(sanitize, Task.Delay(TimeSpan.FromMilliseconds(250)));
+            Assert.NotSame(sanitize, completed);
+        }
+        finally
+        {
+            releaseMutation.Set();
+        }
+
+        await mutation.WaitAsync(TimeSpan.FromSeconds(2));
+        var clean = await sanitize.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(clean.TryGetAgentTrustPin(out var stored));
+        Assert.Equal(pin, stored);
+    }
+
+    [Fact]
     public void StartupWindowPolicy_HonorsTrayStartUnlessConnectionNeedsAttention()
     {
         var settings = new ViewerSettings { StartMinimizedToTray = true };
@@ -363,6 +507,76 @@ public sealed class ViewerSettingsTests
             QuarantineCount++;
             if (QuarantineException is not null) throw QuarantineException;
             Content = null;
+        }
+    }
+
+    private sealed class BlockingSettingsPersistence : IViewerSettingsPersistence
+    {
+        private readonly object _contentSync = new();
+        private int _activeWrites;
+        private int _maximumConcurrentWrites;
+        private int _writeCount;
+        private string? _content;
+
+        public ManualResetEventSlim FirstWriteEntered { get; } = new();
+        public ManualResetEventSlim SecondWriteEntered { get; } = new();
+        public ManualResetEventSlim ReleaseFirstWrite { get; } = new();
+        public Exception? FirstWriteException { get; init; }
+        public int MaximumConcurrentWrites => Volatile.Read(ref _maximumConcurrentWrites);
+
+        public string? ReadIfExists(string path)
+        {
+            lock (_contentSync) return _content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            var writeNumber = Interlocked.Increment(ref _writeCount);
+            var active = Interlocked.Increment(ref _activeWrites);
+            UpdateMaximum(active);
+            try
+            {
+                if (writeNumber == 1)
+                {
+                    FirstWriteEntered.Set();
+                    if (!ReleaseFirstWrite.Wait(TimeSpan.FromSeconds(5)))
+                    {
+                        throw new TimeoutException("test write gate timed out");
+                    }
+                    if (FirstWriteException is not null) throw FirstWriteException;
+                }
+                else if (writeNumber == 2)
+                {
+                    SecondWriteEntered.Set();
+                }
+
+                lock (_contentSync) _content = content;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeWrites);
+            }
+        }
+
+        public void Quarantine(string path, string destination)
+        {
+            lock (_contentSync) _content = null;
+        }
+
+        private void UpdateMaximum(int active)
+        {
+            while (true)
+            {
+                var current = Volatile.Read(ref _maximumConcurrentWrites);
+                if (active <= current
+                    || Interlocked.CompareExchange(
+                        ref _maximumConcurrentWrites,
+                        active,
+                        current) == current)
+                {
+                    return;
+                }
+            }
         }
     }
 }

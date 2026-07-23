@@ -259,15 +259,18 @@ if ($buildScript -match 'RELEASE_NOTES_0\.[0-9]+\.[0-9]+_POC_KO\.md') {
 }
 Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must require the exact-version release note.'
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
-Assert-Pattern $releaseProcess 'git tag -a v0\.9\.5-poc' 'Release instructions must create an annotated tag.'
-if ($releaseProcess -match 'git tag -s') {
-    throw 'Release instructions must not claim a cryptographically signed tag without signature verification.'
-}
 
 if ($workflow -notmatch 'default:\s*(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)') {
     throw 'Manual build default version is missing or invalid.'
 }
-$notesToken = $Matches.version.Replace('-', '_').ToUpperInvariant()
+$workflowVersion = $Matches.version
+$annotatedTagPattern = [regex]::Escape("git tag -a v$workflowVersion")
+Assert-Pattern $releaseProcess $annotatedTagPattern 'Release instructions must create an annotated tag for the workflow default version.'
+if ($releaseProcess -match 'git tag -s') {
+    throw 'Release instructions must not claim a cryptographically signed tag without signature verification.'
+}
+
+$notesToken = $workflowVersion.Replace('-', '_').ToUpperInvariant()
 $notesPath = Join-Path $repoRoot "docs\RELEASE_NOTES_${notesToken}_KO.md"
 if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) { throw "Exact release notes are missing: $notesPath" }
 
