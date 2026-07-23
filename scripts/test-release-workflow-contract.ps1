@@ -259,7 +259,7 @@ if ($buildScript -match 'RELEASE_NOTES_0\.[0-9]+\.[0-9]+_POC_KO\.md') {
 }
 Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must require the exact-version release note.'
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
-Assert-Pattern $releaseProcess 'git tag -a v0\.9\.2-poc' 'Release instructions must create an annotated tag.'
+Assert-Pattern $releaseProcess 'git tag -a v0\.9\.3-poc' 'Release instructions must create an annotated tag.'
 if ($releaseProcess -match 'git tag -s') {
     throw 'Release instructions must not claim a cryptographically signed tag without signature verification.'
 }
