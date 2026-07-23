@@ -195,6 +195,102 @@ public sealed class ViewerMonitoringIntegrationTests
     }
 
     [Fact]
+    public async Task PaddedHostConnectionTest_DoesNotBypassMonitoringOperationGate()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingMonitoringClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            var draft = new ManagedDeviceDraft
+            {
+                Id = existing.Id,
+                DisplayName = existing.DisplayName,
+                Model = existing.Model,
+                Host = $"  {existing.Host}  ",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true
+            };
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var connectionTest = viewModel.TestManagedDeviceAsync(draft);
+
+                Assert.Equal(1, client.ExecuteCount);
+                Assert.Equal(1, client.MaxConcurrent);
+
+                client.ReleaseMonitor.TrySetResult();
+                await connectionTest.WaitAsync(TimeSpan.FromSeconds(5));
+
+                Assert.Equal(2, client.ExecuteCount);
+                Assert.Equal(1, client.MaxConcurrent);
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task DeleteAndRetestSameHost_DoesNotBypassInFlightOperationGate()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingConnectionTestClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            var draft = new ManagedDeviceDraft
+            {
+                DisplayName = existing.DisplayName,
+                Model = existing.Model,
+                Host = existing.Host,
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true
+            };
+            try
+            {
+                var first = viewModel.TestManagedDeviceAsync(draft);
+                await client.FirstTestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                Assert.True(viewModel.DeleteManagedDevice(existing.Id));
+                var second = viewModel.TestManagedDeviceAsync(draft);
+
+                Assert.Equal(1, client.TestCount);
+                Assert.Equal(1, client.MaxConcurrent);
+
+                client.ReleaseFirst.TrySetResult();
+                await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+
+                Assert.Equal(2, client.TestCount);
+                Assert.Equal(1, client.MaxConcurrent);
+            }
+            finally
+            {
+                client.ReleaseFirst.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public async Task MonitoringCycle_UsesAtMostTwoConcurrentDevices()
     {
         var folder = TemporaryFolder();
@@ -631,6 +727,47 @@ public sealed class ViewerMonitoringIntegrationTests
         }
     }
 
+    private sealed class BlockingConnectionTestClient : StatelessClientBase
+    {
+        private int _active;
+        private int _testCount;
+        private int _maxConcurrent;
+
+        public TaskCompletionSource FirstTestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirst { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int TestCount => Volatile.Read(ref _testCount);
+        public int MaxConcurrent => Volatile.Read(ref _maxConcurrent);
+
+        public override async Task<TelnetExecutionResultDto> TestTelnetAsync(
+            TelnetTargetDto target,
+            CancellationToken cancellationToken)
+        {
+            var testCount = Interlocked.Increment(ref _testCount);
+            var active = Interlocked.Increment(ref _active);
+            UpdateMaximum(ref _maxConcurrent, active);
+            try
+            {
+                if (testCount == 1)
+                {
+                    FirstTestStarted.TrySetResult();
+                    await ReleaseFirst.Task.WaitAsync(cancellationToken);
+                }
+                return Result(target.RequestId, []);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+    }
+
     private sealed class BlockingMonitoringClient : StatelessClientBase
     {
         private int _active;
@@ -643,6 +780,23 @@ public sealed class ViewerMonitoringIntegrationTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int ExecuteCount => Volatile.Read(ref _executeCount);
         public int MaxConcurrent => Volatile.Read(ref _maxConcurrent);
+
+        public override Task<TelnetExecutionResultDto> TestTelnetAsync(
+            TelnetTargetDto target,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _executeCount);
+            var active = Interlocked.Increment(ref _active);
+            UpdateMaximum(ref _maxConcurrent, active);
+            try
+            {
+                return Task.FromResult(Result(target.RequestId, []));
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
 
         public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
             TelnetExecuteRequestDto request,

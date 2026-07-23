@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.9-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.10-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.9-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.9-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.10-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.10-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
