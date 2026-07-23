@@ -1210,6 +1210,72 @@ public sealed class ViewerManagedDeviceTests
         }
     }
 
+    [Fact]
+    public async Task AuthenticationFailure_BlocksBeforeMonitoringStateWrite()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = new ThrowingConnectionTestStore(
+                Path.Combine(folder, "devices.json"),
+                new TestProtector());
+            var draft = Draft("login-secret", null);
+            draft.ConnectionVerified = true;
+            draft.MonitoringEnabled = true;
+            draft.LastConnectionTestUtc = DateTimeOffset.UtcNow;
+            draft.LastConnectionTestCode = "OK";
+            var saved = devices.Save(draft);
+            var monitoringPersistence = new TestMonitoringPersistence
+            {
+                WriteExceptionAfterSuccessfulWrites =
+                    new IOException("simulated monitoring state write failure")
+            };
+            var client = new AuthenticationFailureClient();
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new AuthenticationFailureFactory(client),
+                deviceStore: devices,
+                monitoringStore: new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"),
+                    monitoringPersistence));
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    viewModel.IsMonitoringCredentialBlocked(saved.Id)
+                    && viewModel.OperationMessage.Contains(
+                        "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                        StringComparison.Ordinal));
+
+                Assert.Equal(1, client.ExecuteCount);
+                Assert.True(Assert.Single(devices.Load()).MonitoringEnabled);
+
+                await viewModel.RunMonitoringCycleSafelyAsync(CancellationToken.None);
+
+                Assert.Contains("인증 실패", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+
+                monitoringPersistence.WriteExceptionAfterSuccessfulWrites = null;
+                await viewModel.RunMonitoringCycleAsync();
+
+                Assert.Equal(1, client.ExecuteCount);
+            }
+            finally
+            {
+                monitoringPersistence.WriteExceptionAfterSuccessfulWrites = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
     private static ManagedDeviceDraft Draft(string password, string? enablePassword) => new()
     {
         DisplayName = "ACCESS-SW-01",
@@ -1309,6 +1375,7 @@ public sealed class ViewerManagedDeviceTests
         public string? Content { get; private set; }
         public Exception? ReadException { get; init; }
         public Exception? WriteException { get; set; }
+        public Exception? WriteExceptionAfterSuccessfulWrites { get; set; }
         public int WriteCount { get; private set; }
         public int QuarantineCount { get; private set; }
 
@@ -1322,6 +1389,10 @@ public sealed class ViewerManagedDeviceTests
         {
             WriteCount++;
             if (WriteException is not null) throw WriteException;
+            if (WriteExceptionAfterSuccessfulWrites is not null && WriteCount > 1)
+            {
+                throw WriteExceptionAfterSuccessfulWrites;
+            }
             Content = content;
         }
 

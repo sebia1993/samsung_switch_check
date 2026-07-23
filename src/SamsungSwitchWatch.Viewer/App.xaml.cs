@@ -10,6 +10,7 @@ namespace SamsungSwitchWatch.Viewer;
 public partial class App : Application
 {
     private ViewerSettingsStore? _settingsStore;
+    private ViewerSettingsSaveCoordinator? _settingsSaveCoordinator;
     private DashboardViewModel? _viewModel;
     private MainWindow? _mainWindow;
     private MiniWindow? _miniWindow;
@@ -41,6 +42,9 @@ public partial class App : Application
         _singleInstance.ActivationRequested += (_, _) => Dispatcher.BeginInvoke(ShowDashboard);
 
         _settingsStore = new ViewerSettingsStore();
+        _settingsSaveCoordinator = new ViewerSettingsSaveCoordinator(
+            _settingsStore,
+            _diagnosticLog.Write);
         var settings = _settingsStore.Load();
         _deviceStore = new ManagedDeviceStore();
         try
@@ -60,9 +64,14 @@ public partial class App : Application
         _viewModel = new DashboardViewModel(
             settings,
             _settingsStore,
+            clientFactory: null,
             synchronizationContext: SynchronizationContext.Current,
             deviceStore: _deviceStore,
-            monitoringStore: _monitoringStore);
+            monitoringStore: _monitoringStore,
+            settingsSaveCoordinator: _settingsSaveCoordinator,
+            writeDiagnostic: _diagnosticLog.Write,
+            settingsSaveDelay: static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken));
         _mainWindow = new MainWindow(_viewModel);
         MainWindow = _mainWindow;
         _trayIcon = new TrayIconService(_viewModel, ShowDashboard, ShowMiniWindow, OpenConnectionSettings, ExitApplication);
@@ -258,7 +267,7 @@ public partial class App : Application
                     settings.MiniTop = _miniWindow.Top;
                     settings.MiniTopmost = _miniWindow.Topmost;
                 }
-                TrySaveSettings(settings);
+                TrySaveSettings(settings, "settings-save-shutdown");
             }
 
             if (_viewModel is not null) _viewModel.AlertRaised -= OnAlertRaised;
@@ -312,9 +321,16 @@ public partial class App : Application
                && top <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
     }
 
-    private void TrySaveSettings(ViewerSettings settings)
+    private bool TrySaveSettings(
+        ViewerSettings settings,
+        string stage = "settings-save-interactive")
     {
-        try { _settingsStore?.Save(settings); } catch { }
+        if (_settingsSaveCoordinator is null) return false;
+        if (_settingsSaveCoordinator.TrySave(settings, stage, out var errorCode)) return true;
+
+        _viewModel?.ReportOperation(
+            $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}");
+        return false;
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

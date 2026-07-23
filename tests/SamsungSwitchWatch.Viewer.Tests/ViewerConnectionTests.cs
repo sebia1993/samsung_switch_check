@@ -483,6 +483,22 @@ public sealed class ViewerConnectionTests
         Assert.DoesNotContain("토큰", message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("VIEWER_MONITOR_CYCLE_FAILED", "다음 주기")]
+    [InlineData("VIEWER_SETTINGS_WRITE_FAILED", "디스크")]
+    public void ViewerLocalFailureMessages_AreActionableAndSecretFree(
+        string code,
+        string expected)
+    {
+        var message = ViewerConnectionMessages.ForCode(code);
+
+        Assert.Contains(expected, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.10", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("show port status", message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Copy_PreservesWindowAndCursorStateWithoutSharingCursorDictionary()
     {
