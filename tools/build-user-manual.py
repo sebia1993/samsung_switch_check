@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.7-poc"
+VERSION = "0.9.8-poc"
 DOCUMENT_DATE = "2026-07-24"
 FONT = "맑은 고딕"
 MONO = "Consolas"

@@ -194,10 +194,18 @@ try {
                 -Raw -Encoding UTF8 | ConvertFrom-Json
         }
         catch { throw "$($package.Name) package manifest is invalid: $($_.Exception.Message)" }
+        $expectedProductVersion = "$Version+$($rootManifest.sourceCommit)"
         if ($manifest.manifestVersion -ne 1 -or $manifest.packageKind -ne $package.Name -or
             $manifest.version -ne $Version -or $manifest.sourceCommit -ne $rootManifest.sourceCommit -or
-            $manifest.executable.name -ne $package.Exe) {
+            $manifest.executable.name -ne $package.Exe -or
+            [string]$manifest.executable.productVersion -ne $expectedProductVersion) {
             throw "$($package.Name) package manifest identity failed."
+        }
+        $actualProductVersion =
+            [Diagnostics.FileVersionInfo]::GetVersionInfo(
+                (Join-Path $expanded $package.Exe)).ProductVersion
+        if ($actualProductVersion -ne $expectedProductVersion) {
+            throw "$($package.Name) executable product version differs from the release identity."
         }
         $payloadNames = @(Get-ChildItem -LiteralPath $expanded -File |
             Where-Object { $_.Name -ne 'BUILD-MANIFEST.json' } | ForEach-Object { $_.Name } | Sort-Object)

@@ -1,6 +1,8 @@
 using System.Buffers;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Security;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -22,6 +24,11 @@ public sealed class HttpAgentClient : IAgentClient
     private const int MaximumBoundedResponseBytes = 16 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    internal static string UserAgentValue { get; } = CreateUserAgentValue(
+        typeof(HttpAgentClient).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion,
+        typeof(HttpAgentClient).Assembly.GetName().Version);
 
     private readonly ViewerSettings _settings;
     private readonly HttpClient _httpClient;
@@ -63,8 +70,39 @@ public sealed class HttpAgentClient : IAgentClient
             BaseAddress = new Uri(clean.AgentUri),
             Timeout = ReadOnlyQueryTimeout
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.8");
-        _queryHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.8");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgentValue);
+        _queryHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgentValue);
+    }
+
+    internal static string CreateUserAgentValue(
+        string? informationalVersion,
+        Version? assemblyVersion)
+    {
+        const string productName = "SamsungSwitchWatch.Viewer";
+        var candidate = informationalVersion;
+        if (!string.IsNullOrWhiteSpace(candidate))
+        {
+            var metadataIndex = candidate.IndexOf('+');
+            if (metadataIndex >= 0)
+            {
+                candidate = candidate[..metadataIndex];
+            }
+
+            if (ProductInfoHeaderValue.TryParse(
+                    $"{productName}/{candidate}",
+                    out var parsed)
+                && parsed?.Product?.Name == productName
+                && parsed.Product.Version == candidate
+                && parsed.Comment is null)
+            {
+                return parsed.ToString();
+            }
+        }
+
+        var fallback = assemblyVersion is { Build: >= 0 }
+            ? assemblyVersion.ToString(3)
+            : assemblyVersion?.ToString() ?? "0.0.0";
+        return new ProductInfoHeaderValue(productName, fallback).ToString();
     }
 
     public event EventHandler<AgentEventChangeDto>? EventChanged
