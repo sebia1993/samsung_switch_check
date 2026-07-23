@@ -183,13 +183,83 @@ if ($draftCreateOutputIndex -lt $createIndex -or $draftLookupRetryIndex -lt $dra
     throw 'Draft creation, bounded discovery, ID verification, digest verification, and final tag verification must remain ordered before publication.'
 }
 
+$postPublishRetryStart = $workflow.IndexOf('$releaseAttestationVerified = $false', [StringComparison]::Ordinal)
+$postPublishRetryEnd = $workflow.IndexOf('if (-not $serverConfirmedImmutable)', $postPublishRetryStart, [StringComparison]::Ordinal)
+if ($postPublishRetryStart -lt 0 -or $postPublishRetryEnd -le $postPublishRetryStart) {
+    throw 'The bounded post-publish verification block is missing.'
+}
+$postPublishRetryBlock = $workflow.Substring(
+    $postPublishRetryStart,
+    $postPublishRetryEnd - $postPublishRetryStart)
+$lookupRetryPattern = @'
+(?sx)
+\$releaseJson\s*=\s*@\(\)\s*
+\$releaseLookupExitCode\s*=\s*1\s*
+\$oldPreference\s*=\s*\$ErrorActionPreference\s*
+\$ErrorActionPreference\s*=\s*'Continue'\s*
+try\s*\{.*?
+gh\s+api\b.*?
+\$releaseLookupExitCode\s*=\s*\$LASTEXITCODE.*?
+\}\s*finally\s*\{\s*\$ErrorActionPreference\s*=\s*\$oldPreference\s*\}
+'@
+Assert-Pattern $postPublishRetryBlock $lookupRetryPattern `
+    'Retryable release lookup must locally suppress NativeCommandError, capture LASTEXITCODE, and restore ErrorActionPreference.'
+$attestationRetryPattern = @'
+(?sx)
+\$releaseVerifyExitCode\s*=\s*1\s*
+\$oldPreference\s*=\s*\$ErrorActionPreference\s*
+\$ErrorActionPreference\s*=\s*'Continue'\s*
+try\s*\{\s*
+gh\s+release\s+verify\s+\$tag\b.*?
+\$releaseVerifyExitCode\s*=\s*\$LASTEXITCODE.*?
+gh\s+release\s+verify-asset\s+\$tag\b.*?
+\$assetVerifyExitCode\s*=\s*\$LASTEXITCODE.*?
+\}\s*finally\s*\{\s*\$ErrorActionPreference\s*=\s*\$oldPreference\s*\}
+'@
+Assert-Pattern $postPublishRetryBlock $attestationRetryPattern `
+    'Post-publish attestation checks must locally suppress NativeCommandError, capture each exit code, and restore ErrorActionPreference.'
+if ([regex]::Matches($postPublishRetryBlock, "finally\s*\{\s*\`$ErrorActionPreference\s*=\s*\`$oldPreference\s*\}").Count -lt 2) {
+    throw 'Both retryable GitHub lookup and attestation verification must restore ErrorActionPreference.'
+}
+
+$originalPreference = $ErrorActionPreference
+$nativeAttempts = 0
+$nativeRetrySucceeded = $false
+foreach ($attempt in 1..2) {
+    $nativeAttempts++
+    $nativeExitCode = 1
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($attempt -eq 1) {
+            & cmd.exe /d /c 'echo transient-attestation-delay 1>&2 & exit /b 1' *> $null
+        }
+        else {
+            & cmd.exe /d /c 'exit /b 0' *> $null
+        }
+        $nativeExitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $oldPreference }
+
+    if ($nativeExitCode -eq 0) {
+        $nativeRetrySucceeded = $true
+        break
+    }
+}
+if (-not $nativeRetrySucceeded -or $nativeAttempts -ne 2) {
+    throw 'Windows PowerShell 5.1 native stderr must remain retryable after a transient first failure.'
+}
+if ($ErrorActionPreference -ne $originalPreference) {
+    throw 'Native retry verification must restore the caller ErrorActionPreference.'
+}
+
 Assert-Pattern $buildScript 'RELEASE_NOTES_\$\{releaseNotesToken\}_KO\.md' 'Build must select only exact-version release notes.'
 if ($buildScript -match 'RELEASE_NOTES_0\.[0-9]+\.[0-9]+_POC_KO\.md') {
     throw 'Build must not silently fall back to another version release note.'
 }
 Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must require the exact-version release note.'
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
-Assert-Pattern $releaseProcess 'git tag -a v0\.9\.1-poc' 'Release instructions must create an annotated tag.'
+Assert-Pattern $releaseProcess 'git tag -a v0\.9\.2-poc' 'Release instructions must create an annotated tag.'
 if ($releaseProcess -match 'git tag -s') {
     throw 'Release instructions must not claim a cryptographically signed tag without signature verification.'
 }
