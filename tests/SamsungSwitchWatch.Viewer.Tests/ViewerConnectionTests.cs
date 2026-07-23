@@ -1,5 +1,6 @@
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.Models;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -34,6 +35,34 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
+    public void CertificatePinMismatch_RemainsRecordedAfterLaterMatchingValidation()
+    {
+        using var expectedCertificate = CreateCertificate();
+        using var changedCertificate = CreateCertificate();
+        var settings = new ViewerSettings
+        {
+            AgentUri = "https://agent.example.test:18443"
+        };
+        settings.SetAgentTrustPin(CertificatePinValidator.GetSpkiSha256(expectedCertificate));
+        var validator = new CertificatePinValidator(settings);
+        using var request = new HttpRequestMessage(HttpMethod.Get, settings.AgentUri);
+
+        Assert.False(validator.Validate(
+            request,
+            changedCertificate,
+            null,
+            SslPolicyErrors.None));
+        Assert.True(validator.IdentityChanged);
+
+        Assert.True(validator.Validate(
+            request,
+            expectedCertificate,
+            null,
+            SslPolicyErrors.None));
+        Assert.True(validator.IdentityChanged);
+    }
+
+    [Fact]
     public void ReadOnlyQuery_CoversTwoMaximumTelnetSessionsAndRetryOverhead()
     {
         Assert.Equal(TimeSpan.FromSeconds(510), HttpAgentClient.ReadOnlyQueryTimeout);
@@ -56,7 +85,7 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
-    public async Task TestAndExecute_RevalidateAgentBeforeEveryTelnetRequest()
+    public async Task TestAndExecute_ReuseValidatedAgentIdentity()
     {
         using var certificate = CreateCertificate();
         var fixture = CreateClientFixture(
@@ -86,8 +115,162 @@ public sealed class ViewerConnectionTests
                 ["show port status"]),
             CancellationToken.None);
 
+        Assert.Equal(1, fixture.ControlHandler.RequestCount);
+        Assert.Equal(2, fixture.QueryHandler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentFirstTelnetRequests_ShareOneIdentityValidation()
+    {
+        using var certificate = CreateCertificate();
+        using var identityRequestStarted = new ManualResetEventSlim();
+        using var concurrentRequestReachedWait = new ManualResetEventSlim();
+        using var releaseIdentityResponse = new ManualResetEventSlim();
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ =>
+            {
+                identityRequestStarted.Set();
+                if (!releaseIdentityResponse.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    throw new TimeoutException("Identity response was not released.");
+                }
+                return JsonResponse(HttpStatusCode.OK, IdentityJson(certificate));
+            },
+            queryResponse: request =>
+            {
+                var isTest = request.RequestUri?.AbsolutePath == AgentApiRoutes.TelnetTestV4;
+                return JsonResponse(
+                    HttpStatusCode.OK,
+                    TelnetResultJson(
+                        isTest ? "test-1" : "execute-1",
+                        isTest ? [] : ["show port status"]));
+            });
+        await using var client = fixture.Client;
+
+        var testTask = Task.Run(() =>
+            client.TestTelnetAsync(Target(), CancellationToken.None));
+        try
+        {
+            Assert.True(
+                identityRequestStarted.Wait(TimeSpan.FromSeconds(10)),
+                "The first request did not reach identity validation.");
+
+            var executeTask = Task.Run(async () =>
+            {
+                var operation = client.ExecuteTelnetAsync(
+                    new TelnetExecuteRequestDto(
+                        "execute-1",
+                        "192.0.2.10",
+                        23,
+                        "IES4224GP",
+                        "operator",
+                        "secret",
+                        null,
+                        "manual",
+                        ["show port status"]),
+                    CancellationToken.None);
+                concurrentRequestReachedWait.Set();
+                return await operation;
+            });
+            Assert.True(
+                concurrentRequestReachedWait.Wait(TimeSpan.FromSeconds(10)),
+                "The concurrent request did not reach identity validation.");
+            Assert.False(executeTask.IsCompleted);
+            Assert.Equal(1, fixture.ControlHandler.RequestCount);
+            releaseIdentityResponse.Set();
+
+            await Task.WhenAll(testTask, executeTask);
+        }
+        finally
+        {
+            releaseIdentityResponse.Set();
+        }
+
+        Assert.Equal(1, fixture.ControlHandler.RequestCount);
+        Assert.Equal(2, fixture.QueryHandler.RequestCount);
+    }
+
+    [Fact]
+    public async Task QueryTransportFailure_NextRequestRevalidatesIdentityOnce()
+    {
+        using var certificate = CreateCertificate();
+        var queryAttempt = 0;
+        var fixture = CreateClientFixture(
+            certificate,
+            queryResponse: _ =>
+            {
+                queryAttempt++;
+                if (queryAttempt == 1)
+                {
+                    throw new HttpRequestException(
+                        HttpRequestError.ConnectionError,
+                        "synthetic query connection failure");
+                }
+                return JsonResponse(HttpStatusCode.OK, TelnetResultJson("test-1", []));
+            });
+        await using var client = fixture.Client;
+        var states = new List<AgentConnectionState>();
+        client.ConnectionStateChanged += (_, state) => states.Add(state);
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.TestTelnetAsync(Target(), CancellationToken.None));
+        var recovered = await client.TestTelnetAsync(Target(), CancellationToken.None);
+
+        Assert.Equal("AGENT_UNREACHABLE", failure.ErrorCode);
+        Assert.True(recovered.Success);
         Assert.Equal(2, fixture.ControlHandler.RequestCount);
         Assert.Equal(2, fixture.QueryHandler.RequestCount);
+        Assert.Contains(AgentConnectionState.Offline, states);
+        var offlineIndex = states.IndexOf(AgentConnectionState.Offline);
+        Assert.Contains(AgentConnectionState.Reconnecting, states.Skip(offlineIndex + 1));
+        Assert.Contains(AgentConnectionState.Connected, states.Skip(offlineIndex + 1));
+    }
+
+    [Fact]
+    public async Task FailedExplicitIdentityRefresh_CannotReuseCachedValidation()
+    {
+        using var certificate = CreateCertificate();
+        var controlAttempt = 0;
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ =>
+            {
+                controlAttempt++;
+                return controlAttempt == 2
+                    ? JsonResponse(HttpStatusCode.NotFound, """{"error":{"code":"NOT_FOUND"}}""")
+                    : JsonResponse(HttpStatusCode.OK, IdentityJson(certificate));
+            });
+        await using var client = fixture.Client;
+
+        await client.StartAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<AgentClientException>(
+            () => client.StartAsync(CancellationToken.None));
+        var recovered = await client.TestTelnetAsync(Target(), CancellationToken.None);
+
+        Assert.True(recovered.Success);
+        Assert.Equal(3, fixture.ControlHandler.RequestCount);
+        Assert.Equal(1, fixture.QueryHandler.RequestCount);
+    }
+
+    [Fact]
+    public async Task IdentityBodyPinMismatch_BlocksTelnetBeforeQueryIsSent()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ => JsonResponse(
+                HttpStatusCode.OK,
+                IdentityJson(certificate, new string('A', 64))));
+        await using var client = fixture.Client;
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.TestTelnetAsync(Target(), CancellationToken.None));
+
+        Assert.Equal("AGENT_IDENTITY_CHANGED", failure.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, failure.SuggestedConnectionState);
+        Assert.Equal(1, fixture.ControlHandler.RequestCount);
+        Assert.Equal(0, fixture.QueryHandler.RequestCount);
     }
 
     [Fact]
@@ -137,10 +320,15 @@ public sealed class ViewerConnectionTests
         var states = new List<AgentConnectionState>();
         client.ConnectionStateChanged += (_, state) => states.Add(state);
 
-        var failure = await Assert.ThrowsAsync<AgentClientException>(
+        var firstFailure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.TestTelnetAsync(Target(), CancellationToken.None));
+        var secondFailure = await Assert.ThrowsAsync<AgentClientException>(
             () => client.TestTelnetAsync(Target(), CancellationToken.None));
 
-        Assert.Equal("QUERY_COMMAND_BLOCKED", failure.ErrorCode);
+        Assert.Equal("QUERY_COMMAND_BLOCKED", firstFailure.ErrorCode);
+        Assert.Equal("QUERY_COMMAND_BLOCKED", secondFailure.ErrorCode);
+        Assert.Equal(1, fixture.ControlHandler.RequestCount);
+        Assert.Equal(2, fixture.QueryHandler.RequestCount);
         Assert.Contains(AgentConnectionState.Connected, states);
         Assert.DoesNotContain(AgentConnectionState.Offline, states);
     }
@@ -359,17 +547,23 @@ public sealed class ViewerConnectionTests
         Content = new StringContent(json, Encoding.UTF8, "application/json")
     };
 
-    private static string IdentityJson(X509Certificate2 certificate) => $$"""
+    private static string IdentityJson(
+        X509Certificate2 certificate,
+        string? publicKeySha256 = null)
+    {
+        publicKeySha256 ??= CertificatePinValidator.GetSpkiSha256(certificate);
+        return $$"""
         {
           "apiVersion": 4,
           "agentId": "agent-test",
           "instanceId": "instance-test",
-          "certificatePublicKeySha256": "{{CertificatePinValidator.GetSpkiSha256(certificate)}}",
+          "certificatePublicKeySha256": "{{publicKeySha256}}",
           "protocol": "https",
           "maxCommandsPerRequest": 8,
           "maxOutputBytes": 65536
         }
         """;
+    }
 
     private static string TelnetResultJson(
         string requestId,
@@ -416,15 +610,19 @@ public sealed class ViewerConnectionTests
     private sealed class RecordingHandler(
         Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
     {
-        public int RequestCount { get; private set; }
-        public List<(HttpMethod Method, string PathAndQuery)> Requests { get; } = [];
+        private readonly ConcurrentQueue<(HttpMethod Method, string PathAndQuery)> _requests = [];
+        private int _requestCount;
+
+        public int RequestCount => Volatile.Read(ref _requestCount);
+        public IReadOnlyList<(HttpMethod Method, string PathAndQuery)> Requests =>
+            _requests.ToArray();
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
-            RequestCount++;
-            Requests.Add((request.Method, request.RequestUri?.PathAndQuery ?? string.Empty));
+            Interlocked.Increment(ref _requestCount);
+            _requests.Enqueue((request.Method, request.RequestUri?.PathAndQuery ?? string.Empty));
             return Task.FromResult(responseFactory(request));
         }
     }

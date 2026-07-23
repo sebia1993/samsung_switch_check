@@ -29,6 +29,7 @@ public sealed class HttpAgentClient : IAgentClient
     private readonly CertificatePinValidator _certificateValidator;
     private readonly SemaphoreSlim _startGate = new(1, 1);
     private AgentIdentityDto? _identity;
+    private int _identityValidationReady;
     private int _connectionState = (int)AgentConnectionState.NeedsConnection;
     private bool _disposed;
 
@@ -76,12 +77,25 @@ public sealed class HttpAgentClient : IAgentClient
 
     public bool SupportsStatelessV4 => true;
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        StartCoreAsync(forceIdentityRefresh: true, cancellationToken);
+
+    private async Task StartCoreAsync(
+        bool forceIdentityRefresh,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         await _startGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (!forceIdentityRefresh && HasValidatedIdentity())
+            {
+                return;
+            }
+
+            // A failed explicit refresh must not leave an older identity
+            // eligible for later Telnet requests.
+            Volatile.Write(ref _identityValidationReady, 0);
             using var requestCancellation =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             requestCancellation.CancelAfter(ControlRequestTimeout);
@@ -110,7 +124,8 @@ public sealed class HttpAgentClient : IAgentClient
                 PublishConnectionState(AgentConnectionState.Stale);
                 throw new AgentClientException("AGENT_IDENTITY_CHANGED", AgentConnectionState.Stale);
             }
-            _identity = identity;
+            Volatile.Write(ref _identity, identity);
+            Volatile.Write(ref _identityValidationReady, 1);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -143,8 +158,8 @@ public sealed class HttpAgentClient : IAgentClient
 
     public async Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken)
     {
-        if (_identity is null) await StartAsync(cancellationToken).ConfigureAwait(false);
-        return _identity!;
+        await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
+        return Volatile.Read(ref _identity)!;
     }
 
     public async Task<TelnetExecutionResultDto> TestTelnetAsync(
@@ -293,8 +308,20 @@ public sealed class HttpAgentClient : IAgentClient
 
     private async Task EnsureStartedAsync(CancellationToken cancellationToken)
     {
-        await StartAsync(cancellationToken).ConfigureAwait(false);
+        ThrowIfDisposed();
+        if (HasValidatedIdentity())
+        {
+            return;
+        }
+
+        await StartCoreAsync(forceIdentityRefresh: false, cancellationToken).ConfigureAwait(false);
     }
+
+    private bool HasValidatedIdentity() =>
+        Volatile.Read(ref _identityValidationReady) == 1
+        && Volatile.Read(ref _identity) is not null
+        && (AgentConnectionState)Volatile.Read(ref _connectionState)
+        == AgentConnectionState.Connected;
 
     private async Task<HttpResponseMessage> SendAsync(
         HttpClient client,
@@ -485,6 +512,7 @@ public sealed class HttpAgentClient : IAgentClient
     {
         if (_disposed) return ValueTask.CompletedTask;
         _disposed = true;
+        Volatile.Write(ref _identityValidationReady, 0);
         _httpClient.Dispose();
         _queryHttpClient.Dispose();
         _startGate.Dispose();
@@ -495,11 +523,12 @@ public sealed class HttpAgentClient : IAgentClient
 internal sealed class CertificatePinValidator
 {
     private readonly ViewerSettings _settings;
+    private int _identityChanged;
     private string? _observedPin;
 
     public CertificatePinValidator(ViewerSettings settings) => _settings = settings;
 
-    public bool IdentityChanged { get; private set; }
+    public bool IdentityChanged => Volatile.Read(ref _identityChanged) != 0;
 
     public bool Validate(
         HttpRequestMessage request,
@@ -512,23 +541,27 @@ internal sealed class CertificatePinValidator
         try { pin = GetSpkiSha256(certificate); }
         catch (CryptographicException) { return false; }
 
-        _observedPin = pin;
+        Volatile.Write(ref _observedPin, pin);
         if (!_settings.TryGetAgentTrustPin(out var expected)) return true;
         var matches = FixedTimeEquals(expected, pin);
-        IdentityChanged = !matches;
+        if (!matches)
+        {
+            Interlocked.Exchange(ref _identityChanged, 1);
+        }
         return matches;
     }
 
     public bool CompleteTrust(string identityPin)
     {
-        if (_observedPin is null || !FixedTimeEquals(_observedPin, identityPin))
+        var observedPin = Volatile.Read(ref _observedPin);
+        if (observedPin is null || !FixedTimeEquals(observedPin, identityPin))
         {
-            IdentityChanged = true;
+            Interlocked.Exchange(ref _identityChanged, 1);
             return false;
         }
         if (_settings.TryGetAgentTrustPin(out var expected) && !FixedTimeEquals(expected, identityPin))
         {
-            IdentityChanged = true;
+            Interlocked.Exchange(ref _identityChanged, 1);
             return false;
         }
         _settings.SetAgentTrustPin(identityPin.ToUpperInvariant());
