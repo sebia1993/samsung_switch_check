@@ -6,7 +6,22 @@ $workflowPath = Join-Path $repoRoot '.github\workflows\release.yml'
 $buildScriptPath = Join-Path $repoRoot 'scripts\build-release.ps1'
 $packageContractPath = Join-Path $repoRoot 'scripts\test-package-contract.ps1'
 $releaseProcessPath = Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md'
-foreach ($path in @($workflowPath, $buildScriptPath, $packageContractPath, $releaseProcessPath)) {
+$windowsCiPath = Join-Path $repoRoot '.github\workflows\windows-ci.yml'
+$agentsPath = Join-Path $repoRoot 'AGENTS.md'
+$readmePath = Join-Path $repoRoot 'README.md'
+$installPath = Join-Path $repoRoot 'docs\INSTALL_KO.md'
+$manualBuilderPath = Join-Path $repoRoot 'tools\build-user-manual.py'
+foreach ($path in @(
+    $workflowPath,
+    $buildScriptPath,
+    $packageContractPath,
+    $releaseProcessPath,
+    $windowsCiPath,
+    $agentsPath,
+    $readmePath,
+    $installPath,
+    $manualBuilderPath
+)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required release file is missing: $path" }
 }
 
@@ -14,6 +29,11 @@ $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
 $packageContract = Get-Content -LiteralPath $packageContractPath -Raw
 $releaseProcess = Get-Content -LiteralPath $releaseProcessPath -Raw -Encoding UTF8
+$windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw
+$agents = Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8
+$readme = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
+$install = Get-Content -LiteralPath $installPath -Raw -Encoding UTF8
+$manualBuilder = Get-Content -LiteralPath $manualBuilderPath -Raw -Encoding UTF8
 
 function Assert-Pattern {
     param(
@@ -22,6 +42,40 @@ function Assert-Pattern {
         [Parameter(Mandatory = $true)][string]$Message
     )
     if ($Text -notmatch $Pattern) { throw $Message }
+}
+
+function Assert-PatternCount {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][int]$ExpectedCount,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $actualCount = [regex]::Matches($Text, $Pattern).Count
+    if ($actualCount -ne $ExpectedCount) {
+        throw "$Message expected=$ExpectedCount actual=$actualCount"
+    }
+}
+
+function Assert-OnlyActiveVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $versions = @(
+        [regex]::Matches(
+            $Text,
+            '(?<![0-9A-Za-z.-])v?(?<version>\d+\.\d+\.\d+-poc)(?![0-9A-Za-z.-])') |
+            ForEach-Object { $_.Groups['version'].Value }
+    )
+    if ($versions.Count -eq 0) {
+        throw "$Name does not contain an active POC release version."
+    }
+    $unexpected = @($versions | Where-Object { $_ -ne $ExpectedVersion } | Sort-Object -Unique)
+    if ($unexpected.Count -gt 0) {
+        throw "$Name contains a stale active release version: $($unexpected -join ', ')"
+    }
 }
 
 Assert-Pattern $workflow "push:\s*\r?\n\s*tags:\s*\['v\*'\]" 'Publishing must be triggered only by v* tags.'
@@ -264,6 +318,62 @@ if ($workflow -notmatch 'default:\s*(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?
     throw 'Manual build default version is missing or invalid.'
 }
 $workflowVersion = $Matches.version
+$escapedVersion = [regex]::Escape($workflowVersion)
+$escapedTag = [regex]::Escape("v$workflowVersion")
+$escapedAgentZip = [regex]::Escape("SamsungSwitchWatch-Agent-$workflowVersion-win-x64.zip")
+$escapedViewerZip = [regex]::Escape("SamsungSwitchWatch-Viewer-$workflowVersion-win-x64.zip")
+$escapedNotesName = [regex]::Escape(
+    "RELEASE_NOTES_$($workflowVersion.Replace('-', '_').ToUpperInvariant())_KO.md")
+
+Assert-OnlyActiveVersion $workflow $workflowVersion 'Release workflow'
+Assert-OnlyActiveVersion $windowsCi $workflowVersion 'Windows CI workflow'
+Assert-OnlyActiveVersion $buildScript $workflowVersion 'Release build script'
+Assert-OnlyActiveVersion $agents $workflowVersion 'Repository instructions'
+Assert-OnlyActiveVersion $install $workflowVersion 'Installation guide'
+Assert-OnlyActiveVersion $releaseProcess $workflowVersion 'Release process'
+Assert-OnlyActiveVersion $manualBuilder $workflowVersion 'User manual builder'
+
+Assert-Pattern $buildScript "\[string\]\`$Version\s*=\s*'$escapedVersion'" `
+    'Release build default must match the release workflow version.'
+Assert-Pattern $windowsCi "\\scripts\\build-release\.ps1\s+-Version\s+$escapedVersion\s+-SkipTests" `
+    'Windows CI package build version must match the release workflow version.'
+Assert-PatternCount $windowsCi ([regex]::Escape("samsung-switch-watch-$workflowVersion-")) 2 `
+    'Windows CI upload and download artifact names must use the active version.'
+Assert-Pattern $windowsCi "\\scripts\\test-package-contract\.ps1.+-Version\s+$escapedVersion" `
+    'Windows CI package verification version must match the release workflow version.'
+Assert-Pattern $agents ([regex]::Escape(".\scripts\build-release.ps1 -Version $workflowVersion")) `
+    'Repository instructions must use the active release build version.'
+Assert-PatternCount $readme ("\x60v$escapedVersion\x60") 1 `
+    'README must contain exactly one current-version summary token.'
+Assert-Pattern $readme $escapedAgentZip 'README Agent asset name must use the active version.'
+Assert-Pattern $readme $escapedViewerZip 'README Viewer asset name must use the active version.'
+Assert-Pattern $readme ([regex]::Escape(".\scripts\build-release.ps1 -Version $workflowVersion")) `
+    'README build command must use the active version.'
+Assert-Pattern $readme $escapedNotesName 'README must link the active release notes.'
+Assert-Pattern $install $escapedTag 'Installation guide tag must use the active version.'
+Assert-Pattern $install $escapedAgentZip 'Installation guide Agent asset must use the active version.'
+Assert-Pattern $install $escapedViewerZip 'Installation guide Viewer asset must use the active version.'
+Assert-Pattern $releaseProcess ("(?m)^-\s+[^:\r\n]+:\s+\x60$escapedVersion\x60\s*$") `
+    'Release process current version must match the workflow version.'
+Assert-Pattern $releaseProcess ([regex]::Escape("git tag -a v$workflowVersion")) `
+    'Release process tag command must use the active version.'
+Assert-Pattern $manualBuilder "VERSION\s*=\s*`"$escapedVersion`"" `
+    'User manual builder must use the active version.'
+
+$staleGuardPassed = $false
+try {
+    Assert-OnlyActiveVersion `
+        -Text "active=$workflowVersion stale=0.0.0-poc" `
+        -ExpectedVersion $workflowVersion `
+        -Name 'Version guard self-test'
+}
+catch {
+    $staleGuardPassed = $true
+}
+if (-not $staleGuardPassed) {
+    throw 'Active-version guard must reject a stale version token.'
+}
+
 $annotatedTagPattern = [regex]::Escape("git tag -a v$workflowVersion")
 Assert-Pattern $releaseProcess $annotatedTagPattern 'Release instructions must create an annotated tag for the workflow default version.'
 if ($releaseProcess -match 'git tag -s') {
