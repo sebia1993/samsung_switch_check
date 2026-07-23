@@ -69,6 +69,64 @@ public sealed class ViewerConnectionTests
         Assert.True(HttpAgentClient.ReadOnlyQueryTimeout > (TimeSpan.FromSeconds(240) * 2) + TimeSpan.FromSeconds(2));
     }
 
+    [Theory]
+    [InlineData("0.9.8-poc+abcdef", "SamsungSwitchWatch.Viewer/0.9.8-poc")]
+    [InlineData("1.2.3", "SamsungSwitchWatch.Viewer/1.2.3")]
+    public void UserAgent_UsesInformationalVersionWithoutSourceMetadata(
+        string informationalVersion,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            HttpAgentClient.CreateUserAgentValue(
+                informationalVersion,
+                new Version(9, 8, 7, 0)));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("invalid version")]
+    public void UserAgent_InvalidInformationalVersionFallsBackToAssemblyVersion(
+        string informationalVersion)
+    {
+        Assert.Equal(
+            "SamsungSwitchWatch.Viewer/9.8.7",
+            HttpAgentClient.CreateUserAgentValue(
+                informationalVersion,
+                new Version(9, 8, 7, 0)));
+    }
+
+    [Fact]
+    public async Task ControlAndQueryRequestsUseCurrentViewerUserAgent()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(certificate);
+        await using var client = fixture.Client;
+
+        await client.TestTelnetAsync(Target(), CancellationToken.None);
+
+        var viewerAssembly = typeof(HttpAgentClient).Assembly;
+        var expected = HttpAgentClient.CreateUserAgentValue(
+            viewerAssembly
+                .GetCustomAttributes(
+                    typeof(System.Reflection.AssemblyInformationalVersionAttribute),
+                    false)
+                .Cast<System.Reflection.AssemblyInformationalVersionAttribute>()
+                .Single()
+                .InformationalVersion,
+            viewerAssembly.GetName().Version);
+        Assert.Equal(expected, HttpAgentClient.UserAgentValue);
+        Assert.DoesNotContain("/0.8", HttpAgentClient.UserAgentValue, StringComparison.Ordinal);
+        Assert.DoesNotContain("+", HttpAgentClient.UserAgentValue, StringComparison.Ordinal);
+        Assert.Equal(
+            [HttpAgentClient.UserAgentValue],
+            fixture.ControlHandler.UserAgents);
+        Assert.Equal(
+            [HttpAgentClient.UserAgentValue],
+            fixture.QueryHandler.UserAgents);
+    }
+
     [Fact]
     public async Task StartAsync_RevalidatesIdentityWhenIdentityIsAlreadyCached()
     {
@@ -627,11 +685,13 @@ public sealed class ViewerConnectionTests
         Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
     {
         private readonly ConcurrentQueue<(HttpMethod Method, string PathAndQuery)> _requests = [];
+        private readonly ConcurrentQueue<string> _userAgents = [];
         private int _requestCount;
 
         public int RequestCount => Volatile.Read(ref _requestCount);
         public IReadOnlyList<(HttpMethod Method, string PathAndQuery)> Requests =>
             _requests.ToArray();
+        public IReadOnlyList<string> UserAgents => _userAgents.ToArray();
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -639,6 +699,7 @@ public sealed class ViewerConnectionTests
         {
             Interlocked.Increment(ref _requestCount);
             _requests.Enqueue((request.Method, request.RequestUri?.PathAndQuery ?? string.Empty));
+            _userAgents.Enqueue(request.Headers.UserAgent.ToString());
             return Task.FromResult(responseFactory(request));
         }
     }

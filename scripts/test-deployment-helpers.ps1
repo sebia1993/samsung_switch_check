@@ -124,8 +124,8 @@ Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
     'Read-Host',
     'pause'
 )
-Assert-DeploymentTest -Condition ($build -match "\[string\]\`$Version\s*=\s*'0\.9\.7-poc'") `
-    -Message 'Release build default must be 0.9.7-poc.'
+Assert-DeploymentTest -Condition ($build -match "\[string\]\`$Version\s*=\s*'0\.9\.8-poc'") `
+    -Message 'Release build default must be 0.9.8-poc.'
 Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Agent.cmd'") `
     -Message 'Agent package must include the one-click UAC launcher.'
 Assert-ContainsAll -Name 'Viewer launcher' -Text $viewerLauncher -Needles @(
