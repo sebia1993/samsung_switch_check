@@ -19,11 +19,18 @@ internal sealed class ViewerDiagnosticLog
     [
         "app-initialize",
         "dispatcher-unhandled",
-        "monitoring-store-startup"
+        "monitoring-store-startup",
+        "monitoring-cycle",
+        "settings-save-interactive",
+        "settings-save-connection",
+        "settings-save-background",
+        "settings-save-shutdown"
     ];
     private static readonly HashSet<string> AllowedErrorCodes =
     [
         "VIEWER_MONITOR_STATE_WRITE_FAILED",
+        "VIEWER_MONITOR_CYCLE_FAILED",
+        "VIEWER_SETTINGS_WRITE_FAILED",
         "VIEWER_UNEXPECTED_ERROR"
     ];
     private readonly IViewerDiagnosticFileSystem _fileSystem;

@@ -236,6 +236,88 @@ public sealed class ViewerSettingsTests
     }
 
     [Fact]
+    public void SaveCoordinator_TrySaveReportsStableCodeWithoutExceptionPayload()
+    {
+        var diagnostics = new List<(string Stage, string Code)>();
+        var persistence = new TestSettingsPersistence
+        {
+            WriteException = new IOException(
+                "host=192.0.2.10 user=operator password=login-secret")
+        };
+        var coordinator = new ViewerSettingsSaveCoordinator(
+            new ViewerSettingsStore("viewer-settings.json", persistence),
+            (stage, code) => diagnostics.Add((stage, code)));
+
+        var saved = coordinator.TrySave(
+            new ViewerSettings { AgentUri = "https://agent.example.test:18443" },
+            "settings-save-background",
+            out var errorCode);
+
+        Assert.False(saved);
+        Assert.Equal("VIEWER_SETTINGS_WRITE_FAILED", errorCode);
+        Assert.Equal(
+            ("settings-save-background", "VIEWER_SETTINGS_WRITE_FAILED"),
+            Assert.Single(diagnostics));
+        Assert.DoesNotContain(
+            diagnostics,
+            item => item.Stage.Contains("192.0.2.10", StringComparison.Ordinal)
+                    || item.Code.Contains("login-secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SaveCoordinator_UnexpectedFailureUsesUnexpectedErrorCode()
+    {
+        var diagnostics = new List<(string Stage, string Code)>();
+        var persistence = new TestSettingsPersistence
+        {
+            WriteException = new InvalidOperationException("private implementation detail")
+        };
+        var coordinator = new ViewerSettingsSaveCoordinator(
+            new ViewerSettingsStore("viewer-settings.json", persistence),
+            (stage, code) => diagnostics.Add((stage, code)));
+
+        var saved = coordinator.TrySave(
+            new ViewerSettings(),
+            "settings-save-background",
+            out var errorCode);
+        var failure = Assert.Throws<AgentClientException>(() =>
+            coordinator.SaveOrThrow(
+                new ViewerSettings(),
+                "settings-save-connection"));
+
+        Assert.False(saved);
+        Assert.Equal("VIEWER_UNEXPECTED_ERROR", errorCode);
+        Assert.Equal("VIEWER_UNEXPECTED_ERROR", failure.ErrorCode);
+        Assert.All(
+            diagnostics,
+            item => Assert.Equal("VIEWER_UNEXPECTED_ERROR", item.Code));
+    }
+
+    [Fact]
+    public void SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow()
+    {
+        var diagnostics = new List<(string Stage, string Code)>();
+        var persistence = new TestSettingsPersistence
+        {
+            WriteException = new UnauthorizedAccessException("simulated")
+        };
+        var coordinator = new ViewerSettingsSaveCoordinator(
+            new ViewerSettingsStore("viewer-settings.json", persistence),
+            (stage, code) => diagnostics.Add((stage, code)));
+
+        var failure = Assert.Throws<AgentClientException>(() =>
+            coordinator.SaveOrThrow(
+                new ViewerSettings(),
+                "settings-save-connection"));
+
+        Assert.Equal("VIEWER_SETTINGS_WRITE_FAILED", failure.ErrorCode);
+        Assert.IsType<UnauthorizedAccessException>(failure.InnerException);
+        Assert.Equal(
+            ("settings-save-connection", "VIEWER_SETTINGS_WRITE_FAILED"),
+            Assert.Single(diagnostics));
+    }
+
+    [Fact]
     public void StartupWindowPolicy_HonorsTrayStartUnlessConnectionNeedsAttention()
     {
         var settings = new ViewerSettings { StartMinimizedToTray = true };

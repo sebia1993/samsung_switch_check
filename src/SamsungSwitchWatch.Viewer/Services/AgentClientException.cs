@@ -204,6 +204,8 @@ internal static class ViewerConnectionMessages
         "PARSER_UNSUPPORTED" => "장비 출력 형식을 아직 해석하지 못했습니다. 원문 결과와 모델·펌웨어를 확인해 주세요.",
         "INCOMPLETE_OUTPUT" => "장비 출력이 완전하지 않아 상태를 갱신하지 않았습니다. 다음 점검에서 다시 확인합니다.",
         "VIEWER_MONITOR_STATE_WRITE_FAILED" => "Viewer 감시 이력을 저장하지 못했습니다. 사용자 폴더 권한과 디스크 여유 공간을 확인해 주세요.",
+        "VIEWER_MONITOR_CYCLE_FAILED" => "주기 감시 중 예상하지 못한 오류가 발생했습니다. 다음 주기에 다시 시도합니다.",
+        "VIEWER_SETTINGS_WRITE_FAILED" => "Viewer 설정을 저장하지 못했습니다. 사용자 폴더 권한과 디스크 여유 공간을 확인해 주세요.",
         "VIEWER_CONNECTION_REQUIRED" => "먼저 Agent 연결 설정을 완료해 주세요.",
         "VIEWER_CONFIGURATION_INVALID" => "Viewer 설정값이 올바르지 않습니다. Agent 연결과 장비 설정을 확인해 주세요.",
         "VIEWER_UNEXPECTED_ERROR" => "Viewer에서 예상하지 못한 오류가 발생했습니다. 다시 시도하고 계속되면 진단 로그를 확인해 주세요.",

@@ -46,6 +46,8 @@ public sealed record RegisteredCheckOption(string Id, string DisplayName);
 
 public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 {
+    private static readonly TimeSpan MonitoringFailureReportTimeout = TimeSpan.FromSeconds(1);
+
     private sealed record AlertCandidate(long ChangeSequence, string ChangeKind, SwitchEventDto Event);
     private sealed record MonitoringOutputAssessment(
         TelnetCommandOutputDto? Output,
@@ -64,9 +66,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     ]);
 
     private readonly IAgentClientFactory _clientFactory;
-    private readonly ViewerSettingsStore _settingsStore;
+    private readonly ViewerSettingsSaveCoordinator _settingsSaveCoordinator;
     private readonly ManagedDeviceStore? _deviceStore;
     private readonly ViewerMonitoringStore? _monitoringStore;
+    private readonly Action<string, string> _writeDiagnostic;
+    private readonly Func<TimeSpan, CancellationToken, Task> _settingsSaveDelay;
     private readonly SynchronizationContext? _uiContext;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
@@ -136,11 +140,38 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         SynchronizationContext? synchronizationContext = null,
         ManagedDeviceStore? deviceStore = null,
         ViewerMonitoringStore? monitoringStore = null)
+        : this(
+            settings,
+            settingsStore,
+            clientFactory,
+            synchronizationContext,
+            deviceStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            null,
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
+    {
+    }
+
+    internal DashboardViewModel(
+        ViewerSettings settings,
+        ViewerSettingsStore settingsStore,
+        IAgentClientFactory? clientFactory,
+        SynchronizationContext? synchronizationContext,
+        ManagedDeviceStore? deviceStore,
+        ViewerMonitoringStore? monitoringStore,
+        ViewerSettingsSaveCoordinator settingsSaveCoordinator,
+        Action<string, string>? writeDiagnostic,
+        Func<TimeSpan, CancellationToken, Task> settingsSaveDelay)
     {
         _settings = ViewerSettingsSanitizer.Sanitize(settings);
-        _settingsStore = settingsStore;
+        _settingsSaveCoordinator = settingsSaveCoordinator
+            ?? throw new ArgumentNullException(nameof(settingsSaveCoordinator));
         _deviceStore = deviceStore;
         _monitoringStore = monitoringStore;
+        _writeDiagnostic = writeDiagnostic ?? ((_, _) => { });
+        _settingsSaveDelay = settingsSaveDelay
+            ?? throw new ArgumentNullException(nameof(settingsSaveDelay));
         _clientFactory = clientFactory ?? new AgentClientFactory();
         _uiContext = synchronizationContext ?? SynchronizationContext.Current;
         _client = CreateInitialClient(_settings);
@@ -752,7 +783,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     await _client.StartAsync(cancellationToken).ConfigureAwait(false);
                     var identity = await _client.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
-                    _settingsStore.Save(_settings);
+                    var settingsSaved = _settingsSaveCoordinator.TrySave(
+                        _settings,
+                        "settings-save-connection",
+                        out var settingsSaveErrorCode);
                     await RunOnUiAsync(() =>
                     {
                         _apiVersion = 4;
@@ -769,7 +803,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         ReadOnlyQueryMaxCommandLength = 128;
                         ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
                         RebuildCollectorHealth(DateTimeOffset.UtcNow);
-                        OperationMessage = "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다.";
+                        OperationMessage = settingsSaved
+                            ? "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다."
+                            : SettingsWriteFailureOperationMessage(settingsSaveErrorCode);
                         OnPropertyChanged(nameof(LastRefreshText));
                         OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
                         OnPropertyChanged(nameof(LastSuccessfulReceiptText));
@@ -943,7 +979,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
                     var identity = await replacement.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
-                    _settingsStore.Save(clean);
+                    _settingsSaveCoordinator.SaveOrThrow(
+                        clean,
+                        "settings-save-connection");
                     var oldClient = _client;
                     UnsubscribeClient(oldClient);
                     _client = replacement;
@@ -1004,7 +1042,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 IAgentClient previous;
                 try
                 {
-                    _settingsStore.Save(clean);
+                    _settingsSaveCoordinator.SaveOrThrow(
+                        clean,
+                        "settings-save-connection");
                     previous = _client;
                     UnsubscribeClient(previous);
                     _client = replacement;
@@ -1152,7 +1192,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
-    private async Task RunMonitoringCycleSafelyAsync(CancellationToken cancellationToken)
+    internal async Task RunMonitoringCycleSafelyAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -1162,10 +1202,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             throw;
         }
+        catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
+        {
+            await ReportMonitoringCycleFailureAsync(
+                "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
+        }
         catch
         {
-            await RunOnUiAsync(() =>
-                OperationMessage = "주기 감시 상태 저장 실패 · 다음 주기에 다시 시도합니다.").ConfigureAwait(false);
+            await ReportMonitoringCycleFailureAsync(
+                "VIEWER_MONITOR_CYCLE_FAILED").ConfigureAwait(false);
         }
     }
 
@@ -1244,7 +1289,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 await _client.StartAsync(_lifetime.Token).ConfigureAwait(false);
                 var identity = await _client.GetIdentityAsync(_lifetime.Token).ConfigureAwait(false);
-                _settingsStore.Save(_settings);
+                var settingsSaved = _settingsSaveCoordinator.TrySave(
+                    _settings,
+                    "settings-save-connection",
+                    out var settingsSaveErrorCode);
                 await RunOnUiAsync(() =>
                 {
                     _currentAgentId = identity.AgentId;
@@ -1258,7 +1306,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     CollectorSummary = "Viewer 주도형 Telnet 중계 준비";
                     ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
                     RebuildCollectorHealth(DateTimeOffset.UtcNow);
-                    OperationMessage = "Agent 연결 확인 완료 · Viewer 장비 목록을 새로고침했습니다.";
+                    OperationMessage = settingsSaved
+                        ? "Agent 연결 확인 완료 · Viewer 장비 목록을 새로고침했습니다."
+                        : SettingsWriteFailureOperationMessage(settingsSaveErrorCode);
                     OnPropertyChanged(nameof(LastRefreshText));
                     OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
                     OnPropertyChanged(nameof(LastSuccessfulReceiptText));
@@ -1963,42 +2013,70 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
         {
-            await RunOnUiAsync(() =>
-                OperationMessage =
-                    $"감시 상태 저장 실패 · {ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_WRITE_FAILED")}")
-                .ConfigureAwait(false);
+            await ReportMonitoringCycleFailureAsync(
+                "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             var code = SafeMessage(exception);
+            var authenticationFailure = IsAuthenticationFailure(code);
+            if (authenticationFailure)
+            {
+                // Runtime blocking must happen before any persistence call.
+                // Otherwise a full or read-only disk could cause repeated bad
+                // password attempts and lock the switch account.
+                BlockMonitoringForCredentialFailure(profile.Id);
+            }
+
+            var monitoringStateSaveFailed = false;
             if (IsAgentChannelFailure(code))
             {
                 await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
             }
             else if (!IsTransientBusy(code))
             {
-                var failures = _monitoringStore!.RecordFailure(profile, code);
-                if (failures.Count > 0) ApplyEvents(failures);
-                await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                try
+                {
+                    var failures = _monitoringStore!.RecordFailure(profile, code);
+                    if (failures.Count > 0) ApplyEvents(failures);
+                    await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                }
+                catch (Exception persistenceException)
+                    when (IsMonitoringPersistenceFailure(persistenceException))
+                {
+                    monitoringStateSaveFailed = true;
+                    await ReportMonitoringCycleFailureAsync(
+                        "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
+                }
             }
-            if (IsAuthenticationFailure(code))
+            if (authenticationFailure)
             {
-                BlockMonitoringForCredentialFailure(profile.Id);
-                var persistenceFailed = false;
+                var deviceSettingsSaveFailed = false;
                 try
                 {
                     _deviceStore!.MarkConnectionTest(profile.Id, false, code);
                 }
                 catch
                 {
-                    persistenceFailed = true;
+                    deviceSettingsSaveFailed = true;
                 }
                 await RunOnUiAsync(() =>
                 {
                     ReloadManagedDevices(profile.Id);
-                    OperationMessage = persistenceFailed
-                        ? $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. 설정 파일 저장은 실패했습니다."
-                        : $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다.";
+                    OperationMessage = (monitoringStateSaveFailed, deviceSettingsSaveFailed) switch
+                    {
+                        (true, true) =>
+                            $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
+                            + "감시 이력과 장비 설정 파일 저장은 실패했습니다. · VIEWER_MONITOR_STATE_WRITE_FAILED",
+                        (true, false) =>
+                            $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다. "
+                            + "감시 이력 저장은 실패했습니다. · VIEWER_MONITOR_STATE_WRITE_FAILED",
+                        (false, true) =>
+                            $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
+                            + "장비 설정 파일 저장은 실패했습니다.",
+                        _ =>
+                            $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다."
+                    };
                 }).ConfigureAwait(false);
             }
         }
@@ -2652,6 +2730,58 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         else _uiContext.Post(_ => action(), null);
     }
 
+    private void TryReportOperation(string message)
+    {
+        try
+        {
+            RunOnUi(() => OperationMessage = message);
+        }
+        catch
+        {
+            // UI reporting is best effort. The stable diagnostic code has
+            // already been recorded and monitoring must continue.
+        }
+    }
+
+    private void TryWriteDiagnostic(string stage, string errorCode)
+    {
+        try
+        {
+            _writeDiagnostic(stage, errorCode);
+        }
+        catch
+        {
+            // Diagnostics must never stop monitoring or shutdown.
+        }
+    }
+
+    private async Task ReportMonitoringCycleFailureAsync(string errorCode)
+    {
+        TryWriteDiagnostic("monitoring-cycle", errorCode);
+        try
+        {
+            await RunOnUiAsync(() =>
+                {
+                    if (OperationMessage.Contains(errorCode, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+
+                    OperationMessage =
+                        $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+                })
+                .WaitAsync(MonitoringFailureReportTimeout, _lifetime.Token)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // A closed or failing UI context must not terminate monitoring.
+        }
+    }
+
+    private static string SettingsWriteFailureOperationMessage(string errorCode) =>
+        $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+
     private Task RunOnUiAsync(Action action)
     {
         if (_uiContext is null || SynchronizationContext.Current == _uiContext)
@@ -2683,12 +2813,30 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(1), _lifetime.Token).ConfigureAwait(false);
+                await _settingsSaveDelay(TimeSpan.FromSeconds(1), _lifetime.Token).ConfigureAwait(false);
                 if (generation != Interlocked.Read(ref _settingsGeneration)) return;
-                lock (_settingsSync) _settingsStore.Save(_settings);
+                bool saved;
+                string settingsSaveErrorCode;
+                lock (_settingsSync)
+                {
+                    saved = _settingsSaveCoordinator.TrySave(
+                        _settings,
+                        "settings-save-background",
+                        out settingsSaveErrorCode);
+                }
+                if (!saved)
+                {
+                    TryReportOperation(
+                        SettingsWriteFailureOperationMessage(settingsSaveErrorCode));
+                }
             }
             catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-            catch { }
+            catch
+            {
+                TryWriteDiagnostic("settings-save-background", "VIEWER_UNEXPECTED_ERROR");
+                TryReportOperation(
+                    $"{ViewerConnectionMessages.ForCode("VIEWER_UNEXPECTED_ERROR")} · VIEWER_UNEXPECTED_ERROR");
+            }
         });
     }
 
@@ -2749,7 +2897,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try { await _client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
         catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
         Interlocked.Exchange(ref _readOnlyQueryCancellation, null)?.Dispose();
-        try { lock (_settingsSync) _settingsStore.Save(_settings); } catch { }
+        lock (_settingsSync)
+        {
+            _settingsSaveCoordinator.TrySave(
+                _settings,
+                "settings-save-shutdown",
+                out _);
+        }
 
         if (initializeQuiesced) _initializeGate.Dispose();
         if (syncQuiesced) _syncGate.Dispose();

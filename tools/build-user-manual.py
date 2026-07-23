@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.4-poc"
-DOCUMENT_DATE = "2026-07-23"
+VERSION = "0.9.5-poc"
+DOCUMENT_DATE = "2026-07-24"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -535,10 +535,11 @@ def add_table(doc, headers, rows, widths_dxa):
     return table
 
 
-def add_heading(doc, text, level, heading_num_id):
+def add_heading(doc, text, level, heading_num_id, *, page_break_before=None):
     p = doc.add_paragraph(style=f"Heading {level}")
-    if level == 1:
-        p.paragraph_format.page_break_before = True
+    if page_break_before is None:
+        page_break_before = level == 1
+    p.paragraph_format.page_break_before = page_break_before
     apply_numbering(p, heading_num_id, level - 1)
     run = p.add_run(text)
     set_run_font(
@@ -983,7 +984,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
-            ("AUTH_FAILED", "ID/PW와 login local 적용 여부 확인"),
+            ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
             ("QUERY_COMMAND_BLOCKED", "한 줄 show 형식, 줄바꿈/구분자 포함 여부 확인"),
             ("COMMAND_TIMEOUT", "출력 페이징, 장비 부하, 프롬프트 복귀와 세션 시간 확인"),
@@ -992,8 +993,11 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("OUTPUT_LIMIT_EXCEEDED", "세션 처리 안전 한도 초과. 더 좁은 show 명령 사용"),
             ("VIEWER_DEVICE_STORE_CORRUPT", "손상 파일은 자동 격리됨. 장비 관리에서 장비를 다시 등록"),
             ("VIEWER_DEVICE_STORE_UNAVAILABLE", "Viewer 사용자 폴더의 파일 권한과 다른 프로세스의 잠금 확인"),
+            ("VIEWER_SETTINGS_WRITE_FAILED", "Agent 연결은 유지됨. Viewer 사용자 폴더 권한과 디스크 여유 공간 확인"),
+            ("VIEWER_MONITOR_STATE_WRITE_FAILED", "감시 이력이 저장되지 않음. 사용자 폴더 권한·잠금·디스크 확인"),
+            ("VIEWER_MONITOR_CYCLE_FAILED", "다음 주기 재시도를 기다리고 반복되면 Viewer 진단 로그 확인"),
         ],
-        [2800, 6560],
+        [3600, 5760],
     )
     add_heading(doc, "현장 진단 파일", 2, heading_num_id)
     add_code_block(
@@ -1008,7 +1012,13 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         "진단 JSON에는 원문이 없어야 합니다. 실제 회사 IP, 계정명, 비밀번호, 장비 출력이 보이면 공유하지 마세요.",
         "warning",
     )
-    add_heading(doc, "업데이트·종료·운영 체크", 1, heading_num_id)
+    add_heading(
+        doc,
+        "업데이트·종료·운영 체크",
+        1,
+        heading_num_id,
+        page_break_before=False,
+    )
     add_heading(doc, "오프라인 수동 업데이트", 2, heading_num_id)
     add_steps(
         doc,

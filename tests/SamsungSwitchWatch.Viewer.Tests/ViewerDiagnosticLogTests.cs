@@ -19,6 +19,8 @@ public sealed class ViewerDiagnosticLogTests
                 "PASSWORD=login-secret");
             log.Write("operator", "LOGIN_SECRET");
             log.Write("monitoring-store-startup", "VIEWER_MONITOR_STATE_WRITE_FAILED");
+            log.Write("monitoring-cycle", "VIEWER_MONITOR_CYCLE_FAILED");
+            log.Write("settings-save-background", "VIEWER_SETTINGS_WRITE_FAILED");
 
             var bytes = File.ReadAllBytes(log.CurrentPath);
             Assert.False(bytes.Length >= 3
@@ -34,7 +36,7 @@ public sealed class ViewerDiagnosticLogTests
             Assert.DoesNotContain("PASSWORD", content, StringComparison.Ordinal);
 
             var lines = File.ReadAllLines(log.CurrentPath);
-            Assert.Equal(3, lines.Length);
+            Assert.Equal(5, lines.Length);
             using var rejected = JsonDocument.Parse(lines[0]);
             Assert.Equal(3, rejected.RootElement.EnumerateObject().Count());
             Assert.Equal("diagnostic", rejected.RootElement.GetProperty("stage").GetString());
@@ -58,6 +60,24 @@ public sealed class ViewerDiagnosticLogTests
             Assert.Equal(
                 "VIEWER_MONITOR_STATE_WRITE_FAILED",
                 accepted.RootElement.GetProperty("errorCode").GetString());
+
+            using var monitoringCycle = JsonDocument.Parse(lines[3]);
+            Assert.Equal(3, monitoringCycle.RootElement.EnumerateObject().Count());
+            Assert.Equal(
+                "monitoring-cycle",
+                monitoringCycle.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "VIEWER_MONITOR_CYCLE_FAILED",
+                monitoringCycle.RootElement.GetProperty("errorCode").GetString());
+
+            using var settingsSave = JsonDocument.Parse(lines[4]);
+            Assert.Equal(3, settingsSave.RootElement.EnumerateObject().Count());
+            Assert.Equal(
+                "settings-save-background",
+                settingsSave.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "VIEWER_SETTINGS_WRITE_FAILED",
+                settingsSave.RootElement.GetProperty("errorCode").GetString());
         }
         finally
         {
