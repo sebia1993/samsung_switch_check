@@ -318,19 +318,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public bool DeleteManagedDevice(string id)
     {
         if (_deviceStore is null) return false;
-        var removedHost = _deviceStore.Load()
-            .FirstOrDefault(item => item.Id.Equals(id, StringComparison.Ordinal))?.Host;
         var removed = _deviceStore.Delete(id);
         if (removed)
         {
             ClearMonitoringCredentialBlock(id);
-            if (!string.IsNullOrWhiteSpace(removedHost))
-            {
-                lock (_deviceOperationGateSync)
-                {
-                    _deviceOperationGates.Remove(removedHost);
-                }
-            }
             ReloadManagedDevices();
         }
         return removed;
@@ -2494,11 +2485,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private SemaphoreSlim GetDeviceOperationGate(string host)
     {
+        var normalizedHost = host.Trim();
         lock (_deviceOperationGateSync)
         {
-            if (_deviceOperationGates.TryGetValue(host, out var existing)) return existing;
+            if (_deviceOperationGates.TryGetValue(normalizedHost, out var existing)) return existing;
             var created = new SemaphoreSlim(1, 1);
-            _deviceOperationGates[host] = created;
+            _deviceOperationGates[normalizedHost] = created;
             return created;
         }
     }
