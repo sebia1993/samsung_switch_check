@@ -13,6 +13,7 @@ internal sealed class ViewerSettingsSaveCoordinator
 
     private readonly ViewerSettingsStore _store;
     private readonly Action<string, string> _writeDiagnostic;
+    private readonly object _saveSync = new();
 
     public ViewerSettingsSaveCoordinator(
         ViewerSettingsStore store,
@@ -29,7 +30,10 @@ internal sealed class ViewerSettingsSaveCoordinator
     {
         try
         {
-            _store.Save(settings);
+            lock (_saveSync)
+            {
+                _store.Save(ViewerSettingsSanitizer.Sanitize(settings));
+            }
             errorCode = string.Empty;
             return true;
         }
@@ -45,7 +49,10 @@ internal sealed class ViewerSettingsSaveCoordinator
     {
         try
         {
-            _store.Save(settings);
+            lock (_saveSync)
+            {
+                _store.Save(ViewerSettingsSanitizer.Sanitize(settings));
+            }
         }
         catch (Exception exception)
         {

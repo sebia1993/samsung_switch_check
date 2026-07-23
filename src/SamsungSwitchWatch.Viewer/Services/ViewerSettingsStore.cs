@@ -8,6 +8,8 @@ namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class ViewerSettings
 {
+    private readonly object _syncRoot = new();
+
     public bool DemoMode { get; set; }
     public string AgentUri { get; set; } = "https://localhost:18443";
     public Dictionary<string, string> AgentTrustPins { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -30,20 +32,31 @@ public sealed class ViewerSettings
             : string.Empty;
     }
 
-    public bool TryGetAgentTrustPin(out string pin) =>
-        AgentTrustPins.TryGetValue(BuildAgentAuthority(), out pin!);
+    public bool TryGetAgentTrustPin(out string pin)
+    {
+        lock (_syncRoot)
+        {
+            return AgentTrustPins.TryGetValue(BuildAgentAuthority(), out pin!);
+        }
+    }
 
     public void SetAgentTrustPin(string pin)
     {
-        var authority = BuildAgentAuthority();
-        if (authority.Length == 0) throw new InvalidOperationException("VIEWER_CONNECTION_REQUIRED");
-        AgentTrustPins[authority] = pin;
+        lock (_syncRoot)
+        {
+            var authority = BuildAgentAuthority();
+            if (authority.Length == 0) throw new InvalidOperationException("VIEWER_CONNECTION_REQUIRED");
+            AgentTrustPins[authority] = pin;
+        }
     }
 
     public void RemoveAgentTrustPin()
     {
-        var authority = BuildAgentAuthority();
-        if (authority.Length > 0) AgentTrustPins.Remove(authority);
+        lock (_syncRoot)
+        {
+            var authority = BuildAgentAuthority();
+            if (authority.Length > 0) AgentTrustPins.Remove(authority);
+        }
     }
 
     public string BuildAgentIdentity(string agentId)
@@ -53,18 +66,59 @@ public sealed class ViewerSettings
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
     }
 
-    public bool TryGetEventCursor(string agentId, out long cursor) =>
-        EventCursors.TryGetValue(BuildAgentIdentity(agentId), out cursor);
+    public bool TryGetEventCursor(string agentId, out long cursor)
+    {
+        lock (_syncRoot)
+        {
+            return EventCursors.TryGetValue(BuildAgentIdentity(agentId), out cursor);
+        }
+    }
 
     public void SetEventCursor(string agentId, long cursor)
     {
-        var identity = BuildAgentIdentity(agentId);
-        if (!EventCursors.ContainsKey(identity) && EventCursors.Count >= 32)
+        lock (_syncRoot)
         {
-            EventCursors.Remove(EventCursors.Keys.First());
+            var identity = BuildAgentIdentity(agentId);
+            if (!EventCursors.ContainsKey(identity) && EventCursors.Count >= 32)
+            {
+                EventCursors.Remove(EventCursors.Keys.First());
+            }
+            EventCursors[identity] = Math.Max(0, cursor);
+            LastEventSequence = Math.Max(0, cursor);
         }
-        EventCursors[identity] = Math.Max(0, cursor);
-        LastEventSequence = Math.Max(0, cursor);
+    }
+
+    internal void Synchronize(Action<ViewerSettings> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        lock (_syncRoot) action(this);
+    }
+
+    internal ViewerSettings CreateSnapshot()
+    {
+        lock (_syncRoot)
+        {
+            return new ViewerSettings
+            {
+                DemoMode = DemoMode,
+                AgentUri = AgentUri,
+                AgentTrustPins = new Dictionary<string, string>(
+                    AgentTrustPins ?? new Dictionary<string, string>(),
+                    StringComparer.OrdinalIgnoreCase),
+                LastEventSequence = LastEventSequence,
+                EventCursors = new Dictionary<string, long>(
+                    EventCursors ?? new Dictionary<string, long>(),
+                    StringComparer.Ordinal),
+                MiniTopmost = MiniTopmost,
+                MiniLeft = MiniLeft,
+                MiniTop = MiniTop,
+                MainLeft = MainLeft,
+                MainTop = MainTop,
+                MainWidth = MainWidth,
+                MainHeight = MainHeight,
+                StartMinimizedToTray = StartMinimizedToTray
+            };
+        }
     }
 }
 
@@ -74,7 +128,7 @@ public static class ViewerSettingsSanitizer
 
     public static ViewerSettings Sanitize(ViewerSettings? input)
     {
-        input ??= new ViewerSettings();
+        input = input?.CreateSnapshot() ?? new ViewerSettings();
         return new ViewerSettings
         {
             DemoMode = input.DemoMode,
@@ -99,22 +153,11 @@ public static class ViewerSettingsSanitizer
         };
     }
 
-    public static ViewerSettings Copy(ViewerSettings source) => new()
+    public static ViewerSettings Copy(ViewerSettings source)
     {
-        DemoMode = source.DemoMode,
-        AgentUri = source.AgentUri,
-        AgentTrustPins = new Dictionary<string, string>(source.AgentTrustPins, StringComparer.OrdinalIgnoreCase),
-        LastEventSequence = source.LastEventSequence,
-        EventCursors = new Dictionary<string, long>(source.EventCursors, StringComparer.Ordinal),
-        MiniTopmost = source.MiniTopmost,
-        MiniLeft = source.MiniLeft,
-        MiniTop = source.MiniTop,
-        MainLeft = source.MainLeft,
-        MainTop = source.MainTop,
-        MainWidth = source.MainWidth,
-        MainHeight = source.MainHeight,
-        StartMinimizedToTray = source.StartMinimizedToTray
-    };
+        ArgumentNullException.ThrowIfNull(source);
+        return source.CreateSnapshot();
+    }
 
     public static bool TryBuildAgentUri(
         string? addressInput,

@@ -229,10 +229,29 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public ICommand SelectDeviceCommand { get; }
 
     public event EventHandler<EventViewModel>? AlertRaised;
-    public ViewerSettings CurrentSettings => _settings;
+    public ViewerSettings CurrentSettings
+    {
+        get
+        {
+            lock (_settingsSync) return ViewerSettingsSanitizer.Copy(_settings);
+        }
+    }
     public long AppliedChangeCursor => Interlocked.Read(ref _changeCursor);
     internal int ReadOnlyQueryHistoryCount => _readOnlyQueryHistory.Count;
     public bool HasManagedDeviceStore => _deviceStore is not null;
+
+    internal bool TryUpdateCurrentSettings(
+        Action<ViewerSettings> update,
+        string stage,
+        out string errorCode)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+        lock (_settingsSync)
+        {
+            _settings.Synchronize(update);
+            return _settingsSaveCoordinator.TrySave(_settings, stage, out errorCode);
+        }
+    }
 
     public IReadOnlyList<ManagedDeviceProfile> GetManagedDevices() => _deviceStore?.Load() ?? [];
 
@@ -783,10 +802,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     await _client.StartAsync(cancellationToken).ConfigureAwait(false);
                     var identity = await _client.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
-                    var settingsSaved = _settingsSaveCoordinator.TrySave(
-                        _settings,
-                        "settings-save-connection",
-                        out var settingsSaveErrorCode);
+                    bool settingsSaved;
+                    string settingsSaveErrorCode;
+                    lock (_settingsSync)
+                    {
+                        settingsSaved = _settingsSaveCoordinator.TrySave(
+                            _settings,
+                            "settings-save-connection",
+                            out settingsSaveErrorCode);
+                    }
                     await RunOnUiAsync(() =>
                     {
                         _apiVersion = 4;
@@ -979,13 +1003,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
                     var identity = await replacement.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
-                    _settingsSaveCoordinator.SaveOrThrow(
-                        clean,
-                        "settings-save-connection");
+                    lock (_settingsSync)
+                    {
+                        MergeLatestRuntimeSettings(clean);
+                        _settingsSaveCoordinator.SaveOrThrow(
+                            clean,
+                            "settings-save-connection");
+                        _settings = clean;
+                        Interlocked.Increment(ref _settingsGeneration);
+                    }
                     var oldClient = _client;
                     UnsubscribeClient(oldClient);
                     _client = replacement;
-                    _settings = clean;
                     _statelessV4 = true;
                     _currentAgentId = identity.AgentId;
                     SubscribeClient(replacement);
@@ -1031,24 +1060,43 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 var recent = await replacement.GetRecentEventsAsync(EventPageSize, cancellationToken).ConfigureAwait(false);
                 await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
 
-                var hasCursor = clean.TryGetEventCursor(snapshot.AgentId, out var replacementCursor);
-                if (!hasCursor)
+                var candidateHadCursor = clean.TryGetEventCursor(snapshot.AgentId, out var replacementCursor);
+                if (!candidateHadCursor)
                 {
                     replacementCursor = snapshot.HighWatermark;
                     clean.SetEventCursor(snapshot.AgentId, replacementCursor);
+                }
+                var targetIdentity = clean.BuildAgentIdentity(snapshot.AgentId);
+                lock (_settingsSync)
+                {
+                    var latest = ViewerSettingsSanitizer.Copy(_settings);
+                    if (latest.EventCursors.TryGetValue(targetIdentity, out var latestCursor))
+                    {
+                        replacementCursor = latestCursor;
+                    }
                 }
                 _ = await replacement.GetEventChangesAsync(replacementCursor, 1, cancellationToken).ConfigureAwait(false);
                 await _syncGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 IAgentClient previous;
                 try
                 {
-                    _settingsSaveCoordinator.SaveOrThrow(
-                        clean,
-                        "settings-save-connection");
+                    lock (_settingsSync)
+                    {
+                        var hasCursor = MergeLatestRuntimeSettings(
+                            clean,
+                            snapshot.AgentId,
+                            candidateHadCursor,
+                            out replacementCursor);
+                        _settingsSaveCoordinator.SaveOrThrow(
+                            clean,
+                            "settings-save-connection");
+                        _settings = clean;
+                        Interlocked.Increment(ref _settingsGeneration);
+                        candidateHadCursor = hasCursor;
+                    }
                     previous = _client;
                     UnsubscribeClient(previous);
                     _client = replacement;
-                    _settings = clean;
                     _currentAgentId = snapshot.AgentId;
                     Interlocked.Exchange(ref _changeCursor, replacementCursor);
                     lock (_changeSync)
@@ -1080,7 +1128,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 var synchronized = false;
                 try
                 {
-                    await SynchronizeChangesAsync(hasCursor, cancellationToken).ConfigureAwait(false);
+                    await SynchronizeChangesAsync(candidateHadCursor, cancellationToken).ConfigureAwait(false);
                     synchronized = true;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
@@ -1289,10 +1337,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 await _client.StartAsync(_lifetime.Token).ConfigureAwait(false);
                 var identity = await _client.GetIdentityAsync(_lifetime.Token).ConfigureAwait(false);
-                var settingsSaved = _settingsSaveCoordinator.TrySave(
-                    _settings,
-                    "settings-save-connection",
-                    out var settingsSaveErrorCode);
+                bool settingsSaved;
+                string settingsSaveErrorCode;
+                lock (_settingsSync)
+                {
+                    settingsSaved = _settingsSaveCoordinator.TrySave(
+                        _settings,
+                        "settings-save-connection",
+                        out settingsSaveErrorCode);
+                }
                 await RunOnUiAsync(() =>
                 {
                     _currentAgentId = identity.AgentId;
@@ -2819,6 +2872,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 string settingsSaveErrorCode;
                 lock (_settingsSync)
                 {
+                    if (generation != Interlocked.Read(ref _settingsGeneration)) return;
                     saved = _settingsSaveCoordinator.TrySave(
                         _settings,
                         "settings-save-background",
@@ -2838,6 +2892,89 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     $"{ViewerConnectionMessages.ForCode("VIEWER_UNEXPECTED_ERROR")} · VIEWER_UNEXPECTED_ERROR");
             }
         });
+    }
+
+    private void MergeLatestRuntimeSettings(ViewerSettings candidate) =>
+        _ = MergeLatestRuntimeSettings(
+            candidate,
+            targetAgentId: null,
+            candidateHadCursor: false,
+            out _);
+
+    private bool MergeLatestRuntimeSettings(
+        ViewerSettings candidate,
+        string? targetAgentId,
+        bool candidateHadCursor,
+        out long targetCursor)
+    {
+        var latest = ViewerSettingsSanitizer.Copy(_settings);
+        var candidateSnapshot = ViewerSettingsSanitizer.Copy(candidate);
+        var targetIdentity = targetAgentId is null
+            ? null
+            : candidateSnapshot.BuildAgentIdentity(targetAgentId);
+        long latestTargetCursor = 0;
+        long candidateTargetCursor = 0;
+        var latestHadTargetCursor = targetIdentity is not null
+                                    && latest.EventCursors.TryGetValue(
+                                        targetIdentity,
+                                        out latestTargetCursor);
+        var candidateHasTargetCursor = targetIdentity is not null
+                                       && candidateSnapshot.EventCursors.TryGetValue(
+                                           targetIdentity,
+                                           out candidateTargetCursor);
+        var selectedTargetCursor = latestHadTargetCursor
+            ? latestTargetCursor
+            : candidateHasTargetCursor
+                ? candidateTargetCursor
+                : 0;
+        targetCursor = selectedTargetCursor;
+        candidate.Synchronize(target =>
+        {
+            target.MiniTopmost = latest.MiniTopmost;
+            target.MiniLeft = latest.MiniLeft;
+            target.MiniTop = latest.MiniTop;
+            target.MainLeft = latest.MainLeft;
+            target.MainTop = latest.MainTop;
+            target.MainWidth = latest.MainWidth;
+            target.MainHeight = latest.MainHeight;
+            target.LastEventSequence = targetAgentId is null
+                ? latest.LastEventSequence
+                : Math.Max(0, selectedTargetCursor);
+
+            var mergedCursors = new Dictionary<string, long>(
+                latest.EventCursors,
+                StringComparer.Ordinal);
+            if (targetIdentity is not null
+                && !latestHadTargetCursor
+                && candidateHasTargetCursor)
+            {
+                if (mergedCursors.Count >= 32)
+                {
+                    mergedCursors.Remove(mergedCursors.Keys.First());
+                }
+                mergedCursors[targetIdentity] = candidateTargetCursor;
+            }
+            target.EventCursors = mergedCursors;
+
+            var mergedPins = new Dictionary<string, string>(
+                latest.AgentTrustPins,
+                StringComparer.OrdinalIgnoreCase);
+            if (!candidateSnapshot.DemoMode)
+            {
+                var targetAuthority = candidateSnapshot.BuildAgentAuthority();
+                if (targetAuthority.Length > 0
+                    && candidateSnapshot.AgentTrustPins.TryGetValue(targetAuthority, out var targetPin))
+                {
+                    if (!mergedPins.ContainsKey(targetAuthority) && mergedPins.Count >= 32)
+                    {
+                        mergedPins.Remove(mergedPins.Keys.First());
+                    }
+                    mergedPins[targetAuthority] = targetPin;
+                }
+            }
+            target.AgentTrustPins = mergedPins;
+        });
+        return candidateHadCursor || latestHadTargetCursor;
     }
 
     private static string SafeMessage(Exception exception) => exception switch

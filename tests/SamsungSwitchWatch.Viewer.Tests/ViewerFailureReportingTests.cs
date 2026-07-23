@@ -176,6 +176,9 @@ public sealed class ViewerFailureReportingTests
             Assert.Equal(
                 "https://original.example.test:18443",
                 viewModel.CurrentSettings.AgentUri);
+            Assert.Equal(
+                "https://original.example.test:18443",
+                settingsStore.Load().AgentUri);
             Assert.False(original.DisposeCalled);
             Assert.True(replacement.DisposeCalled);
             AssertDiagnostic(
@@ -240,6 +243,360 @@ public sealed class ViewerFailureReportingTests
         {
             settingsPersistence.WriteException = null;
             releaseSave.TrySetResult();
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ConnectionSwitch_MergesLatestRuntimeSettingsBeforePersistingCandidate()
+    {
+        var folder = TemporaryFolder();
+        var settingsPersistence = new TestSettingsPersistence();
+        var settingsStore = new ViewerSettingsStore(
+            Path.Combine(folder, "settings.json"),
+            settingsPersistence);
+        var original = new TestAgentClient(supportsStatelessV4: true);
+        var replacementStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReplacement = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacement = new TestAgentClient(
+            supportsStatelessV4: true,
+            replacementStart,
+            releaseReplacement.Task);
+        var originalSettings = new ViewerSettings
+        {
+            DemoMode = true,
+            AgentUri = "https://original.example.test:18443",
+            MiniLeft = 10,
+            MiniTop = 20
+        };
+        var originalPin = new string('A', 64);
+        var latestOriginalPin = new string('B', 64);
+        var replacementPin = new string('C', 64);
+        originalSettings.SetAgentTrustPin(originalPin);
+        var viewModel = new DashboardViewModel(
+            originalSettings,
+            settingsStore,
+            new QueueFactory(original, replacement),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null);
+        try
+        {
+            await viewModel.InitializeAsync();
+            var staleCandidate = viewModel.CurrentSettings;
+            var originalCursorKey = staleCandidate.BuildAgentIdentity("fake");
+            staleCandidate.DemoMode = false;
+            staleCandidate.AgentUri = "https://replacement.example.test:18443";
+            staleCandidate.StartMinimizedToTray = true;
+            staleCandidate.SetAgentTrustPin(replacementPin);
+
+            var switching = viewModel.SwitchClientAsync(staleCandidate);
+            await replacementStart.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.True(viewModel.TryUpdateCurrentSettings(
+                settings =>
+                {
+                    settings.MiniLeft = 310;
+                    settings.MiniTop = 420;
+                    settings.MiniTopmost = false;
+                    settings.SetEventCursor("fake", 99);
+                    settings.SetAgentTrustPin(latestOriginalPin);
+                },
+                "settings-save-interactive",
+                out var updateErrorCode));
+            Assert.Empty(updateErrorCode);
+
+            releaseReplacement.SetResult();
+            await switching.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var current = viewModel.CurrentSettings;
+            var persisted = settingsStore.Load();
+            Assert.Equal("https://replacement.example.test:18443", current.AgentUri);
+            Assert.True(current.StartMinimizedToTray);
+            Assert.Equal(310, current.MiniLeft);
+            Assert.Equal(420, current.MiniTop);
+            Assert.False(current.MiniTopmost);
+            Assert.Equal(99, current.EventCursors[originalCursorKey]);
+            Assert.Equal(99, current.LastEventSequence);
+            Assert.Equal(
+                latestOriginalPin,
+                current.AgentTrustPins["HTTPS://ORIGINAL.EXAMPLE.TEST:18443"]);
+            Assert.Equal(
+                replacementPin,
+                current.AgentTrustPins["HTTPS://REPLACEMENT.EXAMPLE.TEST:18443"]);
+            Assert.Equal(current.AgentUri, persisted.AgentUri);
+            Assert.Equal(current.StartMinimizedToTray, persisted.StartMinimizedToTray);
+            Assert.Equal(current.MiniLeft, persisted.MiniLeft);
+            Assert.Equal(current.MiniTop, persisted.MiniTop);
+            Assert.Equal(current.MiniTopmost, persisted.MiniTopmost);
+            Assert.Equal(99, persisted.EventCursors[originalCursorKey]);
+            Assert.Equal(99, persisted.LastEventSequence);
+            Assert.Equal(
+                latestOriginalPin,
+                persisted.AgentTrustPins["HTTPS://ORIGINAL.EXAMPLE.TEST:18443"]);
+            Assert.Equal(
+                replacementPin,
+                persisted.AgentTrustPins["HTTPS://REPLACEMENT.EXAMPLE.TEST:18443"]);
+        }
+        finally
+        {
+            releaseReplacement.TrySetResult();
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyConnectionSwitch_PreservesAuthoritativeLowerCursorAfterServerReset()
+    {
+        var folder = TemporaryFolder();
+        var settingsStore = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+        var original = new TestAgentClient(supportsStatelessV4: false);
+        var replacementStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReplacement = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacement = new TestAgentClient(
+            supportsStatelessV4: false,
+            replacementStart,
+            releaseReplacement.Task);
+        var originalSettings = new ViewerSettings
+        {
+            DemoMode = true,
+            AgentUri = "https://same-agent.example.test:18443"
+        };
+        originalSettings.SetEventCursor("fake-agent", 500);
+        var viewModel = new DashboardViewModel(
+            originalSettings,
+            settingsStore,
+            new QueueFactory(original, replacement),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null);
+        try
+        {
+            await viewModel.InitializeAsync();
+            var staleCandidate = viewModel.CurrentSettings;
+
+            var switching = viewModel.SwitchClientAsync(staleCandidate);
+            await replacementStart.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.True(viewModel.TryUpdateCurrentSettings(
+                settings => settings.SetEventCursor("fake-agent", 120),
+                "settings-save-interactive",
+                out var updateErrorCode));
+            Assert.Empty(updateErrorCode);
+
+            releaseReplacement.SetResult();
+            await switching.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var current = viewModel.CurrentSettings;
+            var persisted = settingsStore.Load();
+            Assert.True(current.TryGetEventCursor("fake-agent", out var currentCursor));
+            Assert.True(persisted.TryGetEventCursor("fake-agent", out var persistedCursor));
+            Assert.Equal(120, currentCursor);
+            Assert.Equal(120, persistedCursor);
+            Assert.Equal(120, current.LastEventSequence);
+            Assert.Equal(120, persisted.LastEventSequence);
+            Assert.Equal(120, viewModel.AppliedChangeCursor);
+            Assert.Equal(120, replacement.FirstChangeRequestCursor);
+        }
+        finally
+        {
+            releaseReplacement.TrySetResult();
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ConnectionSwitch_DoesNotRestoreStaleCursorKeysAtCapacity()
+    {
+        var folder = TemporaryFolder();
+        var settingsStore = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+        var original = new TestAgentClient(supportsStatelessV4: false);
+        var replacementStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReplacement = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacement = new TestAgentClient(
+            supportsStatelessV4: false,
+            replacementStart,
+            releaseReplacement.Task);
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings
+            {
+                DemoMode = true,
+                AgentUri = "https://original.example.test:18443"
+            },
+            settingsStore,
+            new QueueFactory(original, replacement),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null);
+        try
+        {
+            await viewModel.InitializeAsync();
+            var staleCandidate = viewModel.CurrentSettings;
+            staleCandidate.AgentUri = "https://replacement.example.test:18443";
+            var targetCursorKey = staleCandidate.BuildAgentIdentity("fake-agent");
+            staleCandidate.EventCursors = Enumerable.Range(0, 32)
+                .ToDictionary(index => $"stale-{index}", index => (long)index, StringComparer.Ordinal);
+
+            var switching = viewModel.SwitchClientAsync(staleCandidate);
+            await replacementStart.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var latestCursors = Enumerable.Range(0, 32)
+                .ToDictionary(index => $"latest-{index}", index => (long)(100 + index), StringComparer.Ordinal);
+            Assert.True(viewModel.TryUpdateCurrentSettings(
+                settings =>
+                {
+                    settings.EventCursors = new Dictionary<string, long>(
+                        latestCursors,
+                        StringComparer.Ordinal);
+                    settings.LastEventSequence = 131;
+                },
+                "settings-save-interactive",
+                out var updateErrorCode));
+            Assert.Empty(updateErrorCode);
+
+            releaseReplacement.SetResult();
+            await switching.WaitAsync(TimeSpan.FromSeconds(2));
+
+            var current = viewModel.CurrentSettings;
+            var persisted = settingsStore.Load();
+            Assert.Equal(32, current.EventCursors.Count);
+            Assert.Equal(32, persisted.EventCursors.Count);
+            Assert.Equal(7, current.EventCursors[targetCursorKey]);
+            Assert.Equal(7, persisted.EventCursors[targetCursorKey]);
+            var preservedLatestKeys = latestCursors.Keys
+                .Where(current.EventCursors.ContainsKey)
+                .ToArray();
+            Assert.Equal(31, preservedLatestKeys.Length);
+            Assert.Equal(
+                preservedLatestKeys.OrderBy(key => key, StringComparer.Ordinal),
+                latestCursors.Keys.Where(persisted.EventCursors.ContainsKey)
+                    .OrderBy(key => key, StringComparer.Ordinal));
+            Assert.All(preservedLatestKeys, key =>
+            {
+                Assert.Equal(latestCursors[key], current.EventCursors[key]);
+                Assert.Equal(latestCursors[key], persisted.EventCursors[key]);
+            });
+            Assert.DoesNotContain(current.EventCursors.Keys, key => key.StartsWith("stale-", StringComparison.Ordinal));
+            Assert.DoesNotContain(persisted.EventCursors.Keys, key => key.StartsWith("stale-", StringComparison.Ordinal));
+            Assert.Equal(7, current.LastEventSequence);
+            Assert.Equal(7, persisted.LastEventSequence);
+        }
+        finally
+        {
+            releaseReplacement.TrySetResult();
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task LegacyConnectionSwitch_NewBaselineDoesNotRaiseCatchupSummary()
+    {
+        var folder = TemporaryFolder();
+        var settingsStore = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+        var original = new TestAgentClient(supportsStatelessV4: false);
+        var replacement = new TestAgentClient(supportsStatelessV4: false);
+        replacement.ChangePages.Enqueue(new EventChangePageDto(7, 7, false, []));
+        replacement.ChangePages.Enqueue(new EventChangePageDto(
+            8,
+            8,
+            false,
+            [
+                new AgentEventChangeDto(
+                    8,
+                    "Created",
+                    new SwitchEventDto(
+                        8,
+                        "event-8",
+                        "switch-a",
+                        "SW-A",
+                        DateTimeOffset.UtcNow,
+                        DeviceHealth.Critical,
+                        "system",
+                        "Uplink down",
+                        "Port 24 is down"))
+            ]));
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings
+            {
+                DemoMode = true,
+                AgentUri = "https://original.example.test:18443"
+            },
+            settingsStore,
+            new QueueFactory(original, replacement),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null);
+        var alerts = 0;
+        viewModel.AlertRaised += (_, _) => Interlocked.Increment(ref alerts);
+        try
+        {
+            await viewModel.InitializeAsync();
+            var candidate = viewModel.CurrentSettings;
+            candidate.AgentUri = "https://new-agent.example.test:18443";
+
+            await viewModel.SwitchClientAsync(candidate)
+                .WaitAsync(TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() =>
+                settingsStore.Load().TryGetEventCursor("fake-agent", out var cursor)
+                && cursor == 8);
+
+            Assert.Equal(0, Volatile.Read(ref alerts));
+            Assert.Equal(8, viewModel.AppliedChangeCursor);
+            Assert.Contains(viewModel.RecentEvents, item => item.AgentEventId == "event-8");
+            var current = viewModel.CurrentSettings;
+            var persisted = settingsStore.Load();
+            Assert.True(current.TryGetEventCursor("fake-agent", out var currentCursor));
+            Assert.True(persisted.TryGetEventCursor("fake-agent", out var persistedCursor));
+            Assert.Equal(8, currentCursor);
+            Assert.Equal(8, persistedCursor);
+            Assert.Equal(8, current.LastEventSequence);
+            Assert.Equal(8, persisted.LastEventSequence);
+        }
+        finally
+        {
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task CurrentSettings_ReturnsDefensiveSnapshot()
+    {
+        var folder = TemporaryFolder();
+        var settingsStore = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings
+            {
+                DemoMode = true,
+                AgentUri = "https://original.example.test:18443",
+                MiniTopmost = true
+            },
+            settingsStore,
+            new TestFactory(new TestAgentClient(supportsStatelessV4: true)));
+        try
+        {
+            var snapshot = viewModel.CurrentSettings;
+            snapshot.AgentUri = "https://mutated.example.test:18443";
+            snapshot.MiniTopmost = false;
+            snapshot.SetEventCursor("fake", 50);
+
+            var current = viewModel.CurrentSettings;
+            Assert.Equal("https://original.example.test:18443", current.AgentUri);
+            Assert.True(current.MiniTopmost);
+            Assert.False(current.TryGetEventCursor("fake", out _));
+        }
+        finally
+        {
             await viewModel.DisposeAsync();
             Directory.Delete(folder, true);
         }
@@ -358,21 +715,32 @@ public sealed class ViewerFailureReportingTests
         public IAgentClient Create(ViewerSettings settings) => _clients.Dequeue();
     }
 
-    private sealed class TestAgentClient(bool supportsStatelessV4) : IAgentClient
+    private sealed class TestAgentClient(
+        bool supportsStatelessV4,
+        TaskCompletionSource? startEntered = null,
+        Task? startGate = null) : IAgentClient
     {
+        private long _firstChangeRequestCursor = -1;
+
         public bool SupportsStatelessV4 { get; } = supportsStatelessV4;
+        public Queue<EventChangePageDto> ChangePages { get; } = new();
+        public long FirstChangeRequestCursor => Interlocked.Read(ref _firstChangeRequestCursor);
         public bool DisposeCalled { get; private set; }
         public event EventHandler<AgentEventChangeDto>? EventChanged { add { } remove { } }
         public event EventHandler<AgentConnectionState>? ConnectionStateChanged;
 
-        public Task StartAsync(CancellationToken cancellationToken)
+        public async Task StartAsync(CancellationToken cancellationToken)
         {
+            startEntered?.TrySetResult();
+            if (startGate is not null)
+            {
+                await startGate.WaitAsync(cancellationToken);
+            }
             ConnectionStateChanged?.Invoke(
                 this,
                 SupportsStatelessV4
                     ? AgentConnectionState.Demo
                     : AgentConnectionState.Connected);
-            return Task.CompletedTask;
         }
 
         public Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken) =>
@@ -403,8 +771,14 @@ public sealed class ViewerFailureReportingTests
         public Task<EventChangePageDto> GetEventChangesAsync(
             long cursor,
             int limit,
-            CancellationToken cancellationToken) =>
-            Task.FromResult(new EventChangePageDto(cursor, cursor, false, []));
+            CancellationToken cancellationToken)
+        {
+            Interlocked.CompareExchange(ref _firstChangeRequestCursor, cursor, -1);
+            return Task.FromResult(
+                ChangePages.TryDequeue(out var configuredPage)
+                    ? configuredPage
+                    : new EventChangePageDto(cursor, cursor, false, []));
+        }
 
         public Task<TelnetExecutionResultDto> TestTelnetAsync(
             TelnetTargetDto target,

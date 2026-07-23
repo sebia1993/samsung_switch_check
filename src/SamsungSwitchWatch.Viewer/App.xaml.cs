@@ -224,19 +224,17 @@ public partial class App : Application
 
     public void SaveMiniWindowBounds(MiniWindow window)
     {
-        if (_viewModel is null || _settingsStore is null) return;
-        var settings = _viewModel.CurrentSettings;
-        settings.MiniLeft = window.Left;
-        settings.MiniTop = window.Top;
-        settings.MiniTopmost = window.Topmost;
-        TrySaveSettings(settings);
+        TryUpdateSettings(settings =>
+        {
+            settings.MiniLeft = window.Left;
+            settings.MiniTop = window.Top;
+            settings.MiniTopmost = window.Topmost;
+        });
     }
 
     public void SetMiniTopmost(bool value)
     {
-        if (_viewModel is null || _settingsStore is null) return;
-        _viewModel.CurrentSettings.MiniTopmost = value;
-        TrySaveSettings(_viewModel.CurrentSettings);
+        TryUpdateSettings(settings => settings.MiniTopmost = value);
     }
 
     public void ShowTrayHint() => _trayIcon?.ShowCloseToTrayHint();
@@ -251,23 +249,24 @@ public partial class App : Application
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try
         {
-            if (_viewModel is not null && _settingsStore is not null)
+            if (_viewModel is not null)
             {
-                var settings = _viewModel.CurrentSettings;
-                if (_mainWindow is not null && _mainWindow.WindowState == WindowState.Normal)
+                TryUpdateSettings(settings =>
                 {
-                    settings.MainLeft = _mainWindow.Left;
-                    settings.MainTop = _mainWindow.Top;
-                    settings.MainWidth = _mainWindow.Width;
-                    settings.MainHeight = _mainWindow.Height;
-                }
-                if (_miniWindow is not null)
-                {
-                    settings.MiniLeft = _miniWindow.Left;
-                    settings.MiniTop = _miniWindow.Top;
-                    settings.MiniTopmost = _miniWindow.Topmost;
-                }
-                TrySaveSettings(settings, "settings-save-shutdown");
+                    if (_mainWindow is not null && _mainWindow.WindowState == WindowState.Normal)
+                    {
+                        settings.MainLeft = _mainWindow.Left;
+                        settings.MainTop = _mainWindow.Top;
+                        settings.MainWidth = _mainWindow.Width;
+                        settings.MainHeight = _mainWindow.Height;
+                    }
+                    if (_miniWindow is not null)
+                    {
+                        settings.MiniLeft = _miniWindow.Left;
+                        settings.MiniTop = _miniWindow.Top;
+                        settings.MiniTopmost = _miniWindow.Topmost;
+                    }
+                }, "settings-save-shutdown");
             }
 
             if (_viewModel is not null) _viewModel.AlertRaised -= OnAlertRaised;
@@ -321,12 +320,12 @@ public partial class App : Application
                && top <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
     }
 
-    private bool TrySaveSettings(
-        ViewerSettings settings,
+    private bool TryUpdateSettings(
+        Action<ViewerSettings> update,
         string stage = "settings-save-interactive")
     {
-        if (_settingsSaveCoordinator is null) return false;
-        if (_settingsSaveCoordinator.TrySave(settings, stage, out var errorCode)) return true;
+        if (_viewModel is null) return false;
+        if (_viewModel.TryUpdateCurrentSettings(update, stage, out var errorCode)) return true;
 
         _viewModel?.ReportOperation(
             $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}");
