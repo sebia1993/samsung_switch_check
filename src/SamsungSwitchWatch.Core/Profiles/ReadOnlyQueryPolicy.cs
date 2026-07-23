@@ -1,31 +1,15 @@
-using System.Text.RegularExpressions;
-
 namespace SamsungSwitchWatch.Core.Profiles;
 
 /// <summary>
-/// Validates the deliberately small, read-only CLI surface exposed by the Agent.
-/// This policy is shared by registered command profiles and ad-hoc Viewer queries
-/// so an unsafe command cannot reach credential lookup or the Telnet transport.
+/// Validates the Viewer-driven, read-only CLI surface exposed by the Agent.
+/// Every single-line show command is accepted, including running-config, while
+/// control characters and command separators are rejected before transport use.
 /// </summary>
-public static partial class ReadOnlyQueryPolicy
+public static class ReadOnlyQueryPolicy
 {
     public const int MaximumCommandLength = 128;
     public const int MaximumOutputBytes = 64 * 1024;
     public static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
-
-    private static readonly IReadOnlySet<string> AllowedFamilies = new HashSet<string>(
-        [
-            "port", "ports", "interface", "interfaces", "system", "version",
-            "syslog", "sylog", "log", "spanning-tree", "lacp", "power", "memory"
-        ],
-        StringComparer.OrdinalIgnoreCase);
-
-    private static readonly IReadOnlySet<string> DeniedTokens = new HashSet<string>(
-        [
-            "running-config", "startup-config", "config", "user", "aaa", "radius",
-            "tacacs", "snmp", "community", "password", "secret", "key", "crypto"
-        ],
-        StringComparer.OrdinalIgnoreCase);
 
     public static ReadOnlyQueryValidation Validate(string? command, int maximumLength = MaximumCommandLength)
     {
@@ -69,24 +53,10 @@ public static partial class ReadOnlyQueryPolicy
             return ReadOnlyQueryValidation.Blocked(ReadOnlyQueryRejection.NotShowCommand);
         }
 
-        if (!AllowedFamilies.Contains(parts[1]))
-        {
-            return ReadOnlyQueryValidation.Blocked(ReadOnlyQueryRejection.FamilyNotAllowed);
-        }
-
-        var tokens = CommandTokenRegex().Matches(normalized).Select(match => match.Value);
-        if (tokens.Any(DeniedTokens.Contains))
-        {
-            return ReadOnlyQueryValidation.Blocked(ReadOnlyQueryRejection.SensitiveToken);
-        }
-
         return ReadOnlyQueryValidation.Allowed(normalized);
     }
 
     public static bool IsAllowed(string? command) => Validate(command).IsAllowed;
-
-    [GeneratedRegex("[A-Za-z0-9_-]+", RegexOptions.CultureInvariant)]
-    private static partial Regex CommandTokenRegex();
 }
 
 public enum ReadOnlyQueryRejection
@@ -96,9 +66,7 @@ public enum ReadOnlyQueryRejection
     TooLong,
     ControlCharacter,
     Separator,
-    NotShowCommand,
-    FamilyNotAllowed,
-    SensitiveToken
+    NotShowCommand
 }
 
 public sealed record ReadOnlyQueryValidation(

@@ -404,4 +404,36 @@ public sealed class AgentContractMapperTests
         Assert.Contains(device.Metrics!, metric => metric.Label == "POST" && metric.Value == "데이터 없음");
         Assert.DoesNotContain(device.Metrics!, metric => metric.Label == "POST" && metric.Value == "PASS");
     }
+
+    [Fact]
+    public void MapTelnetExecutionResultV4_PreservesSessionRetryCounts()
+    {
+        const string json = """
+        {
+          "apiVersion": 4,
+          "requestId": "request-1",
+          "success": true,
+          "privilege": "privileged",
+          "promptTerminator": "#",
+          "startedUtc": "2026-07-23T01:00:00+00:00",
+          "completedUtc": "2026-07-23T01:00:03+00:00",
+          "durationMs": 3000,
+          "sessionCount": 2,
+          "reconnectCount": 1,
+          "commands": [
+            {
+              "command": "show port status",
+              "output": "1 Up",
+              "truncated": false,
+              "collectedUtc": "2026-07-23T01:00:03+00:00"
+            }
+          ]
+        }
+        """;
+
+        var result = AgentContractMapper.MapTelnetExecutionResultV4(json);
+
+        Assert.Equal(2, result.SessionCount);
+        Assert.Equal(1, result.ReconnectCount);
+    }
 }

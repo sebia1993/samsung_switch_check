@@ -339,6 +339,187 @@ public sealed class TelnetClientTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ElevatesFromUserPromptBeforeRunningShowCommand()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01>"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show running-config\r\nsynthetic configuration\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret", "enable-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show running-config"]);
+
+        Assert.Equal(TelnetPrivilege.Privileged, result.Privilege);
+        Assert.Equal('#', result.PromptTerminator);
+        Assert.Equal(
+            "synthetic configuration",
+            Assert.Single(result.Outputs).NormalizedOutput);
+        Assert.Contains(transport.Writes, write =>
+            Encoding.ASCII.GetString(write) == "enable\r\n");
+        Assert.Contains(transport.Writes, write =>
+            Encoding.ASCII.GetString(write) == "enable-secret\r\n");
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SkipsEnableWhenLoginAlreadyReturnsPrivilegedPrompt()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nUptime: 1 day\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret", "unused-enable-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show system"]);
+
+        Assert.Equal(TelnetPrivilege.Privileged, result.Privilege);
+        Assert.DoesNotContain(transport.Writes, write =>
+            Encoding.ASCII.GetString(write) == "enable\r\n");
+        Assert.DoesNotContain(transport.Writes, write =>
+            Encoding.ASCII.GetString(write).Contains("unused-enable-secret", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_LeavesUserPrivilegeWhenEnablePasswordIsOmitted()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01>"),
+            Bytes("show port status\r\n1 Up\r\nACCESS-SW-01>"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show port status"]);
+
+        Assert.Equal(TelnetPrivilege.User, result.Privilege);
+        Assert.Equal('>', result.PromptTerminator);
+        Assert.DoesNotContain(transport.Writes, write =>
+            Encoding.ASCII.GetString(write) == "enable\r\n");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MapsRejectedEnableWithoutLeakingSecret()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01>"),
+            Bytes("Password:"),
+            Bytes("Authentication failed\r\nACCESS-SW-01>"));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret", "enable-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show system"]));
+
+        Assert.Equal(ErrorCodes.EnableFailed, exception.Error.Code);
+        Assert.DoesNotContain("enable-secret", exception.ToString(), StringComparison.Ordinal);
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_TestSessionLogsOutWithoutRunningACommand()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            []);
+
+        Assert.Empty(result.Outputs);
+        Assert.Contains(transport.Writes, write =>
+            Encoding.ASCII.GetString(write) == "exit\r\n");
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RetriesOnlyRemainingShowCommandsAfterRemoteClose()
+    {
+        var first = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show port status\r\n1 Up\r\nACCESS-SW-01#"));
+        var second = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show sylog tail num 100\r\nsynthetic log\r\nACCESS-SW-01#"));
+        var factory = new SequenceTransportFactory(first, second);
+        var client = CreateResilientClient(
+            factory,
+            TimeSpan.FromSeconds(5),
+            retryCount: 1);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show port status", "show sylog tail num 100"]);
+
+        Assert.Equal(
+            ["show port status", "show sylog tail num 100"],
+            result.Outputs.Select(output => output.Command));
+        Assert.Equal(2, result.SessionCount);
+        Assert.Equal(1, result.ReconnectCount);
+        Assert.DoesNotContain(second.Writes, write =>
+            Encoding.ASCII.GetString(write).Contains("show port status", StringComparison.Ordinal));
+        Assert.Contains(second.Writes, write =>
+            Encoding.ASCII.GetString(write).Contains("show sylog tail num 100", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DoesNotRetryRemoteCloseDuringAuthentication()
+    {
+        var first = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"));
+        var unusedSecond = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"));
+        var factory = new SequenceTransportFactory(first, unusedSecond);
+        var client = CreateResilientClient(
+            factory,
+            TimeSpan.FromSeconds(2),
+            retryCount: 1);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("operator", "login-secret"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show port status"]));
+
+        Assert.Equal(ErrorCodes.TelnetSessionClosed, exception.Error.Code);
+        Assert.Equal("authentication", exception.Error.Stage);
+        Assert.Equal(1, factory.CreateCalls);
+    }
+
+    [Fact]
     public void DeviceCommandProfile_RejectsControlCharactersAndSeparators()
     {
         var baseProfile = Ies4224GpProfile.Create();

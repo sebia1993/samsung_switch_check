@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.7.0-poc',
+    [string]$Version = '0.8.0-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -62,6 +62,11 @@ Write-SswStep 'Agent self-contained publish'
     -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebugType=None -p:Version=$Version `
     -p:ContinuousIntegrationBuild=true -p:NuGetLockFilePath=packages.win-x64.lock.json -o $agentOut
 if ($LASTEXITCODE -ne 0) { throw 'Agent publish 실패' }
+# 공개 Agent ZIP은 서비스 설치 전용 단일 EXE만 publish 결과로 유지합니다.
+# Web SDK가 만든 IIS·정적 자산·잠금 파일과 loose 설정은 Windows 서비스 실행에 필요하지 않습니다.
+Get-ChildItem -LiteralPath $agentOut -File |
+    Where-Object { $_.Name -ne 'SamsungSwitchWatch.Agent.exe' } |
+    Remove-Item -Force
 
 Write-SswStep 'Viewer self-contained publish'
 & $dotnet publish $viewerProject -c Release -r win-x64 --self-contained true --no-restore `
@@ -69,18 +74,24 @@ Write-SswStep 'Viewer self-contained publish'
     -p:ContinuousIntegrationBuild=true -p:NuGetLockFilePath=packages.win-x64.lock.json -o $viewerOut
 if ($LASTEXITCODE -ne 0) { throw 'Viewer publish 실패' }
 
-$agentScripts = @('common.ps1', 'install-agent.ps1', 'uninstall-agent.ps1', 'install-agent-background.ps1',
-    'run-agent-background.ps1', 'uninstall-agent-background.ps1', 'set-switch-credential.ps1',
-    'set-viewer-access.ps1', 'diagnose-agent.ps1')
+$agentScripts = @(
+    'Install-or-Update-Agent.cmd',
+    'common.ps1',
+    'install-agent.ps1',
+    'uninstall-agent.ps1',
+    'diagnose-agent.ps1'
+)
 $viewerScripts = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1')
+$userManualPdf = Join-Path $repoRoot 'docs\SamsungSwitchWatch_User_Manual_KO.pdf'
+if (-not (Test-Path -LiteralPath $userManualPdf -PathType Leaf)) {
+    throw "최종 PDF 사용설명서가 없습니다: $userManualPdf"
+}
 foreach ($script in $agentScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $agentOut }
 foreach ($script in $viewerScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $viewerOut }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $agentOut
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $viewerOut
-Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md') -Destination $agentOut
-Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md') -Destination $viewerOut
-Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\examples\switches.example.json') `
-    -Destination (Join-Path $agentOut 'switches.example.json')
+Copy-Item -LiteralPath $userManualPdf -Destination $agentOut
+Copy-Item -LiteralPath $userManualPdf -Destination $viewerOut
 $releaseNotesToken = $Version.Replace('-', '_').ToUpperInvariant()
 $releaseNotes = Join-Path $repoRoot "docs\RELEASE_NOTES_${releaseNotesToken}_KO.md"
 if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {

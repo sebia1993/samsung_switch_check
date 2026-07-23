@@ -318,21 +318,31 @@ function Test-SswTcpPortAvailable {
 function Invoke-SswLocalHealthProbe {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
-        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30,
+        [switch]$UseHttps
     )
 
     Add-Type -AssemblyName System.Net.Http
     $handler = New-Object Net.Http.HttpClientHandler
     $handler.UseProxy = $false
+    if ($UseHttps) {
+        # This probe runs only over loopback. The Viewer validates the persistent
+        # Agent identity; the installer only needs to prove that HTTPS is ready.
+        $handler.ServerCertificateCustomValidationCallback = {
+            param($message, $certificate, $chain, $sslPolicyErrors)
+            return $true
+        }
+    }
     $client = New-Object Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(3)
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
-    $lastStatus = 'AGENT_HTTP_UNREACHABLE'
+    $scheme = if ($UseHttps) { 'https' } else { 'http' }
+    $lastStatus = if ($UseHttps) { 'AGENT_HTTPS_UNREACHABLE' } else { 'AGENT_HTTP_UNREACHABLE' }
     try {
         do {
             $response = $null
             try {
-                $response = $client.GetAsync("http://127.0.0.1:$Port/health/ready").GetAwaiter().GetResult()
+                $response = $client.GetAsync("${scheme}://127.0.0.1:$Port/health/ready").GetAwaiter().GetResult()
                 if ($response.IsSuccessStatusCode) { return 'READY' }
                 try {
                     $readinessBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
@@ -358,20 +368,28 @@ function Invoke-SswLocalHealthProbe {
 function Invoke-SswLocalLivenessProbe {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
-        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 30,
+        [switch]$UseHttps
     )
 
     Add-Type -AssemblyName System.Net.Http
     $handler = New-Object Net.Http.HttpClientHandler
     $handler.UseProxy = $false
+    if ($UseHttps) {
+        $handler.ServerCertificateCustomValidationCallback = {
+            param($message, $certificate, $chain, $sslPolicyErrors)
+            return $true
+        }
+    }
     $client = New-Object Net.Http.HttpClient($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(3)
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $scheme = if ($UseHttps) { 'https' } else { 'http' }
     try {
         do {
             $response = $null
             try {
-                $response = $client.GetAsync("http://127.0.0.1:$Port/health/live").GetAwaiter().GetResult()
+                $response = $client.GetAsync("${scheme}://127.0.0.1:$Port/health/live").GetAwaiter().GetResult()
                 if ($response.IsSuccessStatusCode) { return 'LIVE' }
             }
             catch {
@@ -386,7 +404,8 @@ function Invoke-SswLocalLivenessProbe {
         $handler.Dispose()
     }
 
-    throw "Agent liveness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 진단 코드: AGENT_HTTP_UNREACHABLE"
+    $unreachableCode = if ($UseHttps) { 'AGENT_HTTPS_UNREACHABLE' } else { 'AGENT_HTTP_UNREACHABLE' }
+    throw "Agent liveness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 진단 코드: $unreachableCode"
 }
 
 function Set-SswInstallerBackupAcl {
@@ -398,20 +417,67 @@ function Set-SswInstallerBackupAcl {
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "junction 또는 symlink 백업 폴더는 사용하지 않습니다: $resolved"
     }
+    $descendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
+    $reparsePoint = $descendants | Where-Object {
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    } | Select-Object -First 1
+    if ($reparsePoint) {
+        throw "junction 또는 symlink가 포함된 백업 트리는 사용하지 않습니다: $($reparsePoint.FullName)"
+    }
+
+    $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $allowedSids = @($systemSid.Value, $administratorsSid.Value)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+
     $acl = Get-Acl -LiteralPath $resolved
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($identity in @($acl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
         $acl.PurgeAccessRules($identity)
     }
-    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
-    $propagation = [Security.AccessControl.PropagationFlags]::None
-    $allow = [Security.AccessControl.AccessControlType]::Allow
-    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
-        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+    foreach ($sid in @($systemSid, $administratorsSid)) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
             $sid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow)))
     }
     Set-Acl -LiteralPath $resolved -AclObject $acl
+
+    foreach ($item in $descendants | Sort-Object { $_.FullName.Length }) {
+        $childAcl = Get-Acl -LiteralPath $item.FullName
+        $childAcl.SetAccessRuleProtection($true, $false)
+        foreach ($identity in @($childAcl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
+            $childAcl.PurgeAccessRules($identity)
+        }
+        $childAcl.SetAccessRuleProtection($false, $false)
+        Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
+    }
+
+    $verified = Get-Acl -LiteralPath $resolved
+    $unexpected = @($verified.Access | Where-Object {
+        $_.IsInherited -or $_.AccessControlType -ne $allow -or
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+    })
+    if ($unexpected.Count -gt 0) {
+        throw "허용되지 않은 백업 폴더 권한이 남아 있습니다: $resolved"
+    }
+    foreach ($requiredSid in $allowedSids) {
+        if (-not ($verified.Access | Where-Object {
+            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $requiredSid
+        })) {
+            throw "필수 백업 폴더 권한을 확인하지 못했습니다: $requiredSid"
+        }
+    }
+    foreach ($item in $descendants) {
+        $childAcl = Get-Acl -LiteralPath $item.FullName
+        $invalidChildRule = $childAcl.Access | Where-Object {
+            -not $_.IsInherited -or $_.AccessControlType -ne $allow -or
+            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+        } | Select-Object -First 1
+        if ($invalidChildRule) {
+            throw "하위 백업 항목에 허용되지 않은 명시적 권한이 남아 있습니다: $($item.FullName)"
+        }
+    }
 }
 
 function Write-SswOperationJournal {
@@ -511,6 +577,45 @@ function ConvertTo-SswViewerRemoteAddresses {
     })
 }
 
+function ConvertTo-SswIpv4Cidrs {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Cidr,
+        [ValidateRange(1, 64)][int]$MaximumCount = 32
+    )
+
+    if ($Cidr.Count -lt 1 -or $Cidr.Count -gt $MaximumCount) {
+        throw "CIDR list must contain between 1 and $MaximumCount entries."
+    }
+
+    $normalized = New-Object Collections.Generic.List[string]
+    foreach ($candidate in $Cidr) {
+        $trimmed = ([string]$candidate).Trim()
+        if ($trimmed -notmatch '^(?<address>(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3})/(?<prefix>\d{1,2})$') {
+            throw "CIDR must use canonical IPv4/prefix notation: $candidate"
+        }
+
+        $prefix = [int]$Matches.prefix
+        if ($prefix -lt 0 -or $prefix -gt 32) { throw "CIDR prefix must be between 0 and 32: $candidate" }
+        $octets = @($Matches.address.Split('.') | ForEach-Object { [int]$_ })
+        if (@($octets | Where-Object { $_ -gt 255 }).Count -gt 0) {
+            throw "CIDR octets must be between 0 and 255: $candidate"
+        }
+
+        [uint32]$value = ([uint32]$octets[0] -shl 24) -bor ([uint32]$octets[1] -shl 16) -bor
+            ([uint32]$octets[2] -shl 8) -bor [uint32]$octets[3]
+        [uint32]$mask = if ($prefix -eq 0) { 0 } else { [uint32]::MaxValue -shl (32 - $prefix) }
+        [uint32]$network = $value -band $mask
+        $networkAddress = '{0}.{1}.{2}.{3}' -f
+            (($network -shr 24) -band 0xff),
+            (($network -shr 16) -band 0xff),
+            (($network -shr 8) -band 0xff),
+            ($network -band 0xff)
+        $normalized.Add("$networkAddress/$prefix")
+    }
+
+    return @($normalized | Select-Object -Unique | Sort-Object)
+}
+
 function Get-SswSwitchInventoryHash {
     param([Parameter(Mandatory = $true)][object[]]$Switches)
 
@@ -582,17 +687,27 @@ function Test-SswLegacyOwnedAgentFirewallRule {
         $Snapshot.Description -eq 'Owned by SamsungSwitchWatchAgent installer v1'
 }
 
+function Test-SswOwnedAgentHttpsFirewallRule {
+    param([Parameter(Mandatory = $true)][object]$Snapshot)
+    return $Snapshot.Name -eq 'SamsungSwitchWatchAgent-Https' -and
+        $Snapshot.DisplayName -eq 'Samsung Switch Watch Agent HTTPS' -and
+        $Snapshot.Group -eq 'Samsung Switch Watch' -and
+        $Snapshot.Description -eq 'Owned by SamsungSwitchWatchAgent installer v3'
+}
+
 function Assert-SswAgentFirewallNameSafety {
     foreach ($definition in @(
-        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Http'; Legacy = $false },
-        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Https'; Legacy = $true }
+        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Http'; Kind = 'legacy-http' },
+        [pscustomobject]@{ Name = 'SamsungSwitchWatchAgent-Https'; Kind = 'https' }
     )) {
         $snapshot = Get-SswAgentFirewallSnapshotByName -Name $definition.Name
         if (-not $snapshot) { continue }
-        $owned = if ($definition.Legacy) {
-            Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot
+        $owned = if ($definition.Kind -eq 'legacy-http') {
+            Test-SswOwnedAgentFirewallRule -Snapshot $snapshot
+        } else {
+            (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $snapshot) -or
+                (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot)
         }
-        else { Test-SswOwnedAgentFirewallRule -Snapshot $snapshot }
         if (-not $owned) {
             throw "제품 내부 이름과 충돌하는 외부 방화벽 규칙이 있습니다. 자동 변경하지 않습니다: $($definition.Name)"
         }
@@ -706,7 +821,8 @@ function Assert-SswAgentFirewallGateReady {
         }
         else { $null }
         if ($candidateSnapshot -and ((Test-SswOwnedAgentFirewallRule -Snapshot $candidateSnapshot) -or
-            (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $candidateSnapshot))) { continue }
+            (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $candidateSnapshot) -or
+            (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $candidateSnapshot))) { continue }
 
         $portFilter = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule
         if (-not (Test-SswFirewallPortOverlap -Protocol ([string]$portFilter.Protocol) `
@@ -757,6 +873,41 @@ function New-SswAgentFirewallRule {
         -Program Any -Service Any -InterfaceType Any -Profile Domain,Private | Out-Null
 }
 
+function Test-SswAgentHttpsFirewallRuleExact {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][string[]]$RemoteAddress
+    )
+
+    $expected = @(ConvertTo-SswIpv4Cidrs -Cidr $RemoteAddress | Sort-Object)
+    $actual = @($Snapshot.RemoteAddress | ForEach-Object { [string]$_ } | Sort-Object)
+    return (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $Snapshot) -and
+        $Snapshot.Enabled -eq 'True' -and $Snapshot.Direction -eq 'Inbound' -and
+        $Snapshot.Action -eq 'Allow' -and $Snapshot.Protocol -in @('TCP', '6') -and
+        $Snapshot.LocalPort -eq '18443' -and $Snapshot.RemotePort -eq 'Any' -and
+        (@($Snapshot.LocalAddress) -join '|') -eq 'Any' -and
+        $Snapshot.Program -eq 'Any' -and $Snapshot.Service -eq 'Any' -and
+        $Snapshot.InterfaceType -eq 'Any' -and
+        ($actual -join '|') -eq ($expected -join '|') -and
+        (Test-SswFirewallProfileSetExact -Profile ([string]$Snapshot.Profile))
+}
+
+function New-SswAgentHttpsFirewallRule {
+    param([Parameter(Mandatory = $true)][string[]]$RemoteAddress)
+
+    $validatedAddresses = @(ConvertTo-SswIpv4Cidrs -Cidr $RemoteAddress)
+    Assert-SswAgentFirewallNameSafety
+    if (Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https') {
+        throw 'Agent HTTPS firewall name is already in use.'
+    }
+    New-NetFirewallRule -Name 'SamsungSwitchWatchAgent-Https' `
+        -DisplayName 'Samsung Switch Watch Agent HTTPS' -Group 'Samsung Switch Watch' `
+        -Description 'Owned by SamsungSwitchWatchAgent installer v3' `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18443 `
+        -RemotePort Any -LocalAddress Any -RemoteAddress $validatedAddresses `
+        -Program Any -Service Any -InterfaceType Any -Profile Domain,Private | Out-Null
+}
+
 function Remove-SswOwnedAgentFirewallRuleByName {
     param(
         [Parameter(Mandatory = $true)]
@@ -770,7 +921,8 @@ function Remove-SswOwnedAgentFirewallRuleByName {
         throw "Agent 방화벽 규칙을 찾지 못했습니다: $Name"
     }
     $owned = if ($Name -eq 'SamsungSwitchWatchAgent-Https') {
-        Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot
+        (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $snapshot) -or
+            (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot)
     }
     else { Test-SswOwnedAgentFirewallRule -Snapshot $snapshot }
     if (-not $owned) { throw "소유권 표식이 없는 방화벽 규칙은 자동 제거하지 않습니다: $Name" }
@@ -809,6 +961,45 @@ function Restore-SswAgentFirewallSnapshot {
     New-NetFirewallRule @parameters | Out-Null
 }
 
+function Restore-SswAgentFirewallSnapshots {
+    param([object[]]$Snapshots = @())
+
+    foreach ($snapshot in @($Snapshots)) {
+        if ($snapshot -and -not ((Test-SswOwnedAgentFirewallRule -Snapshot $snapshot) -or
+            (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $snapshot) -or
+            (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $snapshot))) {
+            throw 'Refusing to restore a firewall snapshot without a product ownership marker.'
+        }
+    }
+
+    Assert-SswAgentFirewallNameSafety
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' -AllowMissing
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Https' -AllowMissing
+    foreach ($snapshot in @($Snapshots | Where-Object { $null -ne $_ })) {
+        $parameters = @{
+            Name = $snapshot.Name
+            DisplayName = $snapshot.DisplayName
+            Enabled = $snapshot.Enabled
+            Direction = $snapshot.Direction
+            Action = $snapshot.Action
+            Protocol = $snapshot.Protocol
+            LocalPort = $snapshot.LocalPort
+            RemotePort = $snapshot.RemotePort
+            LocalAddress = @($snapshot.LocalAddress)
+            RemoteAddress = @($snapshot.RemoteAddress)
+            Program = $snapshot.Program
+            Service = $snapshot.Service
+            InterfaceType = $snapshot.InterfaceType
+            Profile = $snapshot.Profile
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$snapshot.Group)) { $parameters.Group = [string]$snapshot.Group }
+        if (-not [string]::IsNullOrWhiteSpace([string]$snapshot.Description)) {
+            $parameters.Description = [string]$snapshot.Description
+        }
+        New-NetFirewallRule @parameters | Out-Null
+    }
+}
+
 function Remove-SswOwnedAgentFirewallRule {
     param([switch]$AllowMissing)
     Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' -AllowMissing:$AllowMissing
@@ -836,6 +1027,34 @@ function Assert-SswAgentInstallReceipt {
         throw 'Agent 설치 영수증의 Agent ID 또는 스위치 인벤토리가 현재 설정과 일치하지 않습니다.'
     }
     return $receiptVersion
+}
+
+function Assert-SswAgentExecutorReceipt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Receipt,
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$DataDirectory
+    )
+
+    $expectedInstall = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
+    $expectedData = [IO.Path]::GetFullPath($DataDirectory).TrimEnd('\')
+    $receiptInstall = [IO.Path]::GetFullPath([string]$Receipt.installDirectory).TrimEnd('\')
+    $receiptData = [IO.Path]::GetFullPath([string]$Receipt.dataDirectory).TrimEnd('\')
+    if ($Receipt.product -ne 'SamsungSwitchWatchAgent' -or
+        [int]$Receipt.receiptVersion -ne 3 -or
+        [int]$Receipt.httpsPort -ne 18443 -or
+        -not $receiptInstall.Equals($expectedInstall, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $receiptData.Equals($expectedData, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$Receipt.agentId -notmatch '^[A-Za-z0-9_-]{1,64}$') {
+        throw 'Agent executor install receipt validation failed.'
+    }
+    $clientCidrs = @(ConvertTo-SswIpv4Cidrs -Cidr @($Receipt.clientManagementCidrs))
+    $targetCidrs = @(ConvertTo-SswIpv4Cidrs -Cidr @($Receipt.allowedTargetCidrs))
+    return [pscustomobject]@{
+        AgentId = [string]$Receipt.agentId
+        ClientManagementCidrs = $clientCidrs
+        AllowedTargetCidrs = $targetCidrs
+    }
 }
 
 function Get-SswCertificateSha256 {

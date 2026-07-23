@@ -3,8 +3,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using SamsungSwitchWatch.Agent;
-using SamsungSwitchWatch.Agent.Polling;
-using SamsungSwitchWatch.Agent.Queries;
+using SamsungSwitchWatch.Agent.Execution;
 
 namespace SamsungSwitchWatch.Agent.Tests;
 
@@ -22,21 +21,23 @@ internal sealed class TestAgentHost : IAsyncDisposable
 
     public HttpClient Client { get; }
     public IServiceProvider Services => _app.Services;
+    public string DataDirectory => _folder;
 
     public static async Task<TestAgentHost> StartAsync(
-        IDeviceCollector? collector = null,
-        IReadOnlyDictionary<string, string?>? additionalOverrides = null,
-        IReadOnlyQueryCollector? queryCollector = null)
+        IStatelessTelnetExecutor? executor = null,
+        IReadOnlyDictionary<string, string?>? additionalOverrides = null)
     {
-        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-AgentTests", Guid.NewGuid().ToString("N"));
+        var folder = Path.Combine(
+            Path.GetTempPath(),
+            "SamsungSwitchWatch-AgentTests",
+            Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         var overrides = new Dictionary<string, string?>
         {
             ["Agent:ListenUrl"] = "http://127.0.0.1:0",
             ["Agent:DataDirectory"] = folder,
             ["Agent:MockMode"] = "true",
-            ["Agent:EnablePolling"] = "false",
-            ["Agent:EnableSimulator"] = "true"
+            ["Agent:AllowedTargetCidrs:0"] = "192.0.2.0/24"
         };
         if (additionalOverrides is not null)
         {
@@ -45,15 +46,12 @@ internal sealed class TestAgentHost : IAsyncDisposable
                 overrides[item.Key] = item.Value;
             }
         }
+
         var app = AgentApplication.Build([], overrides, services =>
         {
-            if (collector is not null)
+            if (executor is not null)
             {
-                services.AddSingleton(collector);
-            }
-            if (queryCollector is not null)
-            {
-                services.AddSingleton(queryCollector);
+                services.AddSingleton(executor);
             }
         });
         await app.StartAsync();
@@ -74,7 +72,7 @@ internal sealed class TestAgentHost : IAsyncDisposable
         }
         catch (IOException)
         {
-            // SQLite can briefly retain a file handle on Windows after host shutdown.
+            // A Windows runtime can briefly retain a host-owned file handle.
         }
     }
 }

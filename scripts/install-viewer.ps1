@@ -2,6 +2,7 @@
     [string]$SourceDirectory = $PSScriptRoot,
     [string]$InstallDirectory = "$env:LOCALAPPDATA\Programs\SamsungSwitchWatch\Viewer",
     [switch]$StartWithWindows,
+    [switch]$DisableStartWithWindows,
     [switch]$DoNotStart,
     [switch]$Preflight
 )
@@ -17,6 +18,9 @@ $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup
 
 Write-SswStep 'Viewer 설치 전 검사'
 if ($env:OS -ne 'Windows_NT') { throw 'Viewer는 Windows x64에서만 설치할 수 있습니다.' }
+if ($StartWithWindows -and $DisableStartWithWindows) {
+    throw '-StartWithWindows와 -DisableStartWithWindows는 동시에 사용할 수 없습니다.'
+}
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "Viewer 배포 파일을 찾지 못했습니다: $sourceExe" }
 if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) { throw "패키지 빌드 매니페스트를 찾지 못했습니다: $sourceManifestPath" }
 try { $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json }
@@ -84,7 +88,9 @@ try {
     $shortcut.WorkingDirectory = $install
     $shortcut.Save()
     if ($StartWithWindows) { Copy-Item -LiteralPath $startMenu -Destination $startup -Force }
-    elseif (Test-Path -LiteralPath $startup -PathType Leaf) { Remove-Item -LiteralPath $startup -Force }
+    elseif ($DisableStartWithWindows -and (Test-Path -LiteralPath $startup -PathType Leaf)) {
+        Remove-Item -LiteralPath $startup -Force
+    }
 
     Write-SswStep '새 Viewer 프로세스 자체 점검'
     $smokeProcess = Start-Process -FilePath $viewerExe -WorkingDirectory $install -PassThru

@@ -14,6 +14,21 @@ public interface IAgentClient : IAsyncDisposable
     Task<CommandResultDto> ExecuteRegisteredCheckAsync(string deviceId, string commandId, CancellationToken cancellationToken);
     Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(string deviceId, string command, CancellationToken cancellationToken);
     Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken);
+
+    bool SupportsStatelessV4 => false;
+
+    Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken) =>
+        Task.FromException<AgentIdentityDto>(new NotSupportedException("AGENT_V4_NOT_SUPPORTED"));
+
+    Task<TelnetExecutionResultDto> TestTelnetAsync(
+        TelnetTargetDto target,
+        CancellationToken cancellationToken) =>
+        Task.FromException<TelnetExecutionResultDto>(new NotSupportedException("AGENT_V4_NOT_SUPPORTED"));
+
+    Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+        TelnetExecuteRequestDto request,
+        CancellationToken cancellationToken) =>
+        Task.FromException<TelnetExecutionResultDto>(new NotSupportedException("AGENT_V4_NOT_SUPPORTED"));
 }
 
 public interface IAgentClientFactory

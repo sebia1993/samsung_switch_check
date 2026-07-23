@@ -1,135 +1,218 @@
-# Architecture
+# Samsung Switch Watch v0.8 아키텍처
 
-## 배치 구조
+## 구성요소와 소유권
 
 ```text
-관리 VLAN
-  IES4224GP ─┐
-  IES4028XP ─┼─ Telnet/23 ─> Agent host
-  IES4226XP ─┘                ├─ Windows Service (관리자 권장)
-                              ├─ 현재 사용자 숨김 예약 작업 (비관리자 대체)
-                              ├─ 모델 프로파일 + capability 확인
-                              ├─ 명령별 구조화·변경 감지
-                              ├─ SQLite + DPAPI 원문 보관
-                              ├─ HTTP API v1/v2/v3
-                              │  (암호화·인증 없음, 고정 IP 방화벽)
-                              └─ SignalR eventChanged
-                                      │
-                                      ▼
-                                  WPF Viewer
-                                  ├─ 대시보드
-                                  ├─ 미니 창
-                                  ├─ 트레이·알림
-                                  └─ 검색·안전한 내보내기
+┌──────────────────────── Viewer PC ────────────────────────┐
+│ SamsungSwitchWatch.Viewer                                │
+│ - 장비 IP·모델                                           │
+│ - ID·로그인 PW·enable PW: DPAPI CurrentUser              │
+│ - 감시 일정·기준선·변경 이벤트·감시 공백                 │
+│ - 수동 명령과 원문 출력: 프로세스 메모리만               │
+└──────────────────────────┬────────────────────────────────┘
+                           │ HTTPS/18443
+                           ▼
+┌──────────────────────── Agent PC ─────────────────────────┐
+│ SamsungSwitchWatch.Agent Windows Service                 │
+│ - 영구 HTTPS 신원: ECDSA P-256 + DPAPI LocalMachine      │
+│ - 허용 대상 IPv4 CIDR                                    │
+│ - 요청 검증·Telnet 실행·응답 반환                        │
+│ - 장비·계정·명령·출력·감시 이력은 저장하지 않음           │
+└──────────────────────────┬────────────────────────────────┘
+                           │ Telnet/23
+                           ▼
+              IES4224GP / IES4028XP / IES4226XP
 ```
 
-주기 수집과 기존 수동 점검은 `deviceId + commandId`만 요청하고 Agent가 등록된 읽기 전용
-`show` 명령으로 변환합니다. v0.7의 Viewer 장비 명령은 설치 시 명시적으로 켠 경우에만 한 줄
-문자열을 받습니다. Agent가 다시 허용 목록·금지 키워드·구분자를 검사한 뒤 같은 장비 semaphore와
-Telnet 수명주기를 사용합니다. Telnet 사용자명·비밀번호는 Agent PC 밖으로 전송하지 않습니다.
+Agent는 수집 서버가 아니라 네트워크 경계 안에서 Telnet 접속을 수행하는 무상태 실행기입니다.
+Viewer가 종료되면 감시 요청도 발생하지 않습니다.
 
-## Agent 호스트 모드
+## 실행 흐름
 
-Agent 실행 파일은 동일하며 호스트 방식만 다음 둘 중 하나를 선택합니다.
+### 접속 시험
 
-| 모드 | 실행 주체 | 실행 범위 | 설치 위치 |
-|---|---|---|---|
-| Windows 서비스 | `LocalService` | 부팅 후 로그온과 무관 | `%ProgramFiles%`, `%ProgramData%` |
-| 현재 사용자 숨김 | 제한된 `InteractiveToken` 예약 작업 | 같은 사용자 로그온 동안 | `%LOCALAPPDATA%` |
+```text
+Viewer가 장비·계정을 메모리에서 복호화
+→ POST /api/v4/telnet/test
+→ Agent가 대상 CIDR과 포트 23 검증
+→ TCP 연결
+→ ID/PW 로그인
+→ 프롬프트가 > 이면 선택적으로 enable
+→ 권한 프롬프트 확인
+→ exit/logout
+→ 성공 여부·최종 권한·소요 시간 반환, 실패하면 sanitized 오류 코드 반환
+```
 
-두 모드는 고정 서비스·작업 충돌 검사를 통해 동시에 실행되지 않습니다. 숨김 모드는
-`run-agent-background.ps1`을 `-WindowStyle Hidden`으로 실행하고 Agent 프로세스를 자식으로
-직접 추적합니다. 예약 작업은 중복 실행을 무시하고 비정상 종료를 1분 간격으로 최대 3회
-재시작합니다. 설치 성공은 로컬 `/health/live` 응답 뒤에만 확정합니다.
+### 명령 실행
 
-숨김 모드는 방화벽을 변경하지 않으므로 기존 관리자 승인 고정 Viewer IPv4 정책을 전제로
-합니다. Windows 서비스의 `LocalService` 격리나 같은 계정 사용자의 작업 종료 방지는 제공하지
-않습니다.
+```text
+Viewer 수동 UI는 show 명령 1개, 주기 감시는 한 요청에 최대 8개 구성
+→ POST /api/v4/telnet/execute
+→ Agent가 요청·대상·명령을 다시 검증
+→ 새 Telnet 세션에서 로그인·enable
+→ 명령 실행과 페이징 처리
+→ 명령 단계에서 원격 종료 시 완료분을 제외하고 남은 명령만 새 세션으로 1회 재시도
+→ 최대 64KiB 결과 반환
+→ 세션 종료와 메모리 폐기
+→ Viewer가 화면 표시 또는 상태 비교
+```
 
-## 수집 흐름
+장비 세션은 요청 사이에 재사용하지 않습니다. 각 세션의 최대 시간은 240초이며 성공, 실패,
+취소와 타임아웃 경로 모두에서 연결을 정리합니다. 로그인·인증·enable 단계 실패와 명령
+타임아웃은 자동 재시도하지 않습니다.
 
-모델 프로파일은 공개 자료를 바탕으로 한 안전한 후보입니다.
+## Agent 설정
 
-| Command ID | 후보 명령 | 기본 주기 | 필수 여부 |
-|---|---|---:|---|
-| `version` | `show version` | 1시간 | 선택 |
-| `system` | `show system` | 1분 | 선택 |
-| `log_ram` | `show syslog tail num 100` 우선, `show sylog tail num 100` 및 모델별 대체 | 1분 | 필수 |
-| `interface_status` | `show port status` 우선, 모델별 대체 | 1분 | 필수 |
+운영 설정은 설치기가 다음 형태로 만듭니다.
 
-Agent는 같은 장비의 due 명령을 한 Telnet 세션에서 실행합니다. 장비별 semaphore로 동시
-세션을 하나로 제한하고, 다른 장비는 `MaxConcurrentDevices`(기본 4, 최대 16) 범위에서
-병렬 처리합니다. Agent 한 대에는 최대 256개 장비를 등록할 수 있습니다.
+```json
+{
+  "Agent": {
+    "AgentId": "agent-REMOTE-PC",
+    "ListenUrl": "https://0.0.0.0:18443",
+    "DataDirectory": "C:\\ProgramData\\SamsungSwitchWatch",
+    "MockMode": false,
+    "AllowedTargetCidrs": [
+      "10.40.0.0/16"
+    ],
+    "MaxConcurrentExecutions": 2,
+    "RateLimitPerMinute": 60,
+    "MaxRequestBodyBytes": 32768,
+    "MaxCommandsPerRequest": 8,
+    "MaxCommandLength": 128,
+    "MaxOutputBytes": 65536,
+    "Telnet": {
+      "MaxSessionSeconds": 240,
+      "ImmediateSessionCloseRetryCount": 1,
+      "ImmediateSessionCloseRetryDelaySeconds": 2
+    }
+  }
+}
+```
 
-명령별 성공·실패·미지원·마지막 시도·마지막 성공을 별도 collector health snapshot으로
-저장합니다. 한 명령이 미지원이어도 나머지 수집기는 계속 동작하며, 필수 수집기 전체가
-사용 불가능할 때만 readiness가 실패합니다.
+`AllowedTargetCidrs`는 단순 문서 값이 아니라 Agent가 각 요청마다 적용하는 SSRF/Telnet
+대상 허용 목록입니다. 명시적 canonical dotted IPv4와 고정 TCP/23만 허용하며 DNS 이름,
+IPv6, loopback, link-local, multicast와 허용 범위 밖 주소는 거부합니다.
 
-## Viewer 읽기 전용 장비 명령
+## API v4
 
-이 기능은 `Agent:EnableReadOnlyQueries=false`가 기본값이며 설치기의
-`-EnableReadOnlyQueries`로만 명시적으로 켭니다. `GET /api/v3/snapshot`의
-`features.readOnlyQueries`가 `enabled`, `maxCommandLength`, `maxOutputBytes`를 광고하므로
-구형 Agent나 비활성 Agent에서는 Viewer 탭을 이유와 함께 비활성화합니다.
+### 신원과 상태
 
-Agent는 128자 이하 한 줄 `show` 명령 중 `port`, `ports`, `interface`, `interfaces`, `system`,
-`version`, `syslog`, `sylog`, `log`, `spanning-tree`, `lacp`, `power`, `memory` 첫 토큰만
-허용하고, 설정·계정·인증·암호 관련 키워드와 제어문자 및 shell 구분자를 거부합니다. 요청은
-같은 장비의 주기 수집과 공통 잠금을 사용하며 잠금 대기는 최대 5초, 전체 요청은 최대 60초입니다.
-Viewer IPv4별 분당 최대 12회이고 대기열 없이 초과 요청을 거부합니다.
+- `GET /api/v4/identity`
+  - Agent ID, 프로토콜 버전, HTTPS 공개 신원 식별값
+  - 비밀번호, CIDR 전체 목록과 런타임 경로는 반환하지 않음
+- `GET /health/live`
+  - 프로세스 생존 여부
+- `GET /health/ready`
+  - HTTPS 신원과 실행기 초기화 완료 여부
 
-정규화된 UTF-8 결과는 최대 65,536바이트에서 유효한 문자 경계로 잘라 `truncated` 상태와 함께
-요청한 Viewer에 한 번 반환합니다. 결과는 Agent snapshot/event/raw DB, Viewer 설정, 명령 이력,
-CSV/JSON 내보내기에 저장하지 않습니다. 감사에는 장비 ID, Viewer IP, 명령 SHA-256, 소요 시간,
-결과 코드와 출력 크기만 남깁니다.
+### 접속 시험
 
-## 변경 감지
+`POST /api/v4/telnet/test`
 
-- 첫 로그 조회는 기준선만 만들고 기존 로그를 신규 알림으로 만들지 않습니다.
-- 빈 출력·부분 출력·프롬프트 미복귀는 정상 결과를 덮어쓰지 않습니다.
-- 최초 조회부터 중요 업링크가 Down이면 활성 Critical을 생성합니다.
-- 동일 condition의 미복구 활성 이벤트는 DB unique 제약으로 하나만 유지합니다.
-- 이벤트 생성·확인·복구마다 당시의 불변 snapshot을 append-only change feed에 기록합니다.
-- uptime 감소와 로그 기준선 초기화를 영속 snapshot으로 상관 분석합니다.
-- DB integrity 실패 시 liveness만 유지하고 수집·수동 점검·쓰기 작업을 중단합니다.
+```json
+{
+  "requestId": "7df5b77d-a5fb-45db-bc93-96f719b04b36",
+  "purpose": "test",
+  "host": "10.40.0.10",
+  "port": 23,
+  "model": "IES4224GP",
+  "username": "<memory-only>",
+  "password": "<memory-only>",
+  "enablePassword": null,
+  "commands": []
+}
+```
 
-## 저장소
+### 명령 실행
 
-SQLite는 WAL 모드를 사용합니다. 구조화 snapshot, 이벤트, 변경 feed, 감사 이력과
-Agent 전용 원문을 한 트랜잭션으로 커밋합니다.
+`POST /api/v4/telnet/execute`
 
-- 원문: DPAPI LocalMachine 보호, 기본 7일·500MB, 256개 단위 trim
-- 이벤트: 기본 90일, 미복구 활성 condition은 보존
-- 감사 이력: 기본 180일
-- schema v5: snapshot/event/raw/audit는 보존하고 제거된 pairing/token 테이블만 폐기
+```json
+{
+  "requestId": "daaf99ea-c2aa-49e0-a296-88f5f818190f",
+  "purpose": "manual",
+  "host": "10.40.0.10",
+  "port": 23,
+  "model": "IES4224GP",
+  "username": "<memory-only>",
+  "password": "<memory-only>",
+  "enablePassword": "<optional-memory-only>",
+  "commands": [
+    "show port status"
+  ]
+}
+```
 
-서비스 설치 스크립트는 서비스 계정과 관리자만 데이터에 접근하도록 ACL을 설정합니다.
-현재 사용자 숨김 설치는 사용자 프로필의 별도 데이터 폴더를 사용합니다.
+- `purpose`: `test`, `manual`, `monitor`
+- `host`: canonical dotted IPv4
+- `port`: 항상 23
+- `model`: 지원 모델 3종
+- `commands`: execute 요청에서 1~8개
 
-## API v3
+성공 응답은 성공 여부, 최종 권한 프롬프트, 시작·완료 시각, 전체 소요 시간, `sessionCount`,
+`reconnectCount`, 명령별 출력과 잘림 여부를 포함합니다. 실패 응답은 안정적인 오류 코드와
+민감하지 않은 설명만 반환합니다.
+비밀번호는 어떤 응답에도 포함하지 않습니다.
+요청 본문은 최대 32KiB이며 초과 요청은 JSON 바인딩 전에 `413 / REQUEST_TOO_LARGE`로
+거부합니다.
 
-- `GET /health/live`: Agent 프로세스 응답
-- `GET /health/ready`: DB·스키마·자격 증명·스케줄러·필수 수집기 상태
-- `GET /api/v3/snapshot`: authoritative counts, high-watermark, 장비·capability·채널 및 기능 협상 상태
-- `GET /api/v3/events/recent?limit=500`: 최신 이벤트 snapshot
-- `GET /api/v3/events/changes?after={cursor}&limit=500`: 불변 변경 이력 page
-- `POST /api/v3/check-runs`: 등록된 장비 ID와 명령 ID만 즉시 실행
-- `POST /api/v3/read-only-queries`: 옵트인된 한 줄 `show` 조회 실행과 메모리 전용 결과 반환
-- `/hubs/events`: 같은 `eventChanged` 계약의 실시간 전달
+## 명령 정책
 
-기존 `/api/v1`, `/api/v2`는 v1.0 전까지 읽기 호환 경로로 유지합니다. Viewer는 v3를
-우선 사용하고 404에서만 v2로 fallback합니다.
+다음 조건을 모두 만족하는 문자열만 실행합니다.
 
-v0.7 API와 SignalR에는 애플리케이션 인증이 없습니다. Agent는 `0.0.0.0:18443`에서
-수신하고 Windows 방화벽이 설치 때 지정한 1~32개의 고정 Viewer IPv4만 허용합니다.
+- 정규화 후 `show`로 시작
+- 한 줄
+- 제어문자와 줄바꿈 없음
+- `;`, `&`, `|` 등 명령 연결 문법 없음
+- 128자 이하
 
-## Viewer 동기화
+`show running-config`를 포함한 한 줄 `show` 명령은 허용됩니다. Viewer와 Agent는 해당
+명령이나 결과를 DB, 파일 로그, 감사 이벤트 또는 내보내기에 저장하지 않습니다.
 
-Viewer는 먼저 최신 snapshot과 authoritative count를 가져온 뒤 저장한 cursor부터 변경
-page를 순서대로 적용합니다. 동기화 중 들어온 SignalR 변경은 버퍼링하고, 재연결 시 누락된
-여러 이벤트를 한 catch-up 요약으로 알립니다. retention 때문에 cursor가 유효하지 않으면
-현재 기준선을 다시 만들되 과거 이벤트를 신규 팝업으로 만들지 않습니다.
+## Viewer 저장소
 
-HTTP 상태와 SignalR 상태는 분리됩니다. 실시간 채널이 재연결 중이어도 API 조회가 정상이면
-기존 상태를 표시하고 `실시간 저하`로 알립니다. Agent 자체가 끊기면 마지막 정상 cache를
-유지하되 현재 상태는 `미확인`으로 표시합니다.
+Viewer 로컬 저장소가 보관하는 항목:
+
+- 장비명, 모델, IPv4, 표시 설정
+- 현재 Windows 사용자 DPAPI로 암호화한 ID·PW·enable PW
+- 장비별 감시 설정과 마지막 실행 시각
+- 파싱된 상태 기준선과 변경 이벤트
+- Viewer 비실행·절전·Agent 단절에 따른 감시 공백
+- 자동 신뢰한 Agent 신원
+
+보관하지 않는 항목:
+
+- 수동 명령 문자열
+- 수동 원문 출력
+- `show running-config` 결과
+- Agent로 보낸 평문 비밀번호
+
+## HTTPS 신원
+
+Agent는 최초 시작 때 ECDSA P-256 키와 자체 서명 인증서를 생성해 DataDirectory 아래에
+보관합니다. 개인 키 자료는 Windows DPAPI LocalMachine으로 보호됩니다. 설치기는 인증서
+경로나 비밀번호를 설정하지 않으며 업데이트 때 DataDirectory 전체를 보존합니다.
+
+Viewer는 최초 연결에서 `/api/v4/identity`의 공개 신원을 자동 고정합니다. 같은 Agent 주소에서
+신원이 바뀌면 중간자 공격 또는 재설치 가능성으로 보고 연결을 차단합니다. 사용자가 SHA-256
+지문이나 페어링 토큰을 입력하는 화면은 없습니다.
+
+## 동시성 및 실패 격리
+
+- 전체 동시 Telnet 실행: 최대 2건
+- API 클라이언트 기준: 분당 최대 60회
+- 장비 1대에는 동시에 한 세션만 허용
+- 한 요청: 명령 최대 8개, 결과 최대 64KiB
+- 각 세션: 최대 240초
+- 명령 실행 중 원격 종료: 완료된 명령을 제외한 나머지만 새 세션으로 최대 1회 재시도
+
+한 장비의 인증 실패나 명령 미지원은 다른 장비 요청에 영향을 주지 않습니다.
+`show sylog tail num 100`과 `show syslog tail num 100`처럼 펌웨어별 후보 명령은 Viewer가
+순서대로 시험하며, 실패를 스위치 전체 장애로 바꾸지 않습니다.
+
+## 버전 호환
+
+v0.8 Agent와 Viewer는 API v4를 기준으로 함께 배포합니다. v0.7의 Agent 저장 장비 목록,
+자격 증명 저장소, 자체 Poll Scheduler, 이벤트 DB와 SignalR 수집 흐름은 v0.8 운영 구조가
+아닙니다. 업데이트 순서는 Agent 먼저, Viewer 다음입니다.

@@ -145,7 +145,7 @@
                 <StackPanel VerticalAlignment="Center">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="Samsung Switch Watch" FontSize="20" FontWeight="SemiBold" />
-                        <TextBlock Margin="10,0,0,0" Text="원격 수집 PC" FontSize="12"
+                        <TextBlock Margin="10,0,0,0" Text="Viewer 주도형 장비 조회" FontSize="12"
                                    Foreground="{StaticResource MutedTextBrush}" />
                         <Border Margin="8,0,0,0" Padding="9,4" CornerRadius="12"
                                 Background="{Binding ConnectionHealth, Converter={StaticResource HealthBrush}, ConverterParameter=Background}">
@@ -162,26 +162,14 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Margin="0,0,8,0" Text="점검" FontSize="12"
-                               Foreground="{StaticResource MutedTextBrush}" />
-                    <ComboBox x:Name="RegisteredCheckComboBox" Width="132" Margin="0,0,8,0"
-                              ItemsSource="{Binding RegisteredChecks}" DisplayMemberPath="DisplayName"
-                              SelectedValuePath="Id" SelectedValue="{Binding SelectedCheckId}"
-                              AutomationProperties.Name="등록된 읽기 전용 점검 선택">
-                        <ComboBox.ItemContainerStyle>
-                            <Style TargetType="ComboBoxItem">
-                                <Setter Property="AutomationProperties.Name" Value="{Binding DisplayName}" />
-                            </Style>
-                        </ComboBox.ItemContainerStyle>
-                    </ComboBox>
-                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="선택 점검 _실행"
-                            Command="{Binding ManualCheckCommand}"
-                            AutomationProperties.HelpText="선택한 장비에서 등록된 읽기 전용 점검만 실행합니다." />
+                    <Button Margin="0,0,8,0" Style="{StaticResource PrimaryButton}" Content="_장비 관리"
+                            Click="OpenDeviceManagement_Click"
+                            AutomationProperties.Name="장비 IP와 계정 관리"/>
                     <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="화면 _새로고침"
                             Command="{Binding RefreshCommand}" />
                     <Button Margin="0,0,8,0" Style="{StaticResource SecondaryButton}" Content="_미니 창"
                             Click="ShowMiniWindow_Click" />
-                    <Button Style="{StaticResource SecondaryButton}" Content="연결 _설정"
+                    <Button Style="{StaticResource SecondaryButton}" Content="_Agent 연결"
                             Click="OpenSettings_Click" />
                 </StackPanel>
             </Grid>
@@ -316,7 +304,7 @@
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
-                        <TextBlock x:Name="DevicesEmptyStateText" Text="현재 상태를 확인할 장비가 없습니다. 연결 설정을 확인해 주세요.">
+                        <TextBlock x:Name="DevicesEmptyStateText" Text="등록된 장비가 없습니다. 상단의 장비 관리에서 IP와 계정을 등록해 주세요.">
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyStateText}">
                                     <Setter Property="Visibility" Value="Collapsed" />
@@ -459,7 +447,7 @@
                                             <TextBlock FontWeight="SemiBold" Foreground="#92400E"
                                                        Text="조회 전용 show 명령만 실행됩니다." />
                                             <TextBlock Margin="0,4,0,0" FontSize="12" Foreground="#92400E"
-                                                       Text="설정 변경 명령과 자격 증명 출력 명령은 Agent가 차단합니다. 결과는 이 Viewer 창의 메모리에만 유지됩니다." />
+                                                       Text="한 줄짜리 show 명령을 실행할 수 있습니다. 결과는 이 Viewer 창의 메모리에만 유지되며 저장·내보내기 하지 않습니다." />
                                         </StackPanel>
                                     </Border>
 
@@ -566,7 +554,7 @@
                                 </Grid.RowDefinitions>
                                 <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                                     <StackPanel>
-                                        <TextBlock Text="구조화된 상태와 이벤트만 수신합니다. Telnet 원문·자격 증명은 원격 수집 PC에만 남습니다."
+                                        <TextBlock Text="장비·계정·감시 이력은 Viewer가 관리하고 Agent는 Telnet 접속만 중계합니다."
                                                    Foreground="#1E40AF" />
                                         <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="#1E40AF">
                                             <Run Text="{Binding CollectorVersion, Mode=OneWay}" /><Run Text=" · " />
@@ -760,7 +748,7 @@
                                AutomationProperties.LiveSetting="Polite" />
                 </StackPanel>
                 <TextBlock Grid.Column="1" HorizontalAlignment="Right" FontSize="12"
-                           Text="구조화 상태만 표시 · 원문은 원격 수집 PC에 보관"
+                           Text="장비 계정은 Viewer 사용자 DPAPI 보호 · 수동 원문은 화면 메모리에만 유지"
                            Foreground="{StaticResource MutedTextBrush}" />
             </Grid>
         </Border>

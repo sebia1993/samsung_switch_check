@@ -73,7 +73,7 @@ try {
     Push-Location -LiteralPath $install
     try {
         Write-SswBackgroundLifecycle -Code 'AGENT_START'
-        & $exe
+        & $exe --background
         $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
         Write-SswBackgroundLifecycle -Code 'AGENT_EXIT' -Detail "code=$exitCode"
         # 정상 종료도 예약 작업 관점에서는 예기치 않은 종료이므로 복구 정책을 작동시킵니다.

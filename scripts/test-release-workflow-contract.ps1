@@ -5,13 +5,15 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $workflowPath = Join-Path $repoRoot '.github\workflows\release.yml'
 $buildScriptPath = Join-Path $repoRoot 'scripts\build-release.ps1'
 $packageContractPath = Join-Path $repoRoot 'scripts\test-package-contract.ps1'
-foreach ($path in @($workflowPath, $buildScriptPath, $packageContractPath)) {
+$releaseProcessPath = Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md'
+foreach ($path in @($workflowPath, $buildScriptPath, $packageContractPath, $releaseProcessPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required release file is missing: $path" }
 }
 
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
 $packageContract = Get-Content -LiteralPath $packageContractPath -Raw
+$releaseProcess = Get-Content -LiteralPath $releaseProcessPath -Raw -Encoding UTF8
 
 function Assert-Pattern {
     param(
@@ -187,6 +189,10 @@ if ($buildScript -match 'RELEASE_NOTES_0\.[0-9]+\.[0-9]+_POC_KO\.md') {
 }
 Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must require the exact-version release note.'
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
+Assert-Pattern $releaseProcess 'git tag -a v0\.8\.0-poc' 'Release instructions must create an annotated tag.'
+if ($releaseProcess -match 'git tag -s') {
+    throw 'Release instructions must not claim a cryptographically signed tag without signature verification.'
+}
 
 if ($workflow -notmatch 'default:\s*(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)') {
     throw 'Manual build default version is missing or invalid.'

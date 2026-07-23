@@ -113,6 +113,7 @@ public partial class MainWindow : Window
     }
 
     private void ShowMiniWindow_Click(object sender, RoutedEventArgs e) => (Application.Current as App)?.ShowMiniWindow();
+    private void OpenDeviceManagement_Click(object sender, RoutedEventArgs e) => (Application.Current as App)?.OpenDeviceManagement();
     private void OpenSettings_Click(object sender, RoutedEventArgs e) => (Application.Current as App)?.OpenConnectionSettings();
 
     private async void ExportCsv_Click(object sender, RoutedEventArgs e) =>

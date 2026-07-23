@@ -19,7 +19,7 @@ public sealed class ViewerSettingsTests
 
         var clean = ViewerSettingsSanitizer.Sanitize(source);
 
-        Assert.Equal("http://monitor.example.test:18443", clean.AgentUri);
+        Assert.Equal("https://monitor.example.test:18443", clean.AgentUri);
         Assert.Equal(0, clean.LastEventSequence);
         Assert.Equal(1280, clean.MainWidth);
         Assert.Equal(900, clean.MainHeight);
@@ -27,10 +27,10 @@ public sealed class ViewerSettingsTests
     }
 
     [Theory]
-    [InlineData("http://monitor.example.test:18443", "http://monitor.example.test:18443")]
-    [InlineData("https://192.0.2.10:18443", "http://192.0.2.10:18443")]
-    [InlineData("https://monitor.example.test", "http://monitor.example.test:443")]
-    public void Sanitize_AcceptsHttpAndMigratesHttps(string input, string expected)
+    [InlineData("http://monitor.example.test:18443", "https://monitor.example.test:18443")]
+    [InlineData("https://192.0.2.10:18443", "https://192.0.2.10:18443")]
+    [InlineData("https://monitor.example.test", "https://monitor.example.test:18443")]
+    public void Sanitize_MigratesLegacyHttpToHttps(string input, string expected)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings { AgentUri = input });
 
@@ -53,9 +53,8 @@ public sealed class ViewerSettingsTests
     }
 
     [Theory]
-    [InlineData("10.10.10.20", "18443", "http://10.10.10.20:18443")]
-    [InlineData("monitor-pc.corp.local", "18443", "http://monitor-pc.corp.local:18443")]
-    [InlineData("localhost", "80", "http://localhost")]
+    [InlineData("10.10.10.20", "18443", "https://10.10.10.20:18443")]
+    [InlineData("monitor-pc.corp.local", "18443", "https://monitor-pc.corp.local:18443")]
     public void ConnectionInput_AcceptsIpv4OrDnsAndPort(string address, string port, string expected)
     {
         Assert.True(ViewerSettingsSanitizer.TryBuildAgentUri(address, port, out var uri, out var reason));
@@ -69,6 +68,7 @@ public sealed class ViewerSettingsTests
     [InlineData("monitor pc", "18443")]
     [InlineData("monitor", "0")]
     [InlineData("monitor", "65536")]
+    [InlineData("monitor", "443")]
     [InlineData("monitor", "not-a-port")]
     public void ConnectionInput_RejectsUnsupportedValues(string address, string port) =>
         Assert.False(ViewerSettingsSanitizer.TryBuildAgentUri(address, port, out _, out _));
@@ -115,7 +115,7 @@ public sealed class ViewerSettingsTests
 
             Assert.Equal(ViewerSettingsLoadStatus.Ok, store.LastLoadStatus);
             Assert.False(loaded.DemoMode);
-            Assert.Equal("http://agent.example.test:18443", loaded.AgentUri);
+            Assert.Equal("https://agent.example.test:18443", loaded.AgentUri);
             Assert.False(loaded.MiniTopmost);
             Assert.Equal(1600, loaded.MainWidth);
             Assert.Equal(920, loaded.MainHeight);
@@ -123,7 +123,7 @@ public sealed class ViewerSettingsTests
             Assert.Equal(77, loaded.EventCursors["LEGACY-PIN-IDENTITY"]);
 
             var migratedJson = File.ReadAllText(path);
-            Assert.DoesNotContain("https://", migratedJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("http://", migratedJson, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("Certificate", migratedJson, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("Fingerprint", migratedJson, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("Bearer", migratedJson, StringComparison.OrdinalIgnoreCase);
@@ -149,7 +149,7 @@ public sealed class ViewerSettingsTests
 
             var loaded = store.Load();
 
-            Assert.True(loaded.DemoMode);
+            Assert.False(loaded.DemoMode);
             Assert.Equal(ViewerSettingsLoadStatus.Corrupt, store.LastLoadStatus);
             Assert.False(File.Exists(path));
             Assert.Single(Directory.GetFiles(folder, "viewer-settings.json.corrupt-*"));
