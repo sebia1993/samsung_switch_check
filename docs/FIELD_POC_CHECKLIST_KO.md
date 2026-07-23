@@ -1,126 +1,126 @@
-# 현장 POC 체크리스트
+# Samsung Switch Watch v0.8 현장 POC 체크리스트
 
-이 체크리스트는 회사망에서만 수행합니다. 실제 IP, 호스트명, 사용자명, MAC, 시리얼,
-Telnet 원문과 자격 증명을 외부로 반출하지 않습니다.
+실제 IP, ID, 비밀번호, 호스트명, MAC, 시리얼과 원문 출력은 이 문서에 기록하지 않습니다.
+결과는 `통과`, `실패`, `미검증`과 sanitized 오류 코드만 남깁니다.
 
-## A. 설치와 복구
+## 1. Agent 설치와 무창 실행
 
-- [ ] Agent·Viewer ZIP의 build provenance·release attestation과 ZIP 내부 매니페스트·SBOM 일치
-- [ ] Python/.NET 미설치 Windows x64에서 EXE 단독 실행
-- [ ] 한글 사용자 경로와 임시 폴더에서 Viewer 설치
-- [ ] Agent 신규 설치 후 서비스 자동 시작
-- [ ] RDP 로그오프 후에도 수집 지속
-- [ ] `-Preflight`가 시스템을 변경하지 않음
-- [ ] `-Repair -ReuseData` 후 DB·WAL/SHM·자격 증명·장비 설정 보존과 schema v5 전환
-- [ ] 기존 서비스 stopped 및 `-DoNotStart` Repair도 임시 readiness/schema 검증 후 stopped 복원
-- [ ] 성공한 v0.5 Repair만 현재·rotation 이전 설치기 소유 인증서와 구 서비스 secret 제거, 사용자 소유 인증서 보존
-- [ ] fault injection 실패 뒤 서비스 상태·환경·파일·DB·방화벽 rollback
-- [ ] Viewer 실패 설치 뒤 기존 EXE와 바로가기 복구
-- [ ] 재부팅 뒤 Agent 자동 복구와 Viewer 자동 시작 정책 확인
-- [ ] 기본 제거가 데이터를 보존하고 `-RemoveData`만 명시 삭제
+- [ ] Agent ZIP과 Viewer ZIP의 Release 검증 완료
+- [ ] `Install-or-Update-Agent.cmd`에서 UAC 승인
+- [ ] Viewer 관리 CIDR과 스위치 대상 CIDR을 최소 범위로 입력
+- [ ] `SamsungSwitchWatchAgent` 서비스가 `LocalService`, 자동 시작으로 등록됨
+- [ ] 서비스 실행 중 사용자 바탕 화면·작업 표시줄·트레이에 Agent 창이 없음
+- [ ] Agent EXE 직접 더블클릭 시 별도 프로세스가 남지 않음
+- [ ] RDP 연결 종료 후 서비스 계속 실행
+- [ ] 다른 Windows 사용자 로그인 후에도 닫을 Agent 창이 없음
+- [ ] PC 재부팅 후 사용자 로그인 전 서비스 자동 시작
+- [ ] 강제 프로세스 종료 후 5초/15초/60초 복구 정책 확인
 
-## B. 네트워크와 보안
+## 2. ProgramData와 HTTPS 신원
 
-- [ ] Agent → 각 스위치 TCP/23만 허용
-- [ ] Viewer → Agent TCP/18443만 허용
-- [ ] Agent HTTP 방화벽 RemoteAddress가 1~32개 고정 Viewer IPv4와 정확히 일치
-- [ ] CIDR·서브넷·DNS·축약형·16진수·선행 0 IPv4 입력 거부, 중복 주소 제거와 숫자 정렬
-- [ ] MpsSvc와 Domain/Private/Public 프로필 활성화, 기본 인바운드 Allow 및 외부 중첩 Allow 규칙 거부
-- [ ] `set-viewer-access.ps1` 실패 시 방화벽과 receipt 모두 이전 상태로 복구
-- [ ] 스위치 계정이 조회 전용이며 설정 명령이 거부됨
-- [ ] Telnet 경로가 격리 관리망 밖으로 나가지 않음
-- [ ] 자격 증명·DB·원문 파일 ACL이 서비스 SID와 관리자만 허용
-- [ ] SQLite raw blob에서 실제 명령 원문 평문 검색 불가
-- [ ] Viewer가 Agent 주소(IP 또는 DNS)와 포트만으로 연결·저장
-- [ ] UI에 `사내 관리망 전용 · 암호화/인증 없음` 경고 표시
-- [ ] 허용되지 않은 Viewer IPv4에서 HTTP/18443 연결이 방화벽으로 차단
-- [ ] 허용된 Viewer IPv4에서는 상태·SignalR·수동 점검·확인 API 동작
+관리자 PC에서 민감한 파일 이름이나 내용을 수집하지 않고 ACL만 확인합니다.
 
-## C. 모델별 Telnet 수집
+- [ ] `%ProgramData%\SamsungSwitchWatch`의 상속이 차단됨
+- [ ] SYSTEM, Administrators, Agent 서비스 SID만 허용됨
+- [ ] 일반 Users 및 로그인 사용자가 데이터 폴더를 읽을 수 없음
+- [ ] Viewer 최초 연결에서 지문·토큰 입력 없이 자동 연결됨
+- [ ] Viewer 재실행 후 같은 Agent를 계속 신뢰함
+- [ ] 다른 테스트 신원으로 바뀌면 Viewer가 연결을 차단함
+- [ ] 관리자가 확인한 재설치에서만 `Agent 신뢰 다시 설정` 동작
 
-아래 항목을 각 모델과 실제 펌웨어 조합별로 따로 기록합니다.
+## 3. 네트워크 경계
 
-| 모델 | 펌웨어 | 로그인 | `show port status` | 포트 대체 명령 | `show syslog tail num 100` / `show sylog tail num 100` | 로그 대체 명령 | 페이징 | 결과 |
-|---|---|---|---|---|---|---|---|---|
-| IES4224GP |  |  |  |  |  |  |  |  |
-| IES4028XP |  |  |  |  |  |  |  |  |
-| IES4226XP |  |  |  |  |  |  |  |  |
+- [ ] Viewer 관리 CIDR에서 Agent HTTPS/18443 연결 성공
+- [ ] 허용 범위 밖 테스트 PC에서 HTTPS/18443 차단
+- [ ] Public 방화벽 프로필에서 제품 규칙이 적용되지 않음
+- [ ] 대상 CIDR 안의 장비 TCP/23 요청 허용
+- [ ] 대상 CIDR 밖 테스트 주소가 `TARGET_NOT_ALLOWED`로 거부됨
+- [ ] 요청의 포트 23 이외 값이 거부됨
+- [ ] DNS 이름, IPv6, loopback과 link-local 대상이 거부됨
 
-- [ ] 실제 로그인/비밀번호 프롬프트 탐지
-- [ ] 로그인 배너가 길어도 실제 장비 프롬프트 캡처
-- [ ] 출력 본문의 `#`·`>` 행을 프롬프트로 오인하지 않음
-- [ ] ANSI/백스페이스형 `--More--` 처리
-- [ ] 명시적 empty 로그만 정상, 공백·부분 출력은 `INCOMPLETE_OUTPUT`
-- [ ] 미지원 명령만 `PARSER_UNSUPPORTED`, 다른 수집은 계속
-- [ ] 우선 명령 미지원 시 대체 명령 자동 선택, 재시작 후 선택 결과 재사용
-- [ ] 인증 실패 1회 후 circuit block 및 자격 증명 교체 후 복구
-- [ ] 장비별 동시 Telnet 세션 1개
-- [ ] 세션 예산 초과 명령 분할, 중간 종료 시 완료 결과 보존과 남은 명령 1회만 재접속
-- [ ] `COMMAND_TIMEOUT`·인증 실패에는 즉시 재접속하지 않음
-- [ ] 5대 이상 동시 due에서 기본 최대 4대만 병렬 실행
+## 4. Viewer 장비와 계정
 
-## D. 로그와 상태 변경
+각 모델에서 한 대씩 아래 항목을 반복합니다.
 
-- [ ] 최초 로그 조회가 기준선만 만들고 팝업을 만들지 않음
-- [ ] 새 로그 1건과 동일 문구 반복 2건을 서로 구분
-- [ ] 로그 buffer 순환 시 전체를 신규로 만들지 않음
-- [ ] 최초 상태가 업링크 Down이면 즉시 활성 Critical 생성
-- [ ] `UP → DOWN`, 지속 시간, `DOWN → UP` 복구 1회 표시
-- [ ] 장애 지속 중 반복 팝업 없음
-- [ ] 운영자 확인이 복구로 처리되지 않음
-- [ ] uptime 감소와 로그 초기화를 재시작 사건으로 상관 처리
-- [ ] Agent 재시작 후 활성 condition 중복 생성 없음
-- [ ] DB change snapshot이 생성·확인·복구 당시 값으로 유지
+| 모델 | 등록 | 로그인 | enable | 결과 |
+|---|---|---|---|---|
+| IES4224GP | 미검증 | 미검증 | 미검증 | |
+| IES4028XP | 미검증 | 미검증 | 미검증 | |
+| IES4226XP | 미검증 | 미검증 | 미검증 | |
 
-## E. Viewer와 연결 장애
+- [ ] Viewer에서 장비명, 모델, IPv4, ID, 로그인 PW 입력
+- [ ] enable PW 없는 장비 저장·접속 시험
+- [ ] enable PW가 필요한 장비의 `> → enable → #` 확인
+- [ ] 편집 화면과 API 응답에 기존 PW가 노출되지 않음
+- [ ] Viewer 종료 후 Agent PC에 장비·계정 자료가 남지 않음
+- [ ] 다른 Windows 사용자로 Viewer 자료 복사 시 DPAPI 복호화 불가
 
-- [ ] API 정상/SignalR 재연결을 `실시간 저하`로 표시
-- [ ] Agent Offline에서 cache 장비를 정상으로 오인하지 않고 `미확인` 표시
-- [ ] 마지막 정상 수신 시각이 트레이·미니 창·대시보드에 일치
-- [ ] Viewer 종료 중 발생한 이벤트가 재연결 catch-up 요약 1건으로 표시
-- [ ] retention reset 기준선이 과거 이벤트 팝업을 만들지 않음
-- [ ] 100개 Warning 중 Critical이 2초 안에 우선 표시
-- [ ] 알림 클릭 시 해당 장비·이벤트로 이동
-- [ ] 전체/미확인/새 로그/장애/복구 필터와 검색 결과 정확
-- [ ] Agent authoritative 미확인 수와 현재 화면 표시 수를 구분
-- [ ] CSV가 UTF-8 BOM이며 Excel에서 한글이 정상
-- [ ] CSV/JSON export에 실제 device ID·IP·호스트·MAC·사용자·원문 없음
-- [ ] 200% DPI, 키보드 전용, 고대비에서 핵심 상태 판독 가능
-- [ ] 항상 위 미니 창, 트레이 최소화, 시작 시 트레이 정책 동작
+## 5. 명령과 출력
 
-## F. 장애와 장시간 운전
+각 모델에서 지원 여부를 기록합니다.
 
-- [ ] Agent PC 절전·복귀
-- [ ] Agent PC 재부팅
-- [ ] Viewer PC 절전·복귀
-- [ ] 스위치 TCP timeout·연결 거부·인증 실패 구분
-- [ ] Agent HTTP 경로가 일반 사용자망·인터넷으로 라우팅되지 않음
-- [ ] DB read-only·디스크 부족·integrity 실패에서 수집 쓰기 중단
-- [ ] DB 실패 중 `/health/live`는 유지, `/health/ready`는 실패
-- [ ] DB 복구 후 수집 재개와 이벤트 cursor 연속성
-- [ ] 24시간 이상 soak에서 메모리·파일·Telnet 세션 증가 없음
-- [ ] raw 500MB 제한과 7일 retention 동작
+| 명령 | IES4224GP | IES4028XP | IES4226XP |
+|---|---|---|---|
+| `show port status` | 미검증 | 미검증 | 미검증 |
+| `show sylog tail num 100` | 미검증 | 미검증 | 미검증 |
+| `show syslog tail num 100` | 미검증 | 미검증 | 미검증 |
 
-## G. Viewer 읽기 전용 장비 명령
+- [ ] 지원 명령 출력이 Viewer에 표시됨
+- [ ] 미지원 명령이 장비 Down이 아닌 `명령 미지원`으로 표시됨
+- [ ] 한 줄 `show running-config` 실행 가능
+- [ ] 줄바꿈, `;`, `&`, `|`, configure, shutdown, reload 요청 차단
+- [ ] 64KiB 초과 합성 출력에 잘림 표시
+- [ ] 수동 명령과 원문 출력이 Agent 로그·DB·진단에 없음
+- [ ] Viewer 재실행 후 이전 수동 원문이 복원되지 않음
 
-- [ ] 기본 설치에서 `features.readOnlyQueries.enabled=false`이고 Viewer 탭이 이유와 함께 비활성
-- [ ] `-EnableReadOnlyQueries` 설치에서만 탭 활성, Repair 옵션 생략 시 기존 활성 여부와 제한값 보존
-- [ ] `show port status`, `show syslog tail num 100`, `show sylog tail num 100`을 각 모델에서 개별 확인
-- [ ] 한 줄 128자 제한, 줄바꿈·제어문자·세미콜론·파이프·앰퍼샌드·백틱·달러·꺾쇠 거부
-- [ ] `running-config`, `startup-config`, 계정·AAA·RADIUS·TACACS·SNMP community·비밀번호·
-  secret·key·crypto 관련 조회가 자격 증명 조회와 TCP 연결 전에 `QUERY_COMMAND_BLOCKED`
-- [ ] 허용 명령의 미지원 응답이 설정 모드 진입이나 후속 문자열 실행 없이 안전하게 종료
-- [ ] 65,536바이트 초과 UTF-8 출력이 깨진 문자 없이 잘리고 `truncated=true`
-- [ ] Viewer 복사·지우기·종료 뒤 결과가 명령 이력, 설정, CSV/JSON export에 남지 않음
-- [ ] Agent snapshot/event/raw DB와 감사에서 명령 문자열·결과 본문 평문 검색 불가
-- [ ] 감사에는 장비 ID, Viewer IP, 명령 SHA-256, 소요 시간, 결과 코드와 출력 크기만 기록
-- [ ] Viewer IPv4별 12회/분 초과는 `QUERY_RATE_LIMITED`, 장비 잠금 5초 초과는 `DEVICE_BUSY`
-- [ ] 명령 응답 30초·전체 60초 제한, Viewer 취소 뒤 Telnet 연결과 장비 잠금 정리
-- [ ] 장비별 수동 조회 중에도 다른 장비의 주기 수집이 계속되고 같은 장비 수집이 기아 상태가 되지 않음
-- [ ] 실제 HTTP/18443 패킷에 결과가 평문임을 확인하고 격리망·고정 Viewer IPv4 범위 밖 접근 차단
+`show running-config` 원문은 체크리스트, 캡처, 메일과 이슈에 첨부하지 않습니다.
 
-## 완료 판정
+## 6. 세션 유지 시간과 정리
 
-세 모델의 실제 펌웨어 행이 모두 채워지고, Critical/복구·오프라인 catch-up·설치 rollback·
-장시간 soak·방화벽 경계·코드 서명까지 승인되어야 v1 운영 후보로 승격할 수 있습니다.
-로컬 합성 테스트 통과만으로 이 표를 완료 처리하지 않습니다.
+- [ ] `exec-timeout 5 0` 장비에서 접속 시험 성공
+- [ ] 명령 완료 후 Telnet 세션 즉시 종료
+- [ ] 명령 단계 원격 종료 시 남은 명령만 새 세션으로 1회 재시도
+- [ ] 재연결 뒤 이미 완료된 명령이 반복 실행되지 않음
+- [ ] 수동 결과에 실제 세션 수와 재연결 횟수 표시
+- [ ] 인증 또는 enable 실패는 자동 재시도하지 않음
+- [ ] 명령 타임아웃은 자동 재시도하지 않음
+- [ ] 인증 실패 뒤 세션 잔존 없음
+- [ ] 명령 타임아웃 뒤 세션 잔존 없음
+- [ ] Viewer 취소 뒤 세션 잔존 없음
+- [ ] 같은 장비 동시 실행이 직렬화됨
+- [ ] 전체 동시 장비 실행이 최대 2개로 제한됨
+- [ ] 각 세션 최대 240초 경계 확인
+
+## 7. Viewer 주기 감시와 공백
+
+- [ ] Viewer 실행 중 설정한 주기로 감시 요청
+- [ ] Viewer 종료 시 Agent가 독립적으로 장비를 조회하지 않음
+- [ ] Viewer 종료 시간에 불필요한 Telnet 세션 없음
+- [ ] Viewer 재실행 후 `감시 공백` 표시
+- [ ] 공백 이후 기존 로그 100개를 모두 신규 이벤트로 오인하지 않음
+- [ ] 모델별 후보 syslog 명령 대체 동작
+- [ ] 동일 상태 지속 시 팝업 반복 없음
+- [ ] `Down → Up` 복구 이벤트 표시
+
+## 8. 업데이트와 rollback
+
+- [ ] v0.7 설치에서 v0.8 설치기가 업데이트 모드 자동 감지
+- [ ] 기존 Viewer 방화벽 주소와 장비 주소를 최소 `/32` CIDR로 이관
+- [ ] v0.8 재업데이트 시 관리 CIDR 재입력 없이 보존
+- [ ] 업데이트 전후 Agent HTTPS 신원 동일
+- [ ] 업데이트 전후 ProgramData ACL 동일
+- [ ] v0.7 자격 증명·SQLite 자료가 `legacy-v0.7-backup-*`으로 이동해 자동 삭제되지 않음
+- [ ] legacy 백업 폴더와 하위 항목은 SYSTEM, Administrators만 접근 가능하고 Agent 서비스 SID는 제외됨
+- [ ] 강제 readiness 실패 시 이전 프로그램 복구
+- [ ] 강제 readiness 실패 시 ProgramData와 방화벽 복구
+- [ ] rollback 후 기존 Agent가 이전 프로토콜로 다시 실행
+
+## 9. 진단과 인수 기준
+
+- [ ] `diagnose-agent.ps1`에 ID, PW, 장비 IP, 명령과 원문 없음
+- [ ] 실패가 `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
+      `COMMAND_TIMEOUT`, `PROMPT_PARSE_FAILED` 등으로 구분됨
+- [ ] 세 모델별 실제 펌웨어 버전과 검증 날짜를 사내 기록에만 보관
+- [ ] POC 한계와 Viewer 비실행 감시 공백을 운영자가 이해함
+
+모든 필수 항목이 통과하기 전에는 `현장 검증 완료` 또는 `운영 안정화 완료`로 표시하지 않습니다.

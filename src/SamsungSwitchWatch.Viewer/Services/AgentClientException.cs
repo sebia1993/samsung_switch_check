@@ -136,6 +136,15 @@ internal static class AgentClientErrors
     private static bool IsReadOnlyQueryCode(string? code) => code is
         "QUERY_DISABLED" or
         "QUERY_COMMAND_BLOCKED" or
+        "REQUEST_INVALID" or
+        "REQUEST_TOO_LARGE" or
+        "TARGET_NOT_ALLOWED" or
+        "IPV6_UNSUPPORTED" or
+        "AGENT_BUSY" or
+        "CONFIG_INVALID" or
+        "TLS_IDENTITY_INVALID" or
+        "ENABLE_FAILED" or
+        "OUTPUT_LIMIT_EXCEEDED" or
         "DEVICE_NOT_FOUND" or
         "DEVICE_BUSY" or
         "QUERY_RATE_LIMITED" or
@@ -162,20 +171,31 @@ internal static class ViewerConnectionMessages
         "AGENT_CONNECTION_REFUSED" => "Agent가 연결을 거부했습니다. 서비스 실행 상태와 방화벽을 확인해 주세요.",
         "AGENT_TIMEOUT" => "Agent 응답 시간이 초과되었습니다. 네트워크 경로를 확인해 주세요.",
         "AGENT_ACCESS_DENIED" => "Agent 접근이 거부되었습니다. Windows 방화벽의 허용 Viewer IPv4를 확인해 주세요.",
-        "AGENT_PROTOCOL_MISMATCH" => "Agent와 Viewer의 통신 방식이 다릅니다. Agent를 v0.7 이상으로 먼저 업데이트해 주세요.",
+        "AGENT_PROTOCOL_MISMATCH" => "Agent와 Viewer의 통신 방식이 다릅니다. Agent를 최신 버전으로 먼저 업데이트해 주세요.",
+        "AGENT_IDENTITY_CHANGED" => "이전에 연결한 Agent와 인증 정보가 다릅니다. Agent 교체 여부를 확인한 뒤 신뢰를 다시 설정해 주세요.",
         "AGENT_NOT_READY" or "STORAGE_WRITE_FAILED" => "Agent가 아직 상태 제공을 준비하지 못했습니다. Agent 상태를 확인해 주세요.",
         "AGENT_RESPONSE_INVALID" => "Agent 응답 형식이 올바르지 않습니다. Agent와 Viewer 버전을 확인해 주세요.",
         "QUERY_DISABLED" => "Agent에서 장비 명령 기능이 꺼져 있습니다. Agent 설치 설정을 확인해 주세요.",
         "QUERY_COMMAND_BLOCKED" => "안전 정책에 따라 이 명령은 실행할 수 없습니다. 허용된 show 조회 명령만 입력해 주세요.",
-        "DEVICE_NOT_FOUND" => "선택한 장비를 Agent 설정에서 찾지 못했습니다. 장비 목록을 새로고침해 주세요.",
+        "DEVICE_NOT_FOUND" or "VIEWER_DEVICE_NOT_FOUND" => "Viewer에 저장된 장비 정보를 찾지 못했습니다. 장비 관리에서 다시 확인해 주세요.",
+        "VIEWER_DEVICE_INVALID" => "장비 IP, 모델 또는 Telnet 포트가 올바르지 않습니다.",
+        "VIEWER_CONNECTION_TEST_REQUIRED" => "접속 시험에 성공한 뒤 주기 감시를 켜 주세요.",
         "DEVICE_BUSY" => "선택한 장비가 다른 점검을 수행 중입니다. 잠시 후 다시 시도해 주세요.",
+        "AGENT_BUSY" => "Agent가 다른 장비 요청을 처리 중입니다. 잠시 후 다시 시도해 주세요.",
+        "TARGET_NOT_ALLOWED" => "Agent에서 이 장비 관리망으로의 접속을 허용하지 않았습니다.",
+        "REQUEST_INVALID" or "IPV6_UNSUPPORTED" => "장비 IP, 모델 또는 요청 형식을 확인해 주세요.",
+        "REQUEST_TOO_LARGE" => "한 번에 전송한 명령이 너무 많거나 요청 크기가 너무 큽니다.",
+        "CONFIG_INVALID" => "Agent의 관리망 허용 설정이 올바르지 않습니다.",
+        "TLS_IDENTITY_INVALID" => "Agent의 HTTPS 식별 정보를 확인하지 못했습니다.",
         "QUERY_RATE_LIMITED" => "짧은 시간에 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.",
         "QUERY_TIMEOUT" or "COMMAND_TIMEOUT" => "장비 응답 시간이 초과되었습니다. Telnet 연결과 장비 상태를 확인해 주세요.",
-        "CREDENTIAL_NOT_FOUND" or "CREDENTIAL_DECRYPT_FAILED" or "CREDENTIAL_CORRUPT" or "CREDENTIAL_UNAVAILABLE" => "Agent에서 장비 자격 증명을 사용할 수 없습니다. Agent PC의 자격 증명을 확인해 주세요.",
-        "AUTH_FAILED" => "스위치 로그인이 실패했습니다. Agent PC에 저장된 장비 계정을 확인해 주세요.",
+        "CREDENTIAL_NOT_FOUND" or "CREDENTIAL_DECRYPT_FAILED" or "CREDENTIAL_CORRUPT" or "CREDENTIAL_UNAVAILABLE" or "VIEWER_CREDENTIAL_CORRUPT" => "Viewer에서 장비 계정을 사용할 수 없습니다. 장비 관리에서 비밀번호를 다시 저장해 주세요.",
+        "AUTH_FAILED" => "스위치 로그인이 실패했습니다. Viewer의 장비 ID와 비밀번호를 확인해 주세요.",
         "TCP_TIMEOUT" => "스위치 Telnet 연결 시간이 초과되었습니다. Agent PC에서 장비 경로를 확인해 주세요.",
         "LOGIN_PROMPT_NOT_FOUND" => "스위치 로그인 프롬프트를 인식하지 못했습니다. 모델 또는 펌웨어 출력을 확인해 주세요.",
         "PROMPT_PARSE_FAILED" => "스위치 명령 프롬프트를 인식하지 못했습니다. 모델 프로파일을 확인해 주세요.",
+        "ENABLE_FAILED" => "enable 권한 전환에 실패했습니다. Viewer의 enable 비밀번호를 확인해 주세요.",
+        "OUTPUT_LIMIT_EXCEEDED" => "장비 출력이 안전 제한을 초과했습니다. 더 범위가 좁은 show 명령을 사용해 주세요.",
         "TELNET_NEGOTIATION_FAILED" => "스위치와 Telnet 옵션 협상에 실패했습니다. 장비 Telnet 상태를 확인해 주세요.",
         "TELNET_SESSION_CLOSED" or "SESSION_CLOSED" => "명령 결과를 받기 전에 Telnet 세션이 종료되었습니다. 장비 세션 제한을 확인해 주세요.",
         _ => "Agent에 연결하지 못했습니다. 서비스와 네트워크 경로를 확인해 주세요."

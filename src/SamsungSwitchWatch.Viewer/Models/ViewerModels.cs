@@ -228,7 +228,9 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
     public bool HasCapabilityIssue => CapabilityCount == 0 || CapabilityIssueCount > 0;
     public string CapabilityText => CapabilityCount == 0
         ? "수집 기능 확인 중"
-        : $"수집 기능 확인 필요 · {CapabilityIssueCount}개";
+        : CapabilityIssueCount == 0
+            ? $"수집 기능 {SupportedCapabilityCount}/{CapabilityCount} 정상"
+            : $"수집 기능 확인 필요 · {CapabilityIssueCount}개";
 
     public string CollectionState
     {

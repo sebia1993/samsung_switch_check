@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260722-v5-simple-ui-figma-synced",
+  "runId": "ssw-20260723-v6-viewer-control-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -22,26 +22,47 @@
     "operationalStatesV2": "15:148",
     "pairingWizardV3Historical": "20:129",
     "historicalPairingWarning": "29:205",
-    "httpConnectionV4": "25:214",
-    "commandCapabilityV3": "22:131",
-    "dashboardSimpleV5": "25:138",
+    "httpConnectionV4Historical": "25:214",
+    "commandCapabilityV3Historical": "22:131",
+    "dashboardSimpleV5Historical": "25:138",
+    "dashboardViewerControlV6": "33:205",
+    "deviceManagementV6": "37:4",
+    "deviceCommandV6": "37:333",
+    "httpsConnectionV6": "36:2",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v4-http",
+    "version": "v6-viewer-control",
     "status": "figma-synced",
-    "fields": ["agentAddress", "httpPort"],
-    "defaultPort": 18443,
-    "warning": "사내 관리망 전용 · 암호화/인증 없음"
+    "agentTransport": "https",
+    "agentPort": 18443,
+    "telnetPort": 23,
+    "deviceCredentialOwner": "viewer-current-user-dpapi",
+    "agentState": "stateless",
+    "manualOutputPersistence": "memory-only",
+    "monitoringOwner": "viewer",
+    "fingerprintInput": false,
+    "pairingTokenInput": false
   },
-  "uiSimplification": {
-    "version": "v5-simple",
-    "status": "figma-synced",
-    "layout": "device-list-selected-device-events",
-    "primaryTerms": ["포트 상태", "장비 상태", "시스템 로그", "버전 정보"],
-    "diagnosticsTab": "수집 진단",
-    "minimumHelperFontSize": 12,
-    "apiOrDatabaseChanges": false
+  "operatorFlow": {
+    "deviceInputOrder": [
+      "displayName",
+      "model",
+      "ipAddress",
+      "loginId",
+      "loginPassword",
+      "enablePasswordOptional"
+    ],
+    "connectionTestRequiredBeforeMonitoring": true,
+    "failedTestMaySave": true,
+    "failedTestForcesMonitoringOff": true,
+    "viewerClosedStopsMonitoring": true,
+    "showMonitoringGapOnReopen": true,
+    "commonCommands": [
+      "show port status",
+      "show sylog tail num 100",
+      "show syslog tail num 100"
+    ]
   },
   "uxAudit": {
     "status": "completed",
@@ -50,12 +71,7 @@
     "roleScorecards": ["29:211", "29:212"],
     "evidenceImageFrames": ["29:228", "29:231", "29:234", "29:237", "29:240", "29:243"],
     "prioritySection": "29:250",
-    "operatorFlowSection": "29:271",
-    "verified": {
-      "missingFonts": 0,
-      "textBoundOverflows": 0,
-      "evidenceImagesPresent": 6
-    }
+    "operatorFlowSection": "29:271"
   },
   "componentSets": {
     "StatusBadge": "5:17",

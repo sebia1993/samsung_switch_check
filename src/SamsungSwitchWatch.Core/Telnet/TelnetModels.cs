@@ -6,7 +6,7 @@ public sealed record TelnetEndpoint(string Host, int Port = 23);
 
 public sealed class TelnetCredentials
 {
-    public TelnetCredentials(string username, string password)
+    public TelnetCredentials(string username, string password, string? enablePassword = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(username);
         ArgumentNullException.ThrowIfNull(password);
@@ -18,15 +18,26 @@ public sealed class TelnetCredentials
         {
             throw new ArgumentException("Telnet password must be 1 to 512 characters and contain no line or NUL characters.", nameof(password));
         }
+        if (enablePassword is not null &&
+            (enablePassword.Length is 0 or > 512 || enablePassword.IndexOfAny(['\r', '\n', '\0']) >= 0))
+        {
+            throw new ArgumentException(
+                "Enable password must be 1 to 512 characters and contain no line or NUL characters.",
+                nameof(enablePassword));
+        }
         Username = username;
         Password = password;
+        EnablePassword = enablePassword;
     }
 
     public string Username { get; }
 
     public string Password { get; }
 
-    public override string ToString() => "TelnetCredentials { Username = [REDACTED], Password = [REDACTED] }";
+    public string? EnablePassword { get; }
+
+    public override string ToString() =>
+        "TelnetCredentials { Username = [REDACTED], Password = [REDACTED], EnablePassword = [REDACTED] }";
 }
 
 public sealed record TelnetTimeouts(
@@ -72,11 +83,33 @@ public sealed record CommandOutput(
     string Command,
     string RawOutput,
     string NormalizedOutput,
-    DateTimeOffset CollectedAt);
+    DateTimeOffset CollectedAt)
+{
+    public override string ToString() =>
+        "CommandOutput { CommandId = [REDACTED], Command = [REDACTED], Output = [REDACTED] }";
+}
 
 public sealed record TelnetSessionResult(
     string Model,
     IReadOnlyList<CommandOutput> Outputs,
+    DateTimeOffset StartedAt,
+    DateTimeOffset CompletedAt)
+{
+    public int SessionCount { get; init; } = 1;
+
+    public int ReconnectCount { get; init; }
+}
+
+public enum TelnetPrivilege
+{
+    User,
+    Privileged
+}
+
+public sealed record TelnetInteractiveResult(
+    IReadOnlyList<CommandOutput> Outputs,
+    TelnetPrivilege Privilege,
+    char PromptTerminator,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt)
 {

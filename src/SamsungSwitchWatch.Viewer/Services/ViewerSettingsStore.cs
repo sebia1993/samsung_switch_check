@@ -8,8 +8,9 @@ namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class ViewerSettings
 {
-    public bool DemoMode { get; set; } = true;
-    public string AgentUri { get; set; } = "http://localhost:18443";
+    public bool DemoMode { get; set; }
+    public string AgentUri { get; set; } = "https://localhost:18443";
+    public Dictionary<string, string> AgentTrustPins { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public long LastEventSequence { get; set; }
     public Dictionary<string, long> EventCursors { get; set; } = new(StringComparer.Ordinal);
     public bool MiniTopmost { get; set; } = true;
@@ -20,6 +21,30 @@ public sealed class ViewerSettings
     public double MainWidth { get; set; } = 1440;
     public double MainHeight { get; set; } = 900;
     public bool StartMinimizedToTray { get; set; }
+
+    public string BuildAgentAuthority()
+    {
+        var normalizedUri = ViewerSettingsSanitizer.NormalizeAgentUri(AgentUri);
+        return Uri.TryCreate(normalizedUri, UriKind.Absolute, out var uri)
+            ? uri.GetLeftPart(UriPartial.Authority).ToUpperInvariant()
+            : string.Empty;
+    }
+
+    public bool TryGetAgentTrustPin(out string pin) =>
+        AgentTrustPins.TryGetValue(BuildAgentAuthority(), out pin!);
+
+    public void SetAgentTrustPin(string pin)
+    {
+        var authority = BuildAgentAuthority();
+        if (authority.Length == 0) throw new InvalidOperationException("VIEWER_CONNECTION_REQUIRED");
+        AgentTrustPins[authority] = pin;
+    }
+
+    public void RemoveAgentTrustPin()
+    {
+        var authority = BuildAgentAuthority();
+        if (authority.Length > 0) AgentTrustPins.Remove(authority);
+    }
 
     public string BuildAgentIdentity(string agentId)
     {
@@ -54,6 +79,10 @@ public static class ViewerSettingsSanitizer
         {
             DemoMode = input.DemoMode,
             AgentUri = NormalizeAgentUri(input.AgentUri),
+            AgentTrustPins = (input.AgentTrustPins ?? new Dictionary<string, string>())
+                .Where(item => item.Key.Length is > 0 and <= 256 && IsSha256Hex(item.Value))
+                .Take(32)
+                .ToDictionary(item => item.Key, item => item.Value.ToUpperInvariant(), StringComparer.OrdinalIgnoreCase),
             LastEventSequence = Math.Max(0, input.LastEventSequence),
             EventCursors = (input.EventCursors ?? new Dictionary<string, long>())
                 .Where(item => item.Key.Length is > 0 and <= 128)
@@ -74,6 +103,7 @@ public static class ViewerSettingsSanitizer
     {
         DemoMode = source.DemoMode,
         AgentUri = source.AgentUri,
+        AgentTrustPins = new Dictionary<string, string>(source.AgentTrustPins, StringComparer.OrdinalIgnoreCase),
         LastEventSequence = source.LastEventSequence,
         EventCursors = new Dictionary<string, long>(source.EventCursors, StringComparer.Ordinal),
         MiniTopmost = source.MiniTopmost,
@@ -94,9 +124,9 @@ public static class ViewerSettingsSanitizer
     {
         agentUri = string.Empty;
         var address = addressInput?.Trim() ?? string.Empty;
-        if (!int.TryParse(portInput?.Trim(), out var port) || port is < 1 or > 65535)
+        if (!int.TryParse(portInput?.Trim(), out var port) || port != DefaultAgentPort)
         {
-            reason = "포트는 1~65535 범위의 숫자여야 합니다.";
+            reason = $"Agent HTTPS 포트는 {DefaultAgentPort}을 사용합니다.";
             return false;
         }
         if (!IsSupportedHost(address))
@@ -107,7 +137,7 @@ public static class ViewerSettingsSanitizer
 
         try
         {
-            agentUri = new UriBuilder(Uri.UriSchemeHttp, address, port).Uri
+            agentUri = new UriBuilder(Uri.UriSchemeHttps, address, port).Uri
                 .GetLeftPart(UriPartial.Authority)
                 .TrimEnd('/');
             reason = string.Empty;
@@ -126,7 +156,7 @@ public static class ViewerSettingsSanitizer
         if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
         {
             address = uri.Host;
-            port = uri.Port;
+            port = DefaultAgentPort;
             return;
         }
 
@@ -138,11 +168,11 @@ public static class ViewerSettingsSanitizer
     {
         var normalized = NormalizeAgentUri(settings.AgentUri);
         if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-            || uri.Scheme != Uri.UriSchemeHttp
-            || uri.Port is < 1 or > 65535
+            || uri.Scheme != Uri.UriSchemeHttps
+            || uri.Port != DefaultAgentPort
             || !IsSupportedHost(uri.Host))
         {
-            reason = "Agent 주소와 포트를 확인해 주세요.";
+            reason = "Agent 주소를 확인해 주세요.";
             return false;
         }
 
@@ -163,9 +193,7 @@ public static class ViewerSettingsSanitizer
 
         try
         {
-            // v0.5.x settings used HTTPS. Preserve the same host and effective
-            // port while moving the connection to the v0.6 HTTP transport.
-            return new UriBuilder(Uri.UriSchemeHttp, uri.Host, uri.Port).Uri
+            return new UriBuilder(Uri.UriSchemeHttps, uri.Host, DefaultAgentPort).Uri
                 .GetLeftPart(UriPartial.Authority)
                 .TrimEnd('/');
         }
@@ -196,6 +224,12 @@ public static class ViewerSettingsSanitizer
         IsFinite(value) ? Math.Clamp(value, -32000, 32000) : -32000;
 
     private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
+
+    private static bool IsSha256Hex(string? value) =>
+        value is { Length: 64 } && value.All(character =>
+            character is >= '0' and <= '9'
+                or >= 'A' and <= 'F'
+                or >= 'a' and <= 'f');
 }
 
 public sealed class ViewerSettingsStore
@@ -225,8 +259,8 @@ public sealed class ViewerSettingsStore
                 return new ViewerSettings();
             }
 
-            // Legacy certificate and token properties are intentionally ignored by
-            // System.Text.Json. A subsequent Save writes only the v0.6 HTTP model.
+            // Legacy manually-entered fingerprint and token fields are ignored.
+            // v0.8 stores only automatic per-Agent trust pins.
             var storedJson = File.ReadAllText(_settingsPath);
             var settings = JsonSerializer.Deserialize<ViewerSettings>(storedJson, JsonOptions);
             settings = ViewerSettingsSanitizer.Sanitize(settings);

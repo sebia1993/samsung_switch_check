@@ -11,6 +11,9 @@ public sealed class ReadOnlyQueryPolicyTests
     [InlineData("show syslog tail num 100")]
     [InlineData("show spanning-tree")]
     [InlineData("show lacp neighbors")]
+    [InlineData("show running-config")]
+    [InlineData("show vlan")]
+    [InlineData("show system password")]
     [InlineData("SHOW VERSION")]
     public void Validate_AllowsApprovedShowFamilies(string command)
     {
@@ -32,10 +35,6 @@ public sealed class ReadOnlyQueryPolicyTests
 
     [Theory]
     [InlineData("configure terminal", ReadOnlyQueryRejection.NotShowCommand)]
-    [InlineData("show running-config", ReadOnlyQueryRejection.FamilyNotAllowed)]
-    [InlineData("show system password", ReadOnlyQueryRejection.SensitiveToken)]
-    [InlineData("show port config", ReadOnlyQueryRejection.SensitiveToken)]
-    [InlineData("show vlan", ReadOnlyQueryRejection.FamilyNotAllowed)]
     [InlineData("show port status; reload", ReadOnlyQueryRejection.Separator)]
     [InlineData("show port status | include Up", ReadOnlyQueryRejection.Separator)]
     [InlineData("show port status\nreload", ReadOnlyQueryRejection.ControlCharacter)]

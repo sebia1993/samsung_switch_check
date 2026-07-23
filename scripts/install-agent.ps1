@@ -2,553 +2,866 @@
     [string]$SourceDirectory = $PSScriptRoot,
     [string]$InstallDirectory = "$env:ProgramFiles\SamsungSwitchWatch\Agent",
     [string]$DataDirectory = "$env:ProgramData\SamsungSwitchWatch",
-    [string]$AgentId = 'agent-poc-01',
-    [string]$SwitchId = 'ACCESS-SW-01',
-    [string]$SwitchDisplayName = 'Samsung access switch',
-    [string]$SwitchHost = '192.0.2.10',
-    [ValidateRange(1, 65535)][int]$SwitchPort = 23,
-    [ValidateSet('IES4224GP', 'IES4028XP', 'IES4226XP')][string]$SwitchModel = 'IES4224GP',
-    [string]$CredentialId = 'samsung-switch-readonly',
-    [string]$UplinkPort = '24',
-    [string]$SwitchesJsonPath,
-    [ValidateRange(1, 65535)][int]$HttpPort = 18443,
-    [ValidateCount(1, 32)][string[]]$ViewerRemoteAddress,
-    [switch]$MockMode,
-    [switch]$EnableReadOnlyQueries,
-    [switch]$DoNotStart,
-    [switch]$Preflight,
-    [switch]$Repair,
-    [switch]$ReuseData
+    [string]$AgentId = "agent-$env:COMPUTERNAME",
+    [string[]]$ClientManagementCidrs,
+    [string[]]$AllowedTargetCidrs,
+    [switch]$Preflight
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $serviceName = Get-SswAgentServiceName
-$firewallRuleName = 'Samsung Switch Watch Agent HTTP'
-$legacyFirewallRuleName = 'Samsung Switch Watch Agent HTTPS'
+$httpsPort = 18443
 $source = [IO.Path]::GetFullPath($SourceDirectory)
 $install = [IO.Path]::GetFullPath($InstallDirectory)
 $data = [IO.Path]::GetFullPath($DataDirectory)
 $sourceExe = Join-Path $source 'SamsungSwitchWatch.Agent.exe'
 $sourceManifestPath = Join-Path $source 'BUILD-MANIFEST.json'
-$serviceExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
-$productionConfig = Join-Path $install 'appsettings.Production.json'
+$installedExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
+$installedConfigPath = Join-Path $install 'appsettings.Production.json'
 $receiptPath = Join-Path $data 'install-receipt.json'
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-$existingFirewallRule = Get-SswAgentFirewallSnapshot -DisplayName $firewallRuleName
-$legacyFirewallRule = Get-SswAgentFirewallSnapshot -DisplayName $legacyFirewallRuleName
-$existingReceipt = $null
-$existingReceiptVersion = 0
-$installedEnvironment = @()
-$legacyOwnedCertificateThumbprints = @()
-$enableReadOnlyQueriesWasSpecified = $PSBoundParameters.ContainsKey('EnableReadOnlyQueries')
+$isUpdate = $null -ne $existingService
+$legacyBackgroundTaskName = Get-SswAgentBackgroundTaskName
+$legacyBackgroundTaskDescription = 'Owned by SamsungSwitchWatch current-user background installer v1'
+$legacyBackgroundInstall = [IO.Path]::GetFullPath(
+    (Join-Path $env:LOCALAPPDATA 'Programs\SamsungSwitchWatch\Agent'))
+$legacyBackgroundData = [IO.Path]::GetFullPath(
+    (Join-Path $env:LOCALAPPDATA 'SamsungSwitchWatch\AgentData'))
+$legacyBackgroundRunner = Join-Path $legacyBackgroundInstall 'run-agent-background.ps1'
+$legacyBackgroundExe = Join-Path $legacyBackgroundInstall 'SamsungSwitchWatch.Agent.exe'
+$legacyBackgroundReceiptPath = Join-Path $legacyBackgroundData 'background-install-receipt.json'
+$legacyBackgroundOwnerSid = Get-SswCurrentUserSid
+$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
-function ConvertTo-SswValidatedSwitch {
-    param([Parameter(Mandatory = $true)][object]$InputSwitch)
-
-    $forbiddenProperty = @($InputSwitch.PSObject.Properties.Name | Where-Object { $_ -match '(?i)password|secret|token|community|username' }) | Select-Object -First 1
-    if ($forbiddenProperty) { throw "스위치 목록 JSON에는 자격 증명 값을 포함할 수 없습니다: $forbiddenProperty" }
-    $id = [string]$InputSwitch.Id
-    $credential = [string]$InputSwitch.CredentialId
-    $displayName = [string]$InputSwitch.DisplayName
-    $hostAddress = [string]$InputSwitch.Host
-    $uplink = [string]$InputSwitch.UplinkPort
-    $model = [string]$InputSwitch.Model
-    if ([string]::IsNullOrWhiteSpace($id) -or $id.Length -gt 64 -or $id -notmatch '^[A-Za-z0-9_-]+$') {
-        throw '각 Switch Id는 64자 이하의 영문자, 숫자, 하이픈, 밑줄만 사용할 수 있습니다.'
-    }
-    if ([string]::IsNullOrWhiteSpace($credential) -or $credential.Length -gt 64 -or $credential -notmatch '^[A-Za-z0-9_-]+$') {
-        throw "각 CredentialId는 64자 이하의 안전한 식별자여야 합니다: $id"
-    }
-    if ([string]::IsNullOrWhiteSpace($displayName) -or $displayName.Length -gt 128 -or $displayName -match '[\x00-\x1F\x7F]') {
-        throw "각 DisplayName은 제어문자가 없는 128자 이하 문자열이어야 합니다: $id"
-    }
-    if ($model -notin @('IES4224GP', 'IES4028XP', 'IES4226XP')) { throw "지원하지 않는 스위치 모델입니다: $id / $model" }
-    $parsedAddress = $null
-    if (-not [Net.IPAddress]::TryParse($hostAddress, [ref]$parsedAddress) -or
-        $parsedAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
-        throw "각 Host는 유효한 IPv4 주소여야 합니다: $id"
-    }
-    $portValue = 0
-    if (-not [int]::TryParse([string]$InputSwitch.Port, [ref]$portValue) -or $portValue -lt 1 -or $portValue -gt 65535) {
-        throw "각 Port는 1~65535 범위여야 합니다: $id"
-    }
-    if ([string]::IsNullOrWhiteSpace($uplink) -or $uplink.Length -gt 32 -or $uplink -notmatch '^[A-Za-z0-9._/-]+$') {
-        throw "각 UplinkPort는 32자 이하의 안전한 포트 식별자여야 합니다: $id"
-    }
-    return [ordered]@{ Id = $id; DisplayName = $displayName; Model = $model; Host = $parsedAddress.ToString(); Port = $portValue; CredentialId = $credential; UplinkPort = $uplink }
+function Read-SswJson {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
+    try { return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw "$Label is invalid JSON: $($_.Exception.Message)" }
 }
 
-function Get-SswLegacyHttpPort {
-    param([Parameter(Mandatory = $true)][object]$Config)
-    $https = $Config.Agent.PSObject.Properties['Https']
-    if ($https -and $https.Value) { return [int]$https.Value.Port }
-    $listen = [string]$Config.Agent.ListenUrl
-    $uri = $null
-    if ([Uri]::TryCreate($listen, [UriKind]::Absolute, [ref]$uri)) { return $uri.Port }
-    return 18443
-}
-
-function New-SswProductionConfiguration {
+function Resolve-SswCidrInput {
     param(
-        [Parameter(Mandatory = $true)][object[]]$Switches,
-        [AllowNull()][object]$ExistingConfig
+        [AllowNull()][string[]]$Requested,
+        [AllowNull()][string[]]$Preserved,
+        [Parameter(Mandatory = $true)][string]$Prompt
     )
 
-    if ($ExistingConfig) {
-        $migrated = $ExistingConfig | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-        foreach ($removedProperty in @('Https', 'PairingCodeLifetimeMinutes', 'TokenPepper', 'Tokens')) {
-            $migrated.Agent.PSObject.Properties.Remove($removedProperty)
-        }
-        $migrated.Agent | Add-Member -NotePropertyName AgentId -NotePropertyValue $AgentId -Force
-        $migrated.Agent | Add-Member -NotePropertyName ListenUrl -NotePropertyValue "http://0.0.0.0:$HttpPort" -Force
-        $migrated.Agent | Add-Member -NotePropertyName DataDirectory -NotePropertyValue $data -Force
-        $migrated.Agent | Add-Member -NotePropertyName MockMode -NotePropertyValue ([bool]$MockMode) -Force
-        $migrated.Agent | Add-Member -NotePropertyName EnableSimulator -NotePropertyValue ([bool]$MockMode) -Force
-        $migrated.Agent | Add-Member -NotePropertyName Switches -NotePropertyValue $Switches -Force
-        if ($enableReadOnlyQueriesWasSpecified) {
-            $migrated.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $true -Force
-        }
-        elseif (-not $migrated.Agent.PSObject.Properties['EnableReadOnlyQueries']) {
-            $migrated.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $false -Force
-        }
-        foreach ($readOnlyQueryDefault in ([ordered]@{
-            ReadOnlyQueryMaxCommandLength = 128
-            ReadOnlyQueryMaxOutputBytes = 65536
-            ReadOnlyQueryRateLimitPerMinute = 12
-            ReadOnlyQueryDeviceWaitSeconds = 5
-            ReadOnlyQueryTotalTimeoutSeconds = 60
-        }).GetEnumerator()) {
-            if (-not $migrated.Agent.PSObject.Properties[$readOnlyQueryDefault.Key]) {
-                $migrated.Agent | Add-Member -NotePropertyName $readOnlyQueryDefault.Key `
-                    -NotePropertyValue $readOnlyQueryDefault.Value
-            }
-        }
-        return $migrated
+    if ($Requested -and @($Requested).Count -gt 0) {
+        return @(ConvertTo-SswIpv4Cidrs -Cidr @($Requested))
     }
+    if ($Preserved -and @($Preserved).Count -gt 0) {
+        return @(ConvertTo-SswIpv4Cidrs -Cidr @($Preserved))
+    }
+    $answer = Read-Host $Prompt
+    $entries = @($answer.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($entries.Count -eq 0) {
+        throw 'CIDR 값이 비어 있습니다. 예시처럼 네트워크 주소와 /숫자를 함께 입력하세요.'
+    }
+    try { return @(ConvertTo-SswIpv4Cidrs -Cidr $entries) }
+    catch { throw "CIDR 입력 형식이 올바르지 않습니다. 예: 10.20.30.0/24. 상세: $($_.Exception.Message)" }
+}
+
+function New-SswExecutorConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedAgentId,
+        [Parameter(Mandatory = $true)][string[]]$TargetCidrs
+    )
+
     return [ordered]@{
         Agent = [ordered]@{
-            AgentId = $AgentId
-            ListenUrl = "http://0.0.0.0:$HttpPort"
+            AgentId = $ResolvedAgentId
+            ListenUrl = 'https://0.0.0.0:18443'
             DataDirectory = $data
-            MockMode = [bool]$MockMode
-            EnablePolling = $true
-            EnableSimulator = [bool]$MockMode
-            SchedulerTickSeconds = 1
-            EnableReadOnlyQueries = [bool]$EnableReadOnlyQueries
-            ReadOnlyQueryMaxCommandLength = 128
-            ReadOnlyQueryMaxOutputBytes = 65536
-            ReadOnlyQueryRateLimitPerMinute = 12
-            ReadOnlyQueryDeviceWaitSeconds = 5
-            ReadOnlyQueryTotalTimeoutSeconds = 60
-            Retention = [ordered]@{ RawDays = 7; RawMaxMegabytes = 500; EventDays = 90; AuditDays = 180 }
-            Switches = $Switches
+            MockMode = $false
+            AllowedTargetCidrs = @($TargetCidrs)
+            MaxConcurrentExecutions = 2
+            RateLimitPerMinute = 60
+            MaxRequestBodyBytes = 32768
+            MaxCommandsPerRequest = 8
+            MaxCommandLength = 128
+            MaxOutputBytes = 65536
+            Telnet = [ordered]@{
+                MaxSessionSeconds = 240
+                ImmediateSessionCloseRetryCount = 1
+                ImmediateSessionCloseRetryDelaySeconds = 2
+            }
         }
-        Logging = [ordered]@{ LogLevel = [ordered]@{ Default = 'Information'; 'Microsoft.AspNetCore' = 'Warning' } }
+        Logging = [ordered]@{
+            LogLevel = [ordered]@{ Default = 'Information'; 'Microsoft.AspNetCore' = 'Warning' }
+        }
         AllowedHosts = '*'
     }
 }
 
-Write-SswStep '설치 전 검사'
-if ($env:OS -ne 'Windows_NT') { throw 'Agent는 Windows x64에서만 설치할 수 있습니다.' }
+function Get-SswLegacyBackgroundTaskArguments {
+    return "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$legacyBackgroundRunner`" -InstallDirectory `"$legacyBackgroundInstall`""
+}
+
+function Get-SswProcessOwnerSid {
+    param([Parameter(Mandatory = $true)][object]$Process)
+
+    try {
+        $owner = Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -ErrorAction Stop
+        return [string]$owner.Sid
+    }
+    catch { return $null }
+}
+
+function Get-SswOwnedLegacyBackgroundProcesses {
+    $owned = @()
+    foreach ($process in @(Get-CimInstance Win32_Process `
+        -Filter "Name='SamsungSwitchWatch.Agent.exe'" -ErrorAction SilentlyContinue)) {
+        $path = [string]$process.ExecutablePath
+        if ((Get-SswProcessOwnerSid -Process $process) -eq $legacyBackgroundOwnerSid -and
+            $path -and $path.Equals($legacyBackgroundExe, [StringComparison]::OrdinalIgnoreCase)) {
+            $owned += $process
+        }
+    }
+    return $owned
+}
+
+function Test-SswOwnedLegacyBackgroundTask {
+    param([AllowNull()][object]$Task)
+
+    if (-not $Task -or
+        [string]$Task.TaskName -ne $legacyBackgroundTaskName -or
+        [string]$Task.TaskPath -ne '\' -or
+        [string]$Task.Description -ne $legacyBackgroundTaskDescription) {
+        return $false
+    }
+    $actions = @($Task.Actions)
+    if ($actions.Count -ne 1) { return $false }
+    try { $taskOwnerSid = ConvertTo-SswIdentitySid -Identity ([string]$Task.Principal.UserId) }
+    catch { return $false }
+
+    return $taskOwnerSid -eq $legacyBackgroundOwnerSid -and
+        ([string]$Task.Principal.RunLevel -in @('Limited', 'LeastPrivilege')) -and
+        ([string]$actions[0].Execute).Equals($windowsPowerShell, [StringComparison]::OrdinalIgnoreCase) -and
+        ([string]$actions[0].Arguments).Equals(
+            (Get-SswLegacyBackgroundTaskArguments), [StringComparison]::Ordinal) -and
+        ([string]$actions[0].WorkingDirectory).TrimEnd('\').Equals(
+            $legacyBackgroundInstall.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-SswLegacyBackgroundState {
+    Import-Module ScheduledTasks -ErrorAction Stop
+    Assert-SswProductPath -Path $legacyBackgroundInstall -BaseRoot $env:LOCALAPPDATA `
+        -ProductRelativeRoot 'Programs\SamsungSwitchWatch\Agent'
+    Assert-SswProductPath -Path $legacyBackgroundData -BaseRoot $env:LOCALAPPDATA `
+        -ProductRelativeRoot 'SamsungSwitchWatch\AgentData'
+    $task = Get-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\' `
+        -ErrorAction SilentlyContinue
+    $ownedProcesses = @(Get-SswOwnedLegacyBackgroundProcesses)
+
+    if (-not $task) {
+        if ($ownedProcesses.Count -gt 0) {
+            throw "소유 경로의 이전 Agent 프로세스가 있지만 예약 작업 '$legacyBackgroundTaskName'이 없습니다. 작업 관리자에서 '$legacyBackgroundExe' 프로세스를 종료하고 이전 설치 폴더를 확인한 뒤 다시 실행하세요."
+        }
+        return $null
+    }
+    if (-not (Test-SswOwnedLegacyBackgroundTask -Task $task)) {
+        throw "예약 작업 '$legacyBackgroundTaskName'이 Samsung Switch Watch의 정확한 소유 작업과 일치하지 않습니다. 자동 변경하지 않았습니다. 작업 스케줄러에서 이름 충돌을 확인한 뒤 다시 실행하세요."
+    }
+    if (-not (Test-Path -LiteralPath $legacyBackgroundReceiptPath -PathType Leaf)) {
+        throw "이전 Agent 예약 작업의 소유 영수증이 없어 자동 이관하지 않습니다: $legacyBackgroundReceiptPath. 기존 v0.7 설치 자료를 복구하거나 작업을 관리자 승인으로 정리한 뒤 다시 실행하세요."
+    }
+    $backgroundReceipt = Read-SswJson -Path $legacyBackgroundReceiptPath `
+        -Label 'Legacy current-user Agent receipt'
+    $null = Assert-SswBackgroundAgentReceipt -Receipt $backgroundReceipt `
+        -InstallDirectory $legacyBackgroundInstall -DataDirectory $legacyBackgroundData `
+        -OwnerSid $legacyBackgroundOwnerSid
+    if (-not (Test-Path -LiteralPath $legacyBackgroundExe -PathType Leaf)) {
+        throw "이전 Agent 실행 파일이 없어 예약 작업을 안전하게 이관할 수 없습니다: $legacyBackgroundExe"
+    }
+    if (-not (Test-Path -LiteralPath $legacyBackgroundRunner -PathType Leaf)) {
+        throw "이전 Agent 숨김 실행기가 없어 실패 시 예약 작업을 복구할 수 없습니다: $legacyBackgroundRunner"
+    }
+    foreach ($legacyRoot in @($legacyBackgroundInstall, $legacyBackgroundData)) {
+        if (-not (Test-Path -LiteralPath $legacyRoot -PathType Container)) {
+            throw "이전 Agent 소유 폴더가 없어 안전하게 이관할 수 없습니다: $legacyRoot"
+        }
+        $reparse = Get-ChildItem -LiteralPath $legacyRoot -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+            Select-Object -First 1
+        if ($reparse) {
+            throw "이전 Agent 폴더에 junction 또는 symlink가 있어 자동 이관하지 않습니다: $($reparse.FullName)"
+        }
+    }
+    $actualLegacyExeHash = (Get-FileHash -LiteralPath $legacyBackgroundExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualLegacyExeHash -ne ([string]$backgroundReceipt.executableSha256).ToLowerInvariant()) {
+        throw '이전 Agent 실행 파일이 소유 영수증과 달라 예약 작업을 자동 변경하지 않습니다.'
+    }
+    $legacyManifestPath = Join-Path $legacyBackgroundInstall 'BUILD-MANIFEST.json'
+    if (-not (Test-Path -LiteralPath $legacyManifestPath -PathType Leaf)) {
+        throw '이전 Agent 패키지 매니페스트가 없어 숨김 실행기 소유권을 검증할 수 없습니다.'
+    }
+    $legacyManifest = Read-SswJson -Path $legacyManifestPath -Label 'Legacy current-user Agent manifest'
+    if ($legacyManifest.packageKind -ne 'Agent') {
+        throw '이전 Agent 패키지 매니페스트의 제품 종류가 일치하지 않습니다.'
+    }
+    $runnerManifestEntries = @($legacyManifest.files | Where-Object {
+        [string]$_.name -eq 'run-agent-background.ps1'
+    })
+    if ($runnerManifestEntries.Count -ne 1 -or
+        [string]$runnerManifestEntries[0].sha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        (Get-FileHash -LiteralPath $legacyBackgroundRunner -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        ([string]$runnerManifestEntries[0].sha256).ToLowerInvariant()) {
+        throw '이전 Agent 숨김 실행기가 패키지 매니페스트와 달라 자동 이관하지 않습니다.'
+    }
+
+    $configurationPath = Join-Path $legacyBackgroundData 'background-appsettings.Production.json'
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        throw '이전 Agent 대상 CIDR 설정을 찾지 못해 예약 작업을 자동 이관하지 않습니다.'
+    }
+    if (-not $backgroundReceipt.PSObject.Properties['configurationSha256'] -or
+        [string]$backgroundReceipt.configurationSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        (Get-FileHash -LiteralPath $configurationPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        ([string]$backgroundReceipt.configurationSha256).ToLowerInvariant()) {
+        throw '이전 Agent 보존 설정이 소유 영수증과 달라 자동 이관하지 않습니다.'
+    }
+    $configuration = Read-SswJson -Path $configurationPath -Label 'Legacy current-user Agent configuration'
+    $legacyTargetCidrs = if ($configuration.Agent.PSObject.Properties['AllowedTargetCidrs']) {
+        @($configuration.Agent.AllowedTargetCidrs)
+    }
+    elseif ($configuration.Agent.PSObject.Properties['Switches']) {
+        @($configuration.Agent.Switches | ForEach-Object {
+            $hostAddress = [string]$_.Host
+            if ($hostAddress -match '/') { $hostAddress } else { "$hostAddress/32" }
+        })
+    }
+    else { @() }
+    if ($legacyTargetCidrs.Count -eq 0) {
+        throw '이전 Agent 대상 CIDR 또는 장비 IPv4 설정이 비어 있어 서비스 설치로 안전하게 이관할 수 없습니다.'
+    }
+    $identityMetadataPath = Join-Path $legacyBackgroundData 'agent-identity.json'
+    $identityCertificatePath = Join-Path $legacyBackgroundData 'https-certificate.pfx.dpapi'
+    $identityFileCount = @(@($identityMetadataPath, $identityCertificatePath) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count
+    if ($identityFileCount -eq 1) {
+        throw '이전 Agent HTTPS 신원 파일이 불완전하여 자동 이관하지 않습니다.'
+    }
+    $installAclSnapshot = @(Get-SswDirectoryAclSnapshot -Path $legacyBackgroundInstall)
+    $dataAclSnapshot = @(Get-SswDirectoryAclSnapshot -Path $legacyBackgroundData)
+
+    return [pscustomobject]@{
+        Task = $task
+        TaskXml = Export-ScheduledTask -InputObject $task
+        WasRunning = [string]$task.State -eq 'Running'
+        AgentId = [string]$configuration.Agent.AgentId
+        AllowedTargetCidrs = @(ConvertTo-SswIpv4Cidrs -Cidr $legacyTargetCidrs)
+        OwnedProcessCount = $ownedProcesses.Count
+        InstallDirectory = $legacyBackgroundInstall
+        DataDirectory = $legacyBackgroundData
+        IdentityFilesAvailable = $identityFileCount -eq 2
+        IdentityMetadataPath = $identityMetadataPath
+        IdentityCertificatePath = $identityCertificatePath
+        InstallAclSnapshot = $installAclSnapshot
+        DataAclSnapshot = $dataAclSnapshot
+    }
+}
+
+function Wait-SswLegacyBackgroundTaskStopped {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    do {
+        $task = Get-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\' `
+            -ErrorAction SilentlyContinue
+        if (-not $task -or [string]$task.State -ne 'Running') { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw "이전 Agent 예약 작업이 제한 시간 안에 중지되지 않았습니다: $legacyBackgroundTaskName"
+}
+
+function Stop-SswOwnedLegacyBackgroundProcesses {
+    foreach ($candidate in @(Get-SswOwnedLegacyBackgroundProcesses)) {
+        $processId = [int]$candidate.ProcessId
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" `
+            -ErrorAction SilentlyContinue
+        if (-not $current) { continue }
+        $currentPath = [string]$current.ExecutablePath
+        if ((Get-SswProcessOwnerSid -Process $current) -ne $legacyBackgroundOwnerSid -or
+            -not $currentPath -or
+            -not $currentPath.Equals($legacyBackgroundExe, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "PID 재사용으로 이전 Agent 프로세스 소유권 검증에 실패했습니다: $processId"
+        }
+        Stop-Process -Id $processId -Force -ErrorAction Stop
+    }
+}
+
+function Get-SswDirectoryAclSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $items = @((Get-Item -LiteralPath $root -Force)) +
+        @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)
+    return @($items | ForEach-Object {
+        $relative = if ($_.FullName.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+            ''
+        }
+        else { $_.FullName.Substring($root.Length + 1) }
+        [pscustomobject]@{
+            RelativePath = $relative
+            Sddl = (Get-Acl -LiteralPath $_.FullName).Sddl
+        }
+    })
+}
+
+function Restore-SswDirectoryAclSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object[]]$Snapshot
+    )
+
+    $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($entry in @($Snapshot | Sort-Object { ([string]$_.RelativePath).Length })) {
+        $target = if ([string]::IsNullOrEmpty([string]$entry.RelativePath)) {
+            $root
+        }
+        else {
+            $candidate = Join-Path $root ([string]$entry.RelativePath)
+            Assert-SswChildPath -Parent $root -Child $candidate
+            $candidate
+        }
+        if (-not (Test-Path -LiteralPath $target)) {
+            throw "ACL 복구 대상이 없습니다: $target"
+        }
+        $acl = Get-Acl -LiteralPath $target
+        $acl.SetSecurityDescriptorSddlForm([string]$entry.Sddl)
+        Set-Acl -LiteralPath $target -AclObject $acl
+    }
+}
+
+Write-SswStep 'Agent install-or-update preflight'
+if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitOperatingSystem) {
+    throw 'Samsung Switch Watch Agent requires Windows x64.'
+}
 Assert-SswAdministrator
-if ([string]::IsNullOrWhiteSpace($AgentId) -or $AgentId.Length -gt 64 -or $AgentId -notmatch '^[A-Za-z0-9_-]+$') {
-    throw 'AgentId는 64자 이하의 영문자, 숫자, 하이픈, 밑줄만 사용할 수 있습니다.'
+if ($AgentId -notmatch '^[A-Za-z0-9_-]{1,64}$') {
+    throw 'AgentId must contain only letters, digits, hyphen, or underscore (maximum 64 characters).'
 }
-$viewerRemoteAddresses = @()
-$singleSwitchParameters = @('SwitchId', 'SwitchDisplayName', 'SwitchHost', 'SwitchPort', 'SwitchModel', 'CredentialId', 'UplinkPort')
-if (-not [string]::IsNullOrWhiteSpace($SwitchesJsonPath) -and @($singleSwitchParameters | Where-Object { $PSBoundParameters.ContainsKey($_) }).Count -gt 0) {
-    throw '-SwitchesJsonPath는 단일 스위치 파라미터와 함께 사용할 수 없습니다.'
+if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "Agent executable is missing: $sourceExe" }
+if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) { throw "Package manifest is missing: $sourceManifestPath" }
+if ($source.TrimEnd('\').Equals($install.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Extract the release ZIP outside the Program Files install directory.'
 }
-if ($Repair -and -not [string]::IsNullOrWhiteSpace($SwitchesJsonPath)) { throw '-Repair는 기존 스위치 목록을 유지하므로 -SwitchesJsonPath를 받을 수 없습니다.' }
-
-if (-not [string]::IsNullOrWhiteSpace($SwitchesJsonPath)) {
-    $switchListPath = [IO.Path]::GetFullPath($SwitchesJsonPath)
-    if (-not (Test-Path -LiteralPath $switchListPath -PathType Leaf)) { throw "스위치 목록 JSON을 찾지 못했습니다: $switchListPath" }
-    if ((Get-Item -LiteralPath $switchListPath).Length -gt 1MB) { throw '스위치 목록 JSON은 1MB를 초과할 수 없습니다.' }
-    $switchJson = Get-Content -LiteralPath $switchListPath -Raw -Encoding UTF8
-    if (-not $switchJson.TrimStart().StartsWith('[') -or -not $switchJson.TrimEnd().EndsWith(']')) { throw '스위치 목록 JSON의 최상위 값은 배열이어야 합니다.' }
-    try { $switchInput = @($switchJson | ConvertFrom-Json) }
-    catch { throw "스위치 목록 JSON을 읽지 못했습니다: $($_.Exception.Message)" }
-    if ($switchInput.Count -lt 1 -or $switchInput.Count -gt 256) { throw '스위치 목록은 1~256대여야 합니다.' }
-    $switchConfigurations = @($switchInput | ForEach-Object { ConvertTo-SswValidatedSwitch -InputSwitch $_ })
-}
-else {
-    $singleSwitch = [pscustomobject]@{ Id = $SwitchId; DisplayName = $SwitchDisplayName; Model = $SwitchModel; Host = $SwitchHost; Port = $SwitchPort; CredentialId = $CredentialId; UplinkPort = $UplinkPort }
-    $switchConfigurations = @((ConvertTo-SswValidatedSwitch -InputSwitch $singleSwitch))
-}
-
-$duplicateSwitchId = $switchConfigurations | Group-Object { ([string]$_.Id).ToUpperInvariant() } | Where-Object Count -gt 1 | Select-Object -First 1
-if ($duplicateSwitchId) { throw "중복 Switch Id가 있습니다: $($duplicateSwitchId.Name)" }
-$switchInventoryHash = Get-SswSwitchInventoryHash -Switches $switchConfigurations
-$SwitchId = [string]$switchConfigurations[0].Id
-$CredentialId = [string]$switchConfigurations[0].CredentialId
-
-if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) { throw "Agent 배포 파일을 찾지 못했습니다: $sourceExe" }
-if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) { throw "패키지 빌드 매니페스트를 찾지 못했습니다: $sourceManifestPath" }
-try { $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-catch { throw "패키지 빌드 매니페스트를 읽지 못했습니다: $($_.Exception.Message)" }
-if ($sourceManifest.packageKind -ne 'Agent' -or $sourceManifest.executable.name -ne 'SamsungSwitchWatch.Agent.exe') { throw 'Agent 패키지 매니페스트 형식이 올바르지 않습니다.' }
-$sourceExeHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($sourceExeHash -ne ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) { throw 'Agent 실행 파일이 빌드 매니페스트의 SHA-256과 일치하지 않습니다.' }
-if ($source.TrimEnd('\') -eq $install.TrimEnd('\')) { throw '배포 ZIP을 설치 대상 폴더 밖에서 실행하세요.' }
 Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
 Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
 
-if ($Repair -and -not $existingService) { throw "복구할 서비스가 없습니다: $serviceName" }
-if (-not $Repair -and $existingService) { throw "서비스가 이미 설치되어 있습니다. 복구 설치에는 -Repair를 사용하세요: $serviceName" }
-if (-not $Repair -and (Test-Path -LiteralPath $install)) { throw "설치 폴더가 이미 있습니다. 흔적을 확인하거나 제거 후 다시 시도하세요: $install" }
-if ($existingFirewallRule -and -not (Test-SswOwnedAgentFirewallRule -Snapshot $existingFirewallRule)) { throw '동일한 HTTP 방화벽 규칙에 제품 소유권 표식이 없어 자동 변경하지 않습니다.' }
-if ($legacyFirewallRule -and -not (Test-SswLegacyOwnedAgentFirewallRule -Snapshot $legacyFirewallRule)) { throw '동일한 기존 HTTPS 방화벽 규칙에 제품 소유권 표식이 없어 자동 변경하지 않습니다.' }
-if (-not $Repair -and ($existingFirewallRule -or $legacyFirewallRule)) { throw '동일한 제품 방화벽 규칙이 이미 있습니다. 기존 설치 흔적을 확인하세요.' }
-
-$existingDataEntries = if (Test-Path -LiteralPath $data -PathType Container) { @(Get-ChildItem -LiteralPath $data -Force) } else { @() }
-if (-not $Repair -and $existingDataEntries.Count -gt 0) {
-    if (-not $ReuseData) { throw "비어 있지 않은 기존 데이터 폴더는 명시적인 -ReuseData와 유효한 설치 영수증이 필요합니다: $data" }
-    if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw '기존 데이터의 install-receipt.json이 없어 안전하게 재사용할 수 없습니다.' }
-    try { $existingReceipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "기존 데이터 설치 영수증을 읽지 못했습니다: $($_.Exception.Message)" }
-    $existingReceiptVersion = Assert-SswAgentInstallReceipt -Receipt $existingReceipt -AgentId $AgentId `
-        -SwitchInventoryHash $switchInventoryHash -SwitchCount $switchConfigurations.Count
+$sourceManifest = Read-SswJson -Path $sourceManifestPath -Label 'Agent package manifest'
+if ($sourceManifest.manifestVersion -ne 1 -or $sourceManifest.packageKind -ne 'Agent' -or
+    $sourceManifest.executable.name -ne 'SamsungSwitchWatch.Agent.exe') {
+    throw 'The package manifest is not an Agent manifest.'
 }
-elseif (-not $Repair -and $ReuseData -and $existingDataEntries.Count -eq 0) { Write-Host '기존 데이터가 비어 있어 -ReuseData 확인은 필요하지 않습니다.' }
+$manifestNames = New-Object Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+foreach ($file in @($sourceManifest.files)) {
+    $name = [string]$file.name
+    if ([IO.Path]::GetFileName($name) -ne $name -or -not $manifestNames.Add($name)) {
+        throw "Unsafe or duplicate package file name: $name"
+    }
+    $path = Join-Path $source $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Package file is missing: $name" }
+    $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$file.sha256).ToLowerInvariant()) { throw "Package hash mismatch: $name" }
+}
+if ((Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+    ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) {
+    throw 'Agent executable hash does not match BUILD-MANIFEST.json.'
+}
 
-$installedConfig = $null
-if ($Repair) {
-    if (-not (Test-Path -LiteralPath $productionConfig -PathType Leaf)) { throw "설치 설정을 찾지 못했습니다: $productionConfig" }
-    try { $installedConfig = Get-Content -LiteralPath $productionConfig -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "설치 설정을 읽지 못했습니다: $($_.Exception.Message)" }
-    $installedDataDirectory = [IO.Path]::GetFullPath([string]$installedConfig.Agent.DataDirectory)
-    Assert-SswProductPath -Path $installedDataDirectory -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+$existingConfig = $null
+$existingReceipt = $null
+$preservedClientCidrs = @()
+$preservedTargetCidrs = @()
+$migratingLegacyAgentState = $false
+$legacyBackgroundState = Get-SswLegacyBackgroundState
+if ($isUpdate -and $legacyBackgroundState) {
+    throw "Windows 서비스와 이전 현재 사용자 예약 작업이 동시에 등록되어 있어 자동 이관하지 않습니다. 서비스 '$serviceName'과 예약 작업 '$legacyBackgroundTaskName' 중 실제 운영 중인 하나를 관리자가 확인·정리한 뒤 다시 실행하세요."
+}
+if ($isUpdate) {
+    if (-not (Test-Path -LiteralPath $installedConfigPath -PathType Leaf)) {
+        throw 'The existing service is missing its configuration.'
+    }
+    $existingConfig = Read-SswJson -Path $installedConfigPath -Label 'Installed Agent configuration'
+    $configuredData = [IO.Path]::GetFullPath([string]$existingConfig.Agent.DataDirectory)
+    Assert-SswProductPath -Path $configuredData -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
     if ($PSBoundParameters.ContainsKey('DataDirectory') -and
-        -not $data.Equals($installedDataDirectory, [StringComparison]::OrdinalIgnoreCase)) {
-        throw '-Repair의 DataDirectory는 기존 설치 설정과 정확히 일치해야 합니다.'
+        -not $data.Equals($configuredData, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DataDirectory does not match the existing Agent configuration.'
     }
-    $data = $installedDataDirectory
+    $data = $configuredData
     $receiptPath = Join-Path $data 'install-receipt.json'
-    if (-not $PSBoundParameters.ContainsKey('HttpPort')) { $HttpPort = Get-SswLegacyHttpPort -Config $installedConfig }
-    $AgentId = [string]$installedConfig.Agent.AgentId
-    $switchConfigurations = @(@($installedConfig.Agent.Switches) | ForEach-Object { ConvertTo-SswValidatedSwitch -InputSwitch $_ })
-    $switchInventoryHash = Get-SswSwitchInventoryHash -Switches $switchConfigurations
-    $SwitchId = [string]$switchConfigurations[0].Id
-    $CredentialId = [string]$switchConfigurations[0].CredentialId
-    $mockProperty = $installedConfig.Agent.PSObject.Properties['MockMode']
-    if (-not $PSBoundParameters.ContainsKey('MockMode') -and $mockProperty) { $MockMode = [bool]$mockProperty.Value }
     if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
-        throw "기존 설치 영수증을 찾지 못했습니다: $receiptPath"
+        throw 'The existing service is missing its install receipt.'
     }
-    try { $existingReceipt = Get-Content -LiteralPath $receiptPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-    catch { throw "기존 설치 영수증을 읽지 못했습니다: $($_.Exception.Message)" }
-    $existingReceiptVersion = Assert-SswAgentInstallReceipt -Receipt $existingReceipt -AgentId $AgentId `
-        -SwitchInventoryHash $switchInventoryHash -SwitchCount $switchConfigurations.Count
-    if (-not $PSBoundParameters.ContainsKey('ViewerRemoteAddress')) {
-        $receiptAddresses = if ($existingReceiptVersion -eq 2 -and $existingReceipt.PSObject.Properties['viewerRemoteAddresses']) {
+    $existingReceipt = Read-SswJson -Path $receiptPath -Label 'Installed Agent receipt'
+    if ([int]$existingReceipt.receiptVersion -eq 3) {
+        $validatedReceipt = Assert-SswAgentExecutorReceipt -Receipt $existingReceipt `
+            -InstallDirectory $install -DataDirectory $data
+        $AgentId = $validatedReceipt.AgentId
+        $preservedClientCidrs = @($validatedReceipt.ClientManagementCidrs)
+        $preservedTargetCidrs = @($validatedReceipt.AllowedTargetCidrs)
+    }
+    else {
+        $migratingLegacyAgentState = $true
+        $legacySwitches = @($existingConfig.Agent.Switches)
+        if ($legacySwitches.Count -lt 1) { throw 'Legacy Agent inventory is empty and cannot be migrated safely.' }
+        $legacyInventoryHash = Get-SswSwitchInventoryHash -Switches $legacySwitches
+        $null = Assert-SswAgentInstallReceipt -Receipt $existingReceipt `
+            -AgentId ([string]$existingConfig.Agent.AgentId) `
+            -SwitchInventoryHash $legacyInventoryHash -SwitchCount $legacySwitches.Count
+        $AgentId = [string]$existingConfig.Agent.AgentId
+        $legacyClientAddresses = if ($existingReceipt.PSObject.Properties['viewerRemoteAddresses']) {
             @($existingReceipt.viewerRemoteAddresses)
+        } else { @() }
+        if ($legacyClientAddresses.Count -eq 0) {
+            $legacyFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
+            if (-not $legacyFirewall) {
+                $legacyFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+            }
+            if ($legacyFirewall) { $legacyClientAddresses = @($legacyFirewall.RemoteAddress) }
         }
-        else { @() }
-        if ($receiptAddresses.Count -gt 0) { $ViewerRemoteAddress = $receiptAddresses }
-        elseif ($existingFirewallRule) { $ViewerRemoteAddress = @($existingFirewallRule.RemoteAddress) }
-        elseif ($legacyFirewallRule) { $ViewerRemoteAddress = @($legacyFirewallRule.RemoteAddress) }
+        $preservedClientCidrs = @($legacyClientAddresses | ForEach-Object {
+            $address = [string]$_
+            if ($address -match '/') { $address } else { "$address/32" }
+        })
+        $preservedTargetCidrs = @($legacySwitches | ForEach-Object {
+            $hostAddress = [string]$_.Host
+            if ($hostAddress -match '/') { $hostAddress } else { "$hostAddress/32" }
+        })
+        Write-Host '  migration: legacy inventory/firewall addresses will seed target and management CIDR gates'
     }
-    $serviceProperties = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name Environment -ErrorAction SilentlyContinue
-    $installedEnvironment = if ($serviceProperties) { @($serviceProperties.Environment) } else { @() }
-
-    if ($existingReceiptVersion -eq 1) {
-        $legacyOwnedCertificateThumbprints = @(Get-SswLegacyOwnedAgentCertificateThumbprints `
-            -Receipt $existingReceipt -Configuration $installedConfig)
+    if ([string]$existingConfig.Agent.ListenUrl -ne 'https://0.0.0.0:18443') {
+        Write-Host '  migration: legacy listener will be replaced by fixed HTTPS/18443'
     }
 }
-elseif (-not (Test-SswTcpPortAvailable -Port $HttpPort)) { throw "Agent HTTP 포트를 이미 다른 프로세스가 사용하고 있습니다: $HttpPort" }
-
-if ($null -eq $ViewerRemoteAddress -or @($ViewerRemoteAddress).Count -eq 0) {
-    throw '방화벽에서 허용할 Viewer PC 고정 IPv4 주소를 -ViewerRemoteAddress로 1~32개 지정해야 합니다.'
+elseif ((Test-Path -LiteralPath $install) -or (Test-Path -LiteralPath $receiptPath)) {
+    throw 'Install remnants exist without the registered Agent service. Inspect or uninstall them before reinstalling.'
 }
-$viewerRemoteAddresses = @(ConvertTo-SswViewerRemoteAddresses -Address $ViewerRemoteAddress)
-if ($existingFirewallRule -and $legacyFirewallRule) {
-    throw 'HTTP와 기존 HTTPS 제품 방화벽 규칙이 동시에 존재합니다. 중복 규칙을 먼저 점검하세요.'
+elseif ((Test-Path -LiteralPath $data -PathType Container) -and
+    @(Get-ChildItem -LiteralPath $data -Force).Count -gt 0) {
+    throw 'A non-empty Agent data directory exists without a registered service and valid receipt. Refusing to adopt unknown HTTPS identity data.'
 }
-Assert-SswAgentFirewallGateReady -Port $HttpPort -AgentExecutablePath $serviceExe
-
-if (-not $MockMode -and -not $Repair -and @($switchConfigurations | Where-Object { $_.Host -eq '192.0.2.10' }).Count -gt 0) {
-    throw '실환경 설치에는 -SwitchHost로 실제 관리 주소를 지정해야 합니다.'
+if ($legacyBackgroundState) {
+    if (-not $isUpdate) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$legacyBackgroundState.AgentId)) {
+            $AgentId = [string]$legacyBackgroundState.AgentId
+        }
+        $preservedTargetCidrs = @($legacyBackgroundState.AllowedTargetCidrs)
+    }
+    Write-Host "  migration: exact owned current-user task '$legacyBackgroundTaskName' will be replaced by the Windows service"
+    Write-Host '  migration: current-user program and data will move to an Administrators-only ProgramData archive'
 }
 
-Write-Host "  source  : $source"
-Write-Host "  install : $install"
-Write-Host "  data    : $data"
-Write-Host "  service : $serviceName (고정)"
-Write-Host "  HTTP    : TCP/$HttpPort (암호화·인증 없음)"
-Write-Host "  Viewer  : $($viewerRemoteAddresses -join ', ')"
-Write-Host "  조회 명령: $(if ($Repair -and -not $enableReadOnlyQueriesWasSpecified) { '기존 설정 보존' } elseif ($EnableReadOnlyQueries) { '사용' } else { '사용 안 함(기본값)' })"
+$clientCidrs = @(Resolve-SswCidrInput -Requested $ClientManagementCidrs -Preserved $preservedClientCidrs `
+    -Prompt 'Viewer PC가 있는 관리망 CIDR (예: 내 PC가 10.20.30.x이면 10.20.30.0/24, 여러 개는 쉼표로 구분)')
+$targetCidrs = @(Resolve-SswCidrInput -Requested $AllowedTargetCidrs -Preserved $preservedTargetCidrs `
+    -Prompt '스위치 관리 IP가 있는 CIDR (예: 10.40.0.0/16, 여러 개는 쉼표로 구분)')
+
+$oldHttpFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
+$oldHttpsFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+Assert-SswAgentFirewallGateReady -Port $httpsPort -AgentExecutablePath $installedExe
+
+Write-Host "  작업 구분     : $(if ($isUpdate) { '기존 Agent 업데이트' } else { '신규 Agent 설치' })"
+Write-Host "  Windows 서비스: $serviceName (창 없음, 자동 시작)"
+Write-Host "  Viewer 연결   : HTTPS/TCP 18443"
+Write-Host "  Viewer 관리망 : $($clientCidrs -join ', ')"
+Write-Host "  스위치 대상망 : $($targetCidrs -join ', ')"
+Write-Host "  보존 데이터   : $data"
 if ($Preflight) {
-    Write-SswStep '사전 검사를 통과했습니다. 시스템은 변경되지 않았습니다.'
+    Write-SswStep 'Preflight passed; no files, services, or firewall rules were changed.'
     return
 }
 
-$installParent = Split-Path $install -Parent
 $transactionId = [Guid]::NewGuid().ToString('N')
+$installParent = Split-Path $install -Parent
+$operationsRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
+$transactionRoot = Join-Path $operationsRoot "transactions\$transactionId"
 $staging = "$install.__staging_$transactionId"
-$backup = "$install.__backup_$transactionId"
-$operationRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
-$journalPath = Join-Path $operationRoot 'agent-install.json'
-$transactionDataBackup = Join-Path $operationRoot "transactions\$transactionId"
+$programBackup = "$install.__backup_$transactionId"
+$dataSnapshot = Join-Path $transactionRoot 'data'
+$journalPath = Join-Path $operationsRoot 'agent-install-or-update.json'
 $serviceCreated = $false
-$serviceEnvironmentChanged = $false
-$firewallChanged = $false
-$dataCreated = $false
 $installSwapped = $false
-$previousServiceWasRunning = $existingService -and $existingService.Status -eq 'Running'
-$dataAclSnapshot = @()
-$dataAclChanged = $false
-$databaseSnapshotTaken = $false
-$databaseFiles = @('switchwatch.db', 'switchwatch.db-wal', 'switchwatch.db-shm')
-$databaseExistence = @{}
-$schemaBackupsBefore = @()
-$receiptExistedBefore = Test-Path -LiteralPath $receiptPath -PathType Leaf
-$receiptBackupPath = Join-Path $transactionDataBackup 'install-receipt.json'
-$receiptTemporary = "$receiptPath.$transactionId.tmp"
-$receiptReplaceBackup = "$receiptPath.$transactionId.replace.bak"
+$dataExisted = Test-Path -LiteralPath $data -PathType Container
+$dataCreated = $false
+$dataSnapshotTaken = $false
+$firewallChanged = $false
 $transactionCommitted = $false
+$previousServiceWasRunning = $isUpdate -and $existingService.Status -eq 'Running'
+$previousService = if ($isUpdate) { Get-CimInstance Win32_Service -Filter "Name='$serviceName'" } else { $null }
+$previousUsesHttps = $isUpdate -and [string]$existingConfig.Agent.ListenUrl -like 'https://*'
+$legacyBackgroundTaskTouched = $false
+$legacyBackgroundTaskRemoved = $false
+$legacyBackgroundArchive = $null
+$legacyBackgroundProgramMoved = $false
+$legacyBackgroundDataMoved = $false
 
-Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
-    -Stage 'prepared' -Status 'running' -Version ([string]$sourceManifest.version)
+Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
+    -TransactionId $transactionId -Stage 'prepared' -Status 'running' -Version ([string]$sourceManifest.version)
 
 try {
-    Write-SswStep '검증된 임시 폴더에 배포 파일 준비'
-    New-Item -ItemType Directory -Path $installParent, $staging -Force | Out-Null
-    Get-ChildItem -LiteralPath $source -Force | Where-Object { $_.Name -notin @('data', 'certs') } |
-        Copy-Item -Destination $staging -Recurse -Force
-    if (-not (Test-Path -LiteralPath (Join-Path $staging 'SamsungSwitchWatch.Agent.exe') -PathType Leaf)) { throw '임시 폴더의 Agent 실행 파일 검증에 실패했습니다.' }
-    $configuration = New-SswProductionConfiguration -Switches $switchConfigurations -ExistingConfig $installedConfig
-    [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
-        ($configuration | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
-
-    if (-not (Test-Path -LiteralPath $data)) {
-        New-Item -ItemType Directory -Path $data -Force | Out-Null
-        $dataCreated = $true
+    Write-SswStep 'Stage verified package'
+    New-Item -ItemType Directory -Path $installParent, $staging, $transactionRoot -Force | Out-Null
+    Set-SswInstallerBackupAcl -Path $transactionRoot
+    foreach ($file in @($sourceManifest.files)) {
+        Copy-Item -LiteralPath (Join-Path $source ([string]$file.name)) -Destination $staging -Force
     }
-    if ($Repair -and $previousServiceWasRunning) {
-        Write-SswStep '기존 Agent 서비스 정지'
+    $newConfig = New-SswExecutorConfiguration -ResolvedAgentId $AgentId -TargetCidrs $targetCidrs
+    [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
+        ($newConfig | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+
+    if ($legacyBackgroundState) {
+        Write-SswStep 'Stop and unregister exact owned current-user Agent task'
+        $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `
+            -TaskPath '\' -ErrorAction SilentlyContinue
+        if (-not (Test-SswOwnedLegacyBackgroundTask -Task $currentLegacyTask)) {
+            throw '이관 직전 이전 Agent 예약 작업의 정확한 소유권 재검증에 실패했습니다.'
+        }
+        $legacyBackgroundTaskTouched = $true
+        Stop-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\' `
+            -ErrorAction SilentlyContinue
+        Wait-SswLegacyBackgroundTaskStopped
+        Stop-SswOwnedLegacyBackgroundProcesses
+        $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `
+            -TaskPath '\' -ErrorAction SilentlyContinue
+        if (-not (Test-SswOwnedLegacyBackgroundTask -Task $currentLegacyTask)) {
+            throw '제거 직전 이전 Agent 예약 작업의 정확한 소유권 재검증에 실패했습니다.'
+        }
+        Unregister-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\' `
+            -Confirm:$false
+        $legacyBackgroundTaskRemoved = $true
+    }
+
+    if ($isUpdate -and $existingService.Status -ne 'Stopped') {
+        Write-SswStep 'Stop existing Agent service'
         Stop-Service -Name $serviceName -Force
         (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
     }
-    if ($Repair -or $ReuseData) {
-        Write-SswStep '데이터베이스 트랜잭션 파일 및 설치 영수증 백업'
-        New-Item -ItemType Directory -Path $transactionDataBackup -Force | Out-Null
-        Set-SswInstallerBackupAcl -Path $transactionDataBackup
-        foreach ($databaseFile in $databaseFiles) {
-            $databasePath = Join-Path $data $databaseFile
-            $databaseExistence[$databaseFile] = Test-Path -LiteralPath $databasePath -PathType Leaf
-            if ($databaseExistence[$databaseFile]) { Copy-Item -LiteralPath $databasePath -Destination (Join-Path $transactionDataBackup $databaseFile) -Force }
-        }
-        $schemaBackupsBefore = @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-        if ($receiptExistedBefore) { Copy-Item -LiteralPath $receiptPath -Destination $receiptBackupPath -Force }
-        $databaseSnapshotTaken = $true
-        Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
-            -Stage 'data-backed-up' -Status 'running' -Version ([string]$sourceManifest.version)
+    if (-not (Test-SswTcpPortAvailable -Port $httpsPort)) {
+        throw 'TCP/18443 is still occupied after stopping the existing Agent.'
     }
-    if (-not $dataCreated) { $dataAclSnapshot = @(Get-SswDirectoryAclSnapshot -Path $data) }
 
-    Write-SswStep 'Agent 프로그램 폴더 원자적 교체'
-    if (Test-Path -LiteralPath $install) { Move-Item -LiteralPath $install -Destination $backup }
+    Write-SswStep 'Back up persistent Agent identity and configuration data'
+    if ($dataExisted) {
+        $reparse = Get-ChildItem -LiteralPath $data -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+            Select-Object -First 1
+        if ($reparse) { throw "Agent data contains a junction or symlink: $($reparse.FullName)" }
+        Copy-Item -LiteralPath $data -Destination $dataSnapshot -Recurse -Force
+        $dataSnapshotTaken = $true
+    }
+    else {
+        New-Item -ItemType Directory -Path $data -Force | Out-Null
+        $dataCreated = $true
+    }
+    if ($legacyBackgroundState -and $legacyBackgroundState.IdentityFilesAvailable) {
+        Write-SswStep 'Preserve current-user Agent HTTPS identity'
+        Copy-Item -LiteralPath $legacyBackgroundState.IdentityMetadataPath `
+            -Destination (Join-Path $data 'agent-identity.json') -Force
+        Copy-Item -LiteralPath $legacyBackgroundState.IdentityCertificatePath `
+            -Destination (Join-Path $data 'https-certificate.pfx.dpapi') -Force
+    }
+
+    Write-SswStep 'Atomically swap Agent program files'
+    if (Test-Path -LiteralPath $install -PathType Container) {
+        Move-Item -LiteralPath $install -Destination $programBackup
+    }
     Move-Item -LiteralPath $staging -Destination $install
     $installSwapped = $true
 
-    if (-not $Repair) {
-        Write-SswStep 'Windows 서비스 등록'
-        & sc.exe create $serviceName "binPath= `"$serviceExe`"" 'start= auto' 'obj= NT AUTHORITY\LocalService' `
+    $serviceBinPath = "`"$installedExe`" --service"
+    if (-not $isUpdate) {
+        & sc.exe create $serviceName "binPath= $serviceBinPath" 'start= auto' 'obj= NT AUTHORITY\LocalService' `
             'DisplayName= Samsung Switch Watch Agent' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 등록에 실패했습니다.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Windows service registration failed.' }
         $serviceCreated = $true
     }
     else {
-        & sc.exe config $serviceName "binPath= `"$serviceExe`"" 'start= auto' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 실행 경로 갱신에 실패했습니다.' }
+        & sc.exe config $serviceName "binPath= $serviceBinPath" 'start= auto' 'obj= NT AUTHORITY\LocalService' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Windows service update failed.' }
     }
-    & sc.exe description $serviceName 'Samsung iES read-only monitoring Agent' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 설명 설정에 실패했습니다.' }
+    & sc.exe description $serviceName 'Windowless Samsung switch Telnet execution Agent' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Windows service description update failed.' }
     & sc.exe failure $serviceName 'reset= 86400' 'actions= restart/5000/restart/15000/restart/60000' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows 서비스 복구 정책 설정에 실패했습니다.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Windows service recovery policy update failed.' }
+    & sc.exe failureflag $serviceName 1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Windows service failure flag update failed.' }
     & sc.exe sidtype $serviceName unrestricted | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw '서비스 SID 활성화에 실패했습니다.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Windows service SID activation failed.' }
 
-    $serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-    $nextEnvironment = @($installedEnvironment | Where-Object {
-        $_ -notlike 'SAMSUNG_SWITCH_WATCH_CERT_PASSWORD=*' -and $_ -notlike 'DOTNET_ENVIRONMENT=*'
-    }) + @('DOTNET_ENVIRONMENT=Production')
-    if (-not $Repair) {
-        New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Force -Value $nextEnvironment | Out-Null
-        $serviceEnvironmentChanged = $true
-    }
-
-    Write-SswStep '서비스 SID 기준 최소 폴더 권한 설정'
     $serviceSid = Get-SswServiceSid -Name $serviceName
     Set-SswRestrictedDirectoryAcl -Path $install -ServiceSid $serviceSid -ServiceRights ReadAndExecute
-    $dataAclChanged = $true
     Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid -ServiceRights Modify
-
-    $firewallIsExact = $existingFirewallRule -and
-        (Test-SswAgentFirewallRuleExact -Snapshot $existingFirewallRule -Port $HttpPort -RemoteAddress $viewerRemoteAddresses)
-    if (-not $firewallIsExact) {
-        Write-SswStep '허용 Viewer IPv4만 받는 HTTP 방화벽 규칙 적용'
-        $firewallChanged = $true
-        if ($existingFirewallRule) { Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' }
-        New-SswAgentFirewallRule -Port $HttpPort -RemoteAddress $viewerRemoteAddresses
-    }
-    if ($legacyFirewallRule) {
-        $firewallChanged = $true
-        Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Https'
-    }
-    Assert-SswAgentFirewallGateReady -Port $HttpPort -AgentExecutablePath $serviceExe
-    $appliedFirewallRule = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
-    if (-not $appliedFirewallRule -or
-        -not (Test-SswAgentFirewallRuleExact -Snapshot $appliedFirewallRule -Port $HttpPort `
-            -RemoteAddress $viewerRemoteAddresses)) {
-        throw '적용된 Agent HTTP 방화벽 규칙이 설치 요청과 정확히 일치하지 않습니다.'
+    foreach ($existingLegacyArchive in @(Get-ChildItem -LiteralPath $data `
+        -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -like 'legacy-v0.7-backup-*' -or
+            $_.Name -like 'legacy-background-backup-*'
+        })) {
+        Assert-SswChildPath -Parent $data -Child $existingLegacyArchive.FullName
+        Set-SswInstallerBackupAcl -Path $existingLegacyArchive.FullName
     }
 
-    # Repair는 이전 실행 상태와 -DoNotStart 여부와 관계없이 새 바이너리와 DB schema를 검증합니다.
-    $shouldStart = $Repair -or (-not $DoNotStart -and $MockMode)
-    if ($shouldStart) {
-        Write-SswStep 'Agent 서비스 시작 및 HTTP readiness 확인'
-        Start-Service -Name $serviceName
-        $readinessTimeoutSeconds = if ($MockMode) { 45 } else { 210 }
-        $healthStatus = Invoke-SswLocalHealthProbe -Port $HttpPort -TimeoutSeconds $readinessTimeoutSeconds
-        Write-Host "  readiness: $healthStatus"
-        if ($Repair) {
-            Stop-Service -Name $serviceName -Force
-            (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
-            Write-SswStep '검증 성공 후 구 인증서 서비스 secret 제거'
-            New-ItemProperty -Path $serviceRegistryPath -Name Environment -PropertyType MultiString -Force -Value $nextEnvironment | Out-Null
-            $serviceEnvironmentChanged = $true
-            if ($previousServiceWasRunning -and -not $DoNotStart) {
-                Start-Service -Name $serviceName
-                $healthStatus = Invoke-SswLocalHealthProbe -Port $HttpPort -TimeoutSeconds $readinessTimeoutSeconds
-                Write-Host "  readiness (clean environment): $healthStatus"
-            }
-            else { Write-Host '  service  : 검증 후 이전 중지 상태로 복원' }
+    Write-SswStep 'Apply management-subnet HTTPS firewall rule'
+    $firewallChanged = $true
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Http' -AllowMissing
+    Remove-SswOwnedAgentFirewallRuleByName -Name 'SamsungSwitchWatchAgent-Https' -AllowMissing
+    New-SswAgentHttpsFirewallRule -RemoteAddress $clientCidrs
+    $appliedFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+    if (-not $appliedFirewall -or
+        -not (Test-SswAgentHttpsFirewallRuleExact -Snapshot $appliedFirewall -RemoteAddress $clientCidrs)) {
+        throw 'The applied HTTPS firewall rule does not match the requested management CIDRs.'
+    }
+
+    Write-SswStep 'Start windowless service and verify HTTPS readiness'
+    Start-Service -Name $serviceName
+    $ready = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps
+    Write-Host "  readiness     : $ready"
+
+    if ($legacyBackgroundState) {
+        Write-SswStep 'Move retired current-user Agent files to an Administrators-only archive'
+        $legacyBackgroundArchiveName = 'legacy-background-backup-{0}-{1}' -f
+            [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss'),
+            ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+        $legacyBackgroundArchive = Join-Path $data $legacyBackgroundArchiveName
+        Assert-SswChildPath -Parent $data -Child $legacyBackgroundArchive
+        New-Item -ItemType Directory -Path $legacyBackgroundArchive -Force | Out-Null
+        Move-Item -LiteralPath $legacyBackgroundState.InstallDirectory `
+            -Destination (Join-Path $legacyBackgroundArchive 'program')
+        $legacyBackgroundProgramMoved = $true
+        Move-Item -LiteralPath $legacyBackgroundState.DataDirectory `
+            -Destination (Join-Path $legacyBackgroundArchive 'data')
+        $legacyBackgroundDataMoved = $true
+        $backgroundArchiveMetadata = [ordered]@{
+            formatVersion = 1
+            source = 'SamsungSwitchWatch current-user scheduled-task Agent'
+            purpose = 'manual recovery or administrator-approved cleanup only'
+            identityPreserved = [bool]$legacyBackgroundState.IdentityFilesAvailable
+            archivedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        } | ConvertTo-Json
+        [IO.File]::WriteAllText((Join-Path $legacyBackgroundArchive 'README.json'),
+            $backgroundArchiveMetadata, (New-Object Text.UTF8Encoding($false)))
+        Set-SswInstallerBackupAcl -Path $legacyBackgroundArchive
+        Write-Host "  legacy backup : $legacyBackgroundArchive"
+    }
+
+    if ($migratingLegacyAgentState) {
+        Write-SswStep 'Archive legacy Agent-owned credentials, database, and raw history'
+        $legacyArchiveName = 'legacy-v0.7-backup-{0}-{1}' -f
+            [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss'),
+            ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+        $legacyArchive = Join-Path $data $legacyArchiveName
+        Assert-SswChildPath -Parent $data -Child $legacyArchive
+        New-Item -ItemType Directory -Path $legacyArchive -Force | Out-Null
+        Set-SswInstallerBackupAcl -Path $legacyArchive
+        $legacyInstalledConfig = Join-Path $programBackup 'appsettings.Production.json'
+        if (-not (Test-Path -LiteralPath $legacyInstalledConfig -PathType Leaf)) {
+            throw 'Legacy Agent inventory configuration is missing from the verified program backup.'
         }
+        Copy-Item -LiteralPath $legacyInstalledConfig `
+            -Destination (Join-Path $legacyArchive 'legacy-appsettings.Production.json') -Force
+        $legacyCredentialDirectory = Join-Path $data 'credentials'
+        if (Test-Path -LiteralPath $legacyCredentialDirectory -PathType Container) {
+            Move-Item -LiteralPath $legacyCredentialDirectory -Destination $legacyArchive
+        }
+        foreach ($legacyDatabaseName in @('switchwatch.db', 'switchwatch.db-wal', 'switchwatch.db-shm')) {
+            $legacyDatabasePath = Join-Path $data $legacyDatabaseName
+            if (Test-Path -LiteralPath $legacyDatabasePath -PathType Leaf) {
+                Move-Item -LiteralPath $legacyDatabasePath -Destination $legacyArchive
+            }
+        }
+        foreach ($legacySchemaBackup in @(Get-ChildItem -LiteralPath $data `
+            -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue)) {
+            Move-Item -LiteralPath $legacySchemaBackup.FullName -Destination $legacyArchive
+        }
+        $archiveMetadata = [ordered]@{
+            formatVersion = 1
+            source = 'SamsungSwitchWatch Agent v0.7 or earlier'
+            purpose = 'manual recovery or administrator-approved cleanup only'
+            archivedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        } | ConvertTo-Json
+        [IO.File]::WriteAllText((Join-Path $legacyArchive 'README.json'), $archiveMetadata,
+            (New-Object Text.UTF8Encoding($false)))
+        Set-SswInstallerBackupAcl -Path $legacyArchive
+        Write-Host "  legacy backup : $legacyArchive"
     }
-    elseif (-not $Repair -and -not $MockMode) { Write-Host '실환경 Agent는 자격 증명 저장 전까지 시작하지 않습니다.' }
 
     $receipt = [ordered]@{
-        receiptVersion = 2
+        receiptVersion = 3
         product = 'SamsungSwitchWatchAgent'
         agentId = $AgentId
-        switchId = $SwitchId
-        credentialId = $CredentialId
-        switchCount = $switchConfigurations.Count
-        switchInventoryHash = $switchInventoryHash
-        httpPort = $HttpPort
-        viewerRemoteAddresses = $viewerRemoteAddresses
+        installDirectory = $install
+        dataDirectory = $data
+        httpsPort = 18443
+        clientManagementCidrs = @($clientCidrs)
+        allowedTargetCidrs = @($targetCidrs)
         installedVersion = [string]$sourceManifest.version
         sourceCommit = [string]$sourceManifest.sourceCommit
+        legacyBackgroundTaskMigrated = [bool]($null -ne $legacyBackgroundState)
         updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
-    } | ConvertTo-Json -Depth 6
-    [IO.File]::WriteAllText($receiptTemporary, $receipt, (New-Object Text.UTF8Encoding($false)))
+    } | ConvertTo-Json -Depth 8
+    $temporaryReceipt = "$receiptPath.$transactionId.tmp"
+    [IO.File]::WriteAllText($temporaryReceipt, $receipt, (New-Object Text.UTF8Encoding($false)))
     if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
-        [IO.File]::Replace($receiptTemporary, $receiptPath, $receiptReplaceBackup, $true)
-        if (Test-Path -LiteralPath $receiptReplaceBackup -PathType Leaf) { Remove-Item -LiteralPath $receiptReplaceBackup -Force }
+        $receiptReplaceBackup = "$receiptPath.$transactionId.bak"
+        [IO.File]::Replace($temporaryReceipt, $receiptPath, $receiptReplaceBackup, $true)
+        Remove-Item -LiteralPath $receiptReplaceBackup -Force
     }
-    else { Move-Item -LiteralPath $receiptTemporary -Destination $receiptPath }
+    else { Move-Item -LiteralPath $temporaryReceipt -Destination $receiptPath }
 
-    Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
-        -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
+    Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
+        -TransactionId $transactionId -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
     $transactionCommitted = $true
 
-    # 인증서는 서비스, HTTP listener, DB migration, receipt가 모두 검증된 뒤 마지막으로 제거합니다.
-    foreach ($legacyOwnedCertificateThumbprint in $legacyOwnedCertificateThumbprints) {
-        $legacyCertificatePath = "Cert:\LocalMachine\My\$legacyOwnedCertificateThumbprint"
-        if (Test-Path -LiteralPath $legacyCertificatePath) {
-            try { Remove-Item -LiteralPath $legacyCertificatePath -Force -ErrorAction Stop }
-            catch {
-                # 비내보내기 개인 키는 rollback할 수 없으므로 commit 뒤 정리 실패가 설치 rollback을 유발하면 안 됩니다.
-                Write-Warning "설치는 완료됐지만 구 설치기 소유 인증서를 제거하지 못했습니다: $legacyOwnedCertificateThumbprint" `
-                    -WarningAction Continue
-            }
-        }
+    foreach ($obsolete in @($programBackup, $transactionRoot)) {
+        if (Test-Path -LiteralPath $obsolete) { Remove-Item -LiteralPath $obsolete -Recurse -Force -ErrorAction SilentlyContinue }
     }
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
-    if (Test-Path -LiteralPath $transactionDataBackup) { Remove-Item -LiteralPath $transactionDataBackup -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Host ''
-    Write-Host '설치가 완료되었습니다.' -ForegroundColor Green
-    Write-Warning 'Agent API는 암호화·인증이 없습니다. 위 고정 Viewer IPv4 방화벽 범위를 유지하십시오.' `
-        -WarningAction Continue
-    if (-not $Repair) {
-        Write-Host "자격 증명 ID: $CredentialId"
-        if (-not $MockMode) { Write-Host '다음 단계: 관리자 PowerShell에서 set-switch-credential.ps1을 실행하세요.' }
+    Write-Host 'Samsung Switch Watch Agent 설치/업데이트가 완료되었습니다.' -ForegroundColor Green
+    Write-Host 'Agent는 사용자에게 보이는 창 없이 Windows 서비스로 실행 중입니다.'
+    Write-Host '스위치 IP와 ID/PW/enable PW는 Viewer에서만 등록하세요.'
+    if ($legacyBackgroundState) {
+        Write-Host "이전 현재 사용자 예약 작업은 제거했고 파일은 관리자 전용 보관 폴더로 옮겼습니다: $legacyBackgroundArchive"
     }
 }
 catch {
     $failure = $_
     if ($transactionCommitted) {
-        Write-Warning "설치는 이미 commit됐으며 post-commit 정리 중 오류가 발생했습니다. 자동 rollback하지 않습니다: $($failure.Exception.Message)" `
-            -WarningAction Continue
+        Write-Warning "Install completed, but post-commit cleanup failed: $($failure.Exception.Message)"
         return
     }
-    Write-Warning '설치 실패를 감지해 변경 사항을 복구합니다.' -WarningAction Continue
+    Write-Warning 'Install or update failed. Restoring the previous service, data, and firewall state.'
     $rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'stop-new-service'; Action = {
-            $currentService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            if ($currentService -and $currentService.Status -ne 'Stopped') {
+            $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            if ($current -and $current.Status -ne 'Stopped') {
                 Stop-Service -Name $serviceName -Force
-                $currentService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+                $current.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
             }
         } },
         [pscustomobject]@{ Name = 'delete-new-service'; Action = {
             if ($serviceCreated) {
                 & sc.exe delete $serviceName | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw '서비스 제거 요청 실패' }
+                if ($LASTEXITCODE -ne 0) { throw 'Service delete failed.' }
                 Wait-SswServiceDeleted -Name $serviceName -TimeoutSeconds 20
             }
         } },
-        [pscustomobject]@{ Name = 'restore-service-environment'; Action = {
-            if ($serviceEnvironmentChanged -and -not $serviceCreated) {
-                New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name Environment `
-                    -PropertyType MultiString -Force -Value @($installedEnvironment) | Out-Null
-            }
-        } },
-        [pscustomobject]@{ Name = 'restore-database'; Action = {
-            if ($databaseSnapshotTaken -and -not $dataCreated) {
-                foreach ($databaseFile in $databaseFiles) {
-                    $databasePath = Join-Path $data $databaseFile
-                    if (Test-Path -LiteralPath $databasePath -PathType Leaf) { Remove-Item -LiteralPath $databasePath -Force }
-                    if ([bool]$databaseExistence[$databaseFile]) { Copy-Item -LiteralPath (Join-Path $transactionDataBackup $databaseFile) -Destination $databasePath -Force }
-                }
-                foreach ($schemaBackup in @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue)) {
-                    if ($schemaBackup.FullName -notin $schemaBackupsBefore) { Remove-Item -LiteralPath $schemaBackup.FullName -Force }
-                }
-                if ($receiptExistedBefore) { Copy-Item -LiteralPath $receiptBackupPath -Destination $receiptPath -Force }
-                elseif (Test-Path -LiteralPath $receiptPath -PathType Leaf) { Remove-Item -LiteralPath $receiptPath -Force }
-            }
-        } },
         [pscustomobject]@{ Name = 'restore-program'; Action = {
-            if ($installSwapped -and (Test-Path -LiteralPath $install)) { Remove-Item -LiteralPath $install -Recurse -Force }
-            if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $install }
+            if ($installSwapped -and (Test-Path -LiteralPath $install)) {
+                Remove-Item -LiteralPath $install -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $programBackup) {
+                Move-Item -LiteralPath $programBackup -Destination $install
+            }
             if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
         } },
-        [pscustomobject]@{ Name = 'restore-firewall'; Action = {
-            if ($firewallChanged) {
-                Restore-SswAgentFirewallSnapshot -Snapshot $existingFirewallRule
-                if ($legacyFirewallRule) { Restore-SswAgentFirewallSnapshot -Snapshot $legacyFirewallRule }
+        [pscustomobject]@{ Name = 'restore-service'; Action = {
+            if ($isUpdate -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                $oldPath = [string]$previousService.PathName
+                & sc.exe config $serviceName "binPath= $oldPath" 'start= auto' | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Previous service configuration restore failed.' }
+            }
+        } },
+        [pscustomobject]@{ Name = 'restore-legacy-background-files'; Action = {
+            if ($legacyBackgroundArchive) {
+                $archivedProgram = Join-Path $legacyBackgroundArchive 'program'
+                $archivedData = Join-Path $legacyBackgroundArchive 'data'
+                if ($legacyBackgroundProgramMoved) {
+                    if (Test-Path -LiteralPath $legacyBackgroundState.InstallDirectory) {
+                        throw 'Legacy background program restore target already exists.'
+                    }
+                    New-Item -ItemType Directory `
+                        -Path (Split-Path $legacyBackgroundState.InstallDirectory -Parent) -Force | Out-Null
+                    Move-Item -LiteralPath $archivedProgram `
+                        -Destination $legacyBackgroundState.InstallDirectory
+                    Restore-SswDirectoryAclSnapshot -Path $legacyBackgroundState.InstallDirectory `
+                        -Snapshot @($legacyBackgroundState.InstallAclSnapshot)
+                }
+                if ($legacyBackgroundDataMoved) {
+                    if (Test-Path -LiteralPath $legacyBackgroundState.DataDirectory) {
+                        throw 'Legacy background data restore target already exists.'
+                    }
+                    New-Item -ItemType Directory `
+                        -Path (Split-Path $legacyBackgroundState.DataDirectory -Parent) -Force | Out-Null
+                    Move-Item -LiteralPath $archivedData `
+                        -Destination $legacyBackgroundState.DataDirectory
+                    Restore-SswDirectoryAclSnapshot -Path $legacyBackgroundState.DataDirectory `
+                        -Snapshot @($legacyBackgroundState.DataAclSnapshot)
+                }
+                if (Test-Path -LiteralPath $legacyBackgroundArchive) {
+                    Remove-Item -LiteralPath $legacyBackgroundArchive -Recurse -Force
+                }
             }
         } },
         [pscustomobject]@{ Name = 'restore-data'; Action = {
-            if ($dataCreated -and (Test-Path -LiteralPath $data)) { Remove-Item -LiteralPath $data -Recurse -Force }
-            elseif ($dataAclChanged -and $dataAclSnapshot.Count -gt 0) { Restore-SswDirectoryAclSnapshot -Snapshot $dataAclSnapshot }
-            foreach ($receiptArtifact in @($receiptTemporary, $receiptReplaceBackup)) {
-                if (Test-Path -LiteralPath $receiptArtifact -PathType Leaf) { Remove-Item -LiteralPath $receiptArtifact -Force }
+            if ($dataCreated -and (Test-Path -LiteralPath $data)) {
+                Remove-Item -LiteralPath $data -Recurse -Force
             }
-            if (Test-Path -LiteralPath $transactionDataBackup) { Remove-Item -LiteralPath $transactionDataBackup -Recurse -Force }
+            elseif ($dataSnapshotTaken) {
+                if (Test-Path -LiteralPath $data) { Remove-Item -LiteralPath $data -Recurse -Force }
+                Move-Item -LiteralPath $dataSnapshot -Destination $data
+                if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+                    $oldServiceSid = Get-SswServiceSid -Name $serviceName
+                    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $oldServiceSid -ServiceRights Modify
+                    foreach ($restoredLegacyArchive in @(Get-ChildItem -LiteralPath $data `
+                        -Directory -ErrorAction SilentlyContinue | Where-Object {
+                            $_.Name -like 'legacy-v0.7-backup-*' -or
+                            $_.Name -like 'legacy-background-backup-*'
+                        })) {
+                        Assert-SswChildPath -Parent $data -Child $restoredLegacyArchive.FullName
+                        Set-SswInstallerBackupAcl -Path $restoredLegacyArchive.FullName
+                    }
+                }
+            }
+        } },
+        [pscustomobject]@{ Name = 'restore-firewall'; Action = {
+            if ($firewallChanged) {
+                Restore-SswAgentFirewallSnapshots -Snapshots @($oldHttpFirewall, $oldHttpsFirewall)
+            }
         } },
         [pscustomobject]@{ Name = 'restart-previous-service'; Action = {
-            if ($Repair -and $previousServiceWasRunning -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { Start-Service -Name $serviceName }
+            if ($isUpdate -and $previousServiceWasRunning -and
+                (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                Start-Service -Name $serviceName
+                if ($previousUsesHttps) {
+                    $null = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps
+                }
+                else {
+                    $null = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60
+                }
+            }
+        } },
+        [pscustomobject]@{ Name = 'restore-legacy-background-task'; Action = {
+            if ($legacyBackgroundTaskTouched) {
+                $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `
+                    -TaskPath '\' -ErrorAction SilentlyContinue
+                if ($legacyBackgroundTaskRemoved) {
+                    if ($currentLegacyTask) {
+                        throw 'Rollback found an unexpected task with the legacy Agent task name.'
+                    }
+                    Register-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\' `
+                        -Xml ([string]$legacyBackgroundState.TaskXml) -Force | Out-Null
+                    $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `
+                        -TaskPath '\' -ErrorAction Stop
+                }
+                if (-not (Test-SswOwnedLegacyBackgroundTask -Task $currentLegacyTask)) {
+                    throw 'Rollback could not revalidate the restored legacy Agent task.'
+                }
+                if ($legacyBackgroundState.WasRunning) {
+                    Start-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\'
+                }
+            }
+        } },
+        [pscustomobject]@{ Name = 'remove-transaction-files'; Action = {
+            if (Test-Path -LiteralPath $transactionRoot) {
+                Remove-Item -LiteralPath $transactionRoot -Recurse -Force
+            }
         } }
     ))
-    Write-SswOperationJournal -Path $journalPath -Operation 'agent-install' -TransactionId $transactionId `
-        -Stage 'rollback-completed' -Status 'failed' -Version ([string]$sourceManifest.version) -ErrorCodes $rollbackErrors
+    Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
+        -TransactionId $transactionId -Stage 'rollback-completed' -Status 'failed' `
+        -Version ([string]$sourceManifest.version) -ErrorCodes $rollbackErrors
     if ($rollbackErrors.Count -gt 0) {
-        Write-Warning ("일부 자동 복구 단계가 실패했습니다: {0}" -f ($rollbackErrors -join ', ')) -WarningAction Continue
+        Write-Warning ("Rollback completed with errors: {0}" -f ($rollbackErrors -join ', '))
     }
     throw $failure
 }

@@ -8,6 +8,7 @@ public partial class ConnectionSettingsWindow : Window
     private readonly ViewerSettings _original;
     private readonly Func<ViewerSettings, CancellationToken, Task> _applySettingsAsync;
     private readonly CancellationTokenSource _lifetime = new();
+    private ViewerSettings? _identityMismatchCandidate;
 
     public ConnectionSettingsWindow(
         ViewerSettings settings,
@@ -19,7 +20,6 @@ public partial class ConnectionSettingsWindow : Window
         DemoModeCheckBox.IsChecked = settings.DemoMode;
         ViewerSettingsSanitizer.SplitAgentUri(settings.AgentUri, out var address, out var port);
         AgentAddressTextBox.Text = address;
-        AgentPortTextBox.Text = port.ToString();
         StartMinimizedCheckBox.IsChecked = settings.StartMinimizedToTray;
         Loaded += (_, _) =>
         {
@@ -58,7 +58,7 @@ public partial class ConnectionSettingsWindow : Window
 
         if (!ViewerSettingsSanitizer.TryBuildAgentUri(
                 AgentAddressTextBox.Text,
-                AgentPortTextBox.Text,
+                ViewerSettingsSanitizer.DefaultAgentPort.ToString(),
                 out var agentUri,
                 out var reason))
         {
@@ -94,6 +94,11 @@ public partial class ConnectionSettingsWindow : Window
         catch (AgentClientException exception)
         {
             ValidationText.Text = $"{ViewerConnectionMessages.ForCode(exception.ErrorCode)} ({exception.ErrorCode})";
+            if (exception.ErrorCode == "AGENT_IDENTITY_CHANGED")
+            {
+                _identityMismatchCandidate = settings;
+                RetrustButton.Visibility = Visibility.Visible;
+            }
         }
         catch
         {
@@ -110,8 +115,27 @@ public partial class ConnectionSettingsWindow : Window
         SaveButton.IsEnabled = !busy;
         CancelButton.IsEnabled = !busy;
         AgentAddressTextBox.IsEnabled = !busy;
-        AgentPortTextBox.IsEnabled = !busy;
         DemoModeCheckBox.IsEnabled = !busy;
         SaveButton.Content = busy ? "연결 확인 중…" : "연결 확인 및 저장";
+    }
+
+    private async void Retrust_Click(object sender, RoutedEventArgs e)
+    {
+        if (_identityMismatchCandidate is null) return;
+        if (MessageBox.Show(
+                this,
+                "Agent PC가 실제로 교체되었거나 Agent가 다시 설치된 경우에만 진행하세요.",
+                "이 Agent로 다시 연결",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning) != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        var candidate = ViewerSettingsSanitizer.Copy(_identityMismatchCandidate);
+        candidate.RemoveAgentTrustPin();
+        RetrustButton.Visibility = Visibility.Collapsed;
+        _identityMismatchCandidate = null;
+        await ApplyAndCloseAsync(candidate);
     }
 }

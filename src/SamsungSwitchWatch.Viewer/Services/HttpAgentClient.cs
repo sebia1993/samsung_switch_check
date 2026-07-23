@@ -1,29 +1,36 @@
-using System.Collections.ObjectModel;
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.SignalR.Client;
 using SamsungSwitchWatch.Viewer.Models;
 
 namespace SamsungSwitchWatch.Viewer.Services;
 
 public sealed class HttpAgentClient : IAgentClient
 {
-    internal static readonly TimeSpan ReadOnlyQueryTimeout = TimeSpan.FromSeconds(70);
+    internal static readonly TimeSpan ReadOnlyQueryTimeout = TimeSpan.FromSeconds(510);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    private readonly ViewerSettings _settings;
     private readonly HttpClient _httpClient;
     private readonly HttpClient _queryHttpClient;
-    private readonly HubConnection _hub;
-    private readonly CancellationTokenSource _lifetime = new();
+    private readonly CertificatePinValidator _certificateValidator;
     private readonly SemaphoreSlim _startGate = new(1, 1);
-    private readonly object _reconnectSync = new();
-    private IReadOnlyDictionary<string, string> _deviceNames =
-        new ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
-    private Task? _reconnectTask;
-    private int _apiCompatibility;
+    private AgentIdentityDto? _identity;
+    private int _connectionState = (int)AgentConnectionState.NeedsConnection;
     private bool _disposed;
 
-    public HttpAgentClient(ViewerSettings settings)
+    public HttpAgentClient(ViewerSettings settings) : this(settings, null, null, null)
+    {
+    }
+
+    internal HttpAgentClient(
+        ViewerSettings settings,
+        HttpMessageHandler? controlHandler,
+        HttpMessageHandler? queryHandler,
+        CertificatePinValidator? certificateValidator)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(settings);
         if (!ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason))
@@ -31,57 +38,33 @@ public sealed class HttpAgentClient : IAgentClient
             throw new InvalidOperationException(reason);
         }
 
-        _httpClient = new HttpClient(CreateDirectHttpHandler())
+        settings.AgentUri = clean.AgentUri;
+        settings.AgentTrustPins = clean.AgentTrustPins;
+        _settings = settings;
+        _certificateValidator = certificateValidator ?? new CertificatePinValidator(_settings);
+        _httpClient = new HttpClient(controlHandler ?? CreatePinnedHttpHandler(_certificateValidator))
         {
             BaseAddress = new Uri(clean.AgentUri),
             Timeout = TimeSpan.FromSeconds(20)
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.7");
-        _queryHttpClient = new HttpClient(CreateDirectHttpHandler())
+        _queryHttpClient = new HttpClient(queryHandler ?? CreatePinnedHttpHandler(_certificateValidator))
         {
             BaseAddress = new Uri(clean.AgentUri),
             Timeout = ReadOnlyQueryTimeout
         };
-        _queryHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.7");
-
-        _hub = new HubConnectionBuilder()
-            .WithUrl(new Uri(new Uri(clean.AgentUri), "/hubs/events"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => CreateDirectHttpHandler();
-                options.WebSocketConfiguration = webSocketOptions => webSocketOptions.Proxy = DirectWebProxy.Instance;
-            })
-            .WithAutomaticReconnect(new IndefiniteReconnectPolicy())
-            .Build();
-
-        _hub.On<JsonElement>("eventChanged", payload =>
-        {
-            var names = Volatile.Read(ref _deviceNames);
-            var mapped = AgentContractMapper.MapEventChange(payload, names);
-            if (mapped is not null) EventChanged?.Invoke(this, mapped);
-        });
-        _hub.Reconnecting += _ =>
-        {
-            ConnectionStateChanged?.Invoke(this, AgentConnectionState.Reconnecting);
-            return Task.CompletedTask;
-        };
-        _hub.Reconnected += _ =>
-        {
-            ConnectionStateChanged?.Invoke(this, AgentConnectionState.Connected);
-            return Task.CompletedTask;
-        };
-        _hub.Closed += exception =>
-        {
-            if (!_lifetime.IsCancellationRequested)
-            {
-                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Offline);
-                EnsureReconnectLoop();
-            }
-            return Task.CompletedTask;
-        };
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.8");
+        _queryHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SamsungSwitchWatch.Viewer/0.8");
     }
 
-    public event EventHandler<AgentEventChangeDto>? EventChanged;
+    public event EventHandler<AgentEventChangeDto>? EventChanged
+    {
+        add { }
+        remove { }
+    }
+
     public event EventHandler<AgentConnectionState>? ConnectionStateChanged;
+
+    public bool SupportsStatelessV4 => true;
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -89,24 +72,38 @@ public sealed class HttpAgentClient : IAgentClient
         await _startGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_hub.State is HubConnectionState.Connected or HubConnectionState.Connecting or HubConnectionState.Reconnecting)
+            var currentState = (AgentConnectionState)Volatile.Read(ref _connectionState);
+            if (currentState != AgentConnectionState.Connected)
             {
-                return;
+                PublishConnectionState(currentState == AgentConnectionState.Offline
+                    ? AgentConnectionState.Reconnecting
+                    : AgentConnectionState.Connecting);
             }
 
-            ConnectionStateChanged?.Invoke(this, AgentConnectionState.Connecting);
-            try
+            using var response = await SendAsync(
+                _httpClient, HttpMethod.Get, AgentApiRoutes.IdentityV4, null, cancellationToken).ConfigureAwait(false);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var identity = AgentContractMapper.MapIdentityV4(json);
+            if (!_certificateValidator.CompleteTrust(identity.CertificatePublicKeySha256))
             {
-                await _hub.StartAsync(cancellationToken).ConfigureAwait(false);
-                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Connected);
+                PublishConnectionState(AgentConnectionState.Stale);
+                throw new AgentClientException("AGENT_IDENTITY_CHANGED", AgentConnectionState.Stale);
             }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                var failure = AgentClientErrors.Translate(exception);
-                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Offline);
-                EnsureReconnectLoop();
-                throw failure;
-            }
+            _identity = identity;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (AgentClientException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            var typed = AgentClientErrors.Translate(exception);
+            PublishConnectionState(typed.SuggestedConnectionState);
+            throw typed;
         }
         finally
         {
@@ -114,233 +111,120 @@ public sealed class HttpAgentClient : IAgentClient
         }
     }
 
+    public async Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken)
+    {
+        if (_identity is null) await StartAsync(cancellationToken).ConfigureAwait(false);
+        return _identity!;
+    }
+
+    public async Task<TelnetExecutionResultDto> TestTelnetAsync(
+        TelnetTargetDto target,
+        CancellationToken cancellationToken)
+    {
+        ValidateTarget(target.Host, target.Port, target.Model);
+        await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
+        return await SendTelnetAsync(AgentApiRoutes.TelnetTestV4, target, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+        TelnetExecuteRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        ValidateTarget(request.Host, request.Port, request.Model);
+        if (request.Commands is not { Count: > 0 and <= 8 }
+            || request.Commands.Any(command => !ManagedDeviceValidator.IsSingleShowCommand(command)))
+        {
+            throw new AgentClientException("QUERY_COMMAND_BLOCKED", AgentConnectionState.Stale);
+        }
+        await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
+        return await SendTelnetAsync(AgentApiRoutes.TelnetExecuteV4, request, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<AgentSnapshotDto> GetSnapshotAsync(CancellationToken cancellationToken)
     {
-        var preferred = await SendPreferredGetAsync(
-            AgentApiRoutes.SnapshotV3,
-            AgentApiRoutes.SnapshotV2,
-            cancellationToken).ConfigureAwait(false);
-        using var response = preferred.Response;
-        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        AgentSnapshotDto snapshot;
-        try
-        {
-            snapshot = preferred.ApiVersion == 3
-                ? AgentContractMapper.MapSnapshotV3(json)
-                : AgentContractMapper.MapSnapshotV2(json);
-        }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-        { throw AgentClientErrors.Translate(exception); }
-        var names = snapshot.Devices.ToDictionary(item => item.Id, item => item.Name, StringComparer.OrdinalIgnoreCase);
-        Volatile.Write(ref _deviceNames, new ReadOnlyDictionary<string, string>(names));
-        return snapshot;
+        var identity = await GetIdentityAsync(cancellationToken).ConfigureAwait(false);
+        return new AgentSnapshotDto(
+            DateTimeOffset.UtcNow,
+            AgentConnectionState.Connected,
+            [],
+            0,
+            $"Agent {identity.AgentId} · API v4",
+            "Viewer 주도형 Telnet 중계 준비",
+            identity.AgentId,
+            ApiVersion: 4,
+            AgentChannelStatus: "connected",
+            ApiChannelStatus: "available",
+            RealtimeChannelStatus: "viewer-local",
+            OperationalStatuses:
+            [
+                new("HTTPS_TOFU", "Agent HTTPS", "인증서 공개키를 Viewer가 자동 확인합니다.", DeviceHealth.Normal),
+                new("STATELESS_AGENT", "장비 정보 보관", "장비와 계정은 Viewer에만 저장됩니다.", DeviceHealth.Normal)
+            ],
+            ReadOnlyQueriesEnabled: true,
+            ReadOnlyQueryMaxCommandLength: 128,
+            ReadOnlyQueryMaxOutputBytes: identity.MaxOutputBytes);
     }
 
-    public async Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken)
-    {
-        var preferred = await SendPreferredGetAsync(
-            AgentApiRoutes.RecentEventsV3(limit),
-            AgentApiRoutes.RecentEventsV2(limit),
-            cancellationToken).ConfigureAwait(false);
-        using var response = preferred.Response;
-        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        try { return AgentContractMapper.MapEvents(json, Volatile.Read(ref _deviceNames)); }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-        { throw AgentClientErrors.Translate(exception); }
-    }
+    public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<SwitchEventDto>>([]);
 
-    public async Task<EventChangePageDto> GetEventChangesAsync(long cursor, int limit, CancellationToken cancellationToken)
-    {
-        var preferred = await SendPreferredGetAsync(
-            AgentApiRoutes.EventChangesV3(cursor, limit),
-            AgentApiRoutes.EventChangesV2(cursor, limit),
-            cancellationToken).ConfigureAwait(false);
-        using var response = preferred.Response;
-        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        try { return AgentContractMapper.MapEventChangePage(json, Volatile.Read(ref _deviceNames)); }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-        { throw AgentClientErrors.Translate(exception); }
-    }
+    public Task<EventChangePageDto> GetEventChangesAsync(long cursor, int limit, CancellationToken cancellationToken) =>
+        Task.FromResult(new EventChangePageDto(cursor, cursor, false, []));
 
-    public async Task<CommandResultDto> ExecuteRegisteredCheckAsync(
+    public Task<CommandResultDto> ExecuteRegisteredCheckAsync(
         string deviceId,
         string commandId,
-        CancellationToken cancellationToken)
-    {
-        HttpResponseMessage response;
-        var apiVersion = Volatile.Read(ref _apiCompatibility);
-        if (apiVersion != 2)
-        {
-            var body = JsonSerializer.Serialize(new
-            {
-                deviceIds = new[] { deviceId },
-                commandIds = new[] { commandId }
-            });
-            response = await SendRawAsync(HttpMethod.Post, AgentApiRoutes.CheckRunsV3, body, cancellationToken).ConfigureAwait(false);
-            if (ApiCompatibilityPolicy.ShouldFallback(response.StatusCode))
-            {
-                response.Dispose();
-                Interlocked.Exchange(ref _apiCompatibility, 2);
-                response = await SendAsync(HttpMethod.Post, AgentApiRoutes.Command(deviceId, commandId), cancellationToken).ConfigureAwait(false);
-                apiVersion = 2;
-            }
-            else
-            {
-                await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-                Interlocked.Exchange(ref _apiCompatibility, 3);
-                apiVersion = 3;
-            }
-        }
-        else
-        {
-            response = await SendAsync(HttpMethod.Post, AgentApiRoutes.Command(deviceId, commandId), cancellationToken).ConfigureAwait(false);
-        }
-        using (response)
-        {
-            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                using var document = JsonDocument.Parse(json);
-                var root = document.RootElement;
-                if (apiVersion == 3)
-                {
-                    var devices = root.TryGetProperty("devices", out var deviceResults)
-                                  && deviceResults.ValueKind == JsonValueKind.Array
-                        ? deviceResults
-                        : default;
-                    var selected = devices.ValueKind == JsonValueKind.Array && devices.GetArrayLength() > 0
-                        ? devices[0]
-                        : default;
-                    var success = selected.ValueKind == JsonValueKind.Object
-                                  && selected.TryGetProperty("success", out var successValue)
-                                  && successValue.ValueKind == JsonValueKind.True;
-                    var errorCode = selected.ValueKind == JsonValueKind.Object
-                        && selected.TryGetProperty("errorCode", out var errorValue)
-                        ? errorValue.GetString()
-                        : null;
-                    return new CommandResultDto(success,
-                        success ? "등록된 다중 장비 점검이 완료되었습니다." : $"점검 실패 · {errorCode ?? "CHECK_RUN_FAILED"}",
-                        errorCode);
-                }
-                var collectorStatus = root.TryGetProperty("collectorStatus", out var status) ? status.GetString() ?? "OK" : "OK";
-                var eventsCreated = root.TryGetProperty("eventsCreated", out var events) && events.TryGetInt32(out var count) ? count : 0;
-                return new CommandResultDto(true, $"등록 점검 완료 · {collectorStatus} · 이벤트 {eventsCreated}건");
-            }
-            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-            { throw AgentClientErrors.Translate(exception); }
-        }
-    }
+        CancellationToken cancellationToken) =>
+        Task.FromResult(new CommandResultDto(false, "Viewer 장비 정보가 필요합니다.", "VIEWER_DEVICE_NOT_FOUND"));
 
-    public async Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+    public Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
         string deviceId,
         string command,
+        CancellationToken cancellationToken) =>
+        Task.FromException<ReadOnlyQueryResultDto>(new AgentClientException(
+            "VIEWER_DEVICE_NOT_FOUND", AgentConnectionState.Stale));
+
+    public Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken) =>
+        Task.FromResult(false);
+
+    private async Task<TelnetExecutionResultDto> SendTelnetAsync(
+        string route,
+        object body,
         CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
-        var body = JsonSerializer.Serialize(new { deviceId, command });
-        HttpResponseMessage response;
+        var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(body, JsonOptions);
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, AgentApiRoutes.ReadOnlyQueriesV3)
-            {
-                Content = new StringContent(body, Encoding.UTF8, "application/json")
-            };
-            response = await _queryHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            throw AgentClientErrors.Translate(exception);
-        }
-
-        using (response)
-        {
-            await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            try { return AgentContractMapper.MapReadOnlyQueryResult(json); }
-            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
-            { throw AgentClientErrors.Translate(exception); }
-        }
-    }
-
-    public async Task<bool> AcknowledgeAsync(string eventId, CancellationToken cancellationToken)
-    {
-        using var response = await SendAsync(HttpMethod.Post, AgentApiRoutes.Acknowledge(eventId), cancellationToken).ConfigureAwait(false);
-        return true;
-    }
-
-    private void EnsureReconnectLoop()
-    {
-        lock (_reconnectSync)
-        {
-            if (_disposed || _reconnectTask is { IsCompleted: false }) return;
-            _reconnectTask = Task.Run(() => ReconnectLoopAsync(_lifetime.Token));
-        }
-    }
-
-    private async Task ReconnectLoopAsync(CancellationToken cancellationToken)
-    {
-        var attempt = 0;
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var delay = ReconnectDelay.GetDelay(attempt++);
-            if (delay > TimeSpan.Zero) await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            using var response = await SendAsync(
+                _queryHttpClient, HttpMethod.Post, route, jsonBytes, cancellationToken).ConfigureAwait(false);
+            var resultJson = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await StartAsync(cancellationToken).ConfigureAwait(false);
-                if (_hub.State == HubConnectionState.Connected) return;
+                return AgentContractMapper.MapTelnetExecutionResultV4(resultJson);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
             {
-                return;
-            }
-            catch
-            {
-                // StartAsync reports the offline state. Keep retrying until disposal.
+                var typed = AgentClientErrors.Translate(exception);
+                PublishConnectionState(typed.SuggestedConnectionState);
+                throw typed;
             }
         }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(jsonBytes);
+        }
+    }
+
+    private async Task EnsureStartedAsync(CancellationToken cancellationToken)
+    {
+        await StartAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HttpResponseMessage> SendAsync(
+        HttpClient client,
         HttpMethod method,
         string route,
-        CancellationToken cancellationToken)
-    {
-        var response = await SendRawAsync(method, route, null, cancellationToken).ConfigureAwait(false);
-        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-        return response;
-    }
-
-    private async Task<(HttpResponseMessage Response, int ApiVersion)> SendPreferredGetAsync(
-        string v3Route,
-        string v2Route,
-        CancellationToken cancellationToken)
-    {
-        if (Volatile.Read(ref _apiCompatibility) == 2)
-        {
-            return (await SendAsync(HttpMethod.Get, v2Route, cancellationToken).ConfigureAwait(false), 2);
-        }
-
-        var response = await SendRawAsync(HttpMethod.Get, v3Route, null, cancellationToken).ConfigureAwait(false);
-        if (ApiCompatibilityPolicy.ShouldFallback(response.StatusCode))
-        {
-            response.Dispose();
-            Interlocked.Exchange(ref _apiCompatibility, 2);
-            return (await SendAsync(HttpMethod.Get, v2Route, cancellationToken).ConfigureAwait(false), 2);
-        }
-
-        await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
-        Interlocked.Exchange(ref _apiCompatibility, 3);
-        return (response, 3);
-    }
-
-    private async Task<HttpResponseMessage> SendRawAsync(
-        HttpMethod method,
-        string route,
-        string? jsonBody,
+        byte[]? jsonBody,
         CancellationToken cancellationToken)
     {
         try
@@ -348,34 +232,67 @@ public sealed class HttpAgentClient : IAgentClient
             using var request = new HttpRequestMessage(method, route);
             if (jsonBody is not null)
             {
-                request.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+                request.Content = new ByteArrayContent(jsonBody);
+                request.Content.Headers.ContentType =
+                    new System.Net.Http.Headers.MediaTypeHeaderValue("application/json")
+                    {
+                        CharSet = "utf-8"
+                    };
             }
-            var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            return response;
+            var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            PublishConnectionState(AgentConnectionState.Connected);
+            if (response.IsSuccessStatusCode) return response;
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var typed = AgentClientErrors.FromStatus(response.StatusCode, body);
+            response.Dispose();
+            throw typed;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (AgentClientException)
+        {
+            // Receiving an HTTP response proves that the Agent transport is reachable.
+            // Application-level failures remain request errors rather than link outages.
+            throw;
+        }
         catch (Exception exception)
         {
-            throw AgentClientErrors.Translate(exception);
+            if (_certificateValidator.IdentityChanged)
+            {
+                PublishConnectionState(AgentConnectionState.Stale);
+                throw new AgentClientException("AGENT_IDENTITY_CHANGED", AgentConnectionState.Stale, exception);
+            }
+            var typed = AgentClientErrors.Translate(exception);
+            PublishConnectionState(typed.SuggestedConnectionState);
+            throw typed;
         }
     }
 
-    private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    private void PublishConnectionState(AgentConnectionState state)
     {
-        if (response.IsSuccessStatusCode) return;
-        string body;
-        try { body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); }
-        catch
+        var previous = (AgentConnectionState)Interlocked.Exchange(ref _connectionState, (int)state);
+        if (previous != state)
         {
-            response.Dispose();
-            throw;
+            ConnectionStateChanged?.Invoke(this, state);
         }
-        var typed = AgentClientErrors.FromStatus(response.StatusCode, body);
-        response.Dispose();
-        throw typed;
+    }
+
+    private static void ValidateTarget(string host, int port, string model)
+    {
+        var draft = new ManagedDeviceDraft
+        {
+            DisplayName = "validation",
+            Host = host,
+            Model = model,
+            Username = "validation",
+            Password = "validation"
+        };
+        if (port != 23 || !ManagedDeviceValidator.TryValidate(draft, true, out _))
+        {
+            throw new AgentClientException("VIEWER_DEVICE_INVALID", AgentConnectionState.Stale);
+        }
     }
 
     internal static HttpClientHandler CreateDirectHttpHandler() => new()
@@ -385,29 +302,94 @@ public sealed class HttpAgentClient : IAgentClient
         UseDefaultCredentials = false
     };
 
+    internal static HttpClientHandler CreatePinnedHttpHandler(CertificatePinValidator validator)
+    {
+        var handler = CreateDirectHttpHandler();
+        handler.ServerCertificateCustomValidationCallback = validator.Validate;
+        return handler;
+    }
+
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed) return ValueTask.CompletedTask;
         _disposed = true;
-        _lifetime.Cancel();
-
-        Task? reconnect;
-        lock (_reconnectSync) reconnect = _reconnectTask;
-        if (reconnect is not null)
-        {
-            try { await reconnect.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
-            catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
-        }
-
-        using var shutdown = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        try { await _hub.StopAsync(shutdown.Token).ConfigureAwait(false); } catch { }
-        try { await _hub.DisposeAsync().ConfigureAwait(false); } catch { }
         _httpClient.Dispose();
         _queryHttpClient.Dispose();
         _startGate.Dispose();
-        _lifetime.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}
+
+internal sealed class CertificatePinValidator
+{
+    private readonly ViewerSettings _settings;
+    private string? _observedPin;
+
+    public CertificatePinValidator(ViewerSettings settings) => _settings = settings;
+
+    public bool IdentityChanged { get; private set; }
+
+    public bool Validate(
+        HttpRequestMessage request,
+        X509Certificate2? certificate,
+        X509Chain? chain,
+        SslPolicyErrors errors)
+    {
+        if (certificate is null) return false;
+        string pin;
+        try { pin = GetSpkiSha256(certificate); }
+        catch (CryptographicException) { return false; }
+
+        _observedPin = pin;
+        if (!_settings.TryGetAgentTrustPin(out var expected)) return true;
+        var matches = FixedTimeEquals(expected, pin);
+        IdentityChanged = !matches;
+        return matches;
+    }
+
+    public bool CompleteTrust(string identityPin)
+    {
+        if (_observedPin is null || !FixedTimeEquals(_observedPin, identityPin))
+        {
+            IdentityChanged = true;
+            return false;
+        }
+        if (_settings.TryGetAgentTrustPin(out var expected) && !FixedTimeEquals(expected, identityPin))
+        {
+            IdentityChanged = true;
+            return false;
+        }
+        _settings.SetAgentTrustPin(identityPin.ToUpperInvariant());
+        return true;
+    }
+
+    public static string GetSpkiSha256(X509Certificate2 certificate)
+    {
+        byte[] spki;
+        using (var ecdsa = certificate.GetECDsaPublicKey())
+        {
+            if (ecdsa is not null)
+            {
+                spki = ecdsa.ExportSubjectPublicKeyInfo();
+                return Convert.ToHexString(SHA256.HashData(spki));
+            }
+        }
+        using (var rsa = certificate.GetRSAPublicKey())
+        {
+            if (rsa is null) throw new CryptographicException("CERTIFICATE_PUBLIC_KEY_UNSUPPORTED");
+            spki = rsa.ExportSubjectPublicKeyInfo();
+        }
+        return Convert.ToHexString(SHA256.HashData(spki));
+    }
+
+    private static bool FixedTimeEquals(string left, string right)
+    {
+        if (left.Length != right.Length) return false;
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.ASCII.GetBytes(left.ToUpperInvariant()),
+            Encoding.ASCII.GetBytes(right.ToUpperInvariant()));
     }
 }
 
@@ -419,18 +401,10 @@ internal static class ApiCompatibilityPolicy
 internal sealed class DirectWebProxy : IWebProxy
 {
     public static DirectWebProxy Instance { get; } = new();
-
     private DirectWebProxy() { }
-
     public ICredentials? Credentials { get => null; set { } }
     public Uri GetProxy(Uri destination) => destination;
     public bool IsBypassed(Uri host) => true;
-}
-
-internal sealed class IndefiniteReconnectPolicy : IRetryPolicy
-{
-    public TimeSpan? NextRetryDelay(RetryContext retryContext) =>
-        ReconnectDelay.GetDelay(checked((int)Math.Min(retryContext.PreviousRetryCount, int.MaxValue)));
 }
 
 internal static class ReconnectDelay

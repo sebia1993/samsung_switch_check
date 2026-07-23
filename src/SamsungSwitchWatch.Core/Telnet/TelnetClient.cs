@@ -8,7 +8,7 @@ using SamsungSwitchWatch.Core.Transport;
 
 namespace SamsungSwitchWatch.Core.Telnet;
 
-public sealed class TelnetClient : ITelnetClient
+public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
 {
     private static readonly Encoding WireEncoding = Encoding.Latin1;
     private readonly IByteTransportFactory _transportFactory;
@@ -65,14 +65,7 @@ public sealed class TelnetClient : ITelnetClient
             throw new ArgumentException("At least one registered command ID is required.", nameof(commandIds));
         }
 
-        if (IPAddress.TryParse(endpoint.Host, out var endpointAddress) &&
-            endpointAddress.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            throw Failure(
-                ErrorCodes.Ipv6Unsupported,
-                "endpoint-validation",
-                "This POC supports IPv4 switch endpoints only.");
-        }
+        ValidateEndpoint(endpoint);
 
         var commands = commandIds.Select(profile.GetRequiredCommand).DistinctBy(static item => item.Id).ToArray();
         var startedAt = _timeProvider.GetUtcNow();
@@ -144,6 +137,97 @@ public sealed class TelnetClient : ITelnetClient
         };
     }
 
+    public async Task<TelnetInteractiveResult> ExecuteAsync(
+        TelnetEndpoint endpoint,
+        TelnetCredentials credentials,
+        TelnetPromptProfile promptProfile,
+        IReadOnlyList<string> commands,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(credentials);
+        ArgumentNullException.ThrowIfNull(promptProfile);
+        ArgumentNullException.ThrowIfNull(commands);
+        var definitions = new ReadOnlyCommandDefinition[commands.Count];
+        for (var index = 0; index < commands.Count; index++)
+        {
+            var validation = ReadOnlyQueryPolicy.Validate(commands[index]);
+            if (!validation.IsAllowed)
+            {
+                throw new ArgumentException("Only one-line show commands are permitted.", nameof(commands));
+            }
+
+            definitions[index] = new ReadOnlyCommandDefinition(
+                $"command-{index + 1}",
+                $"Command {index + 1}",
+                validation.NormalizedCommand!,
+                ReadOnlyQueryPolicy.CommandTimeout,
+                1);
+        }
+
+        ValidateEndpoint(endpoint);
+        var startedAt = _timeProvider.GetUtcNow();
+        var outputs = new List<CommandOutput>(definitions.Length);
+        IReadOnlyList<ReadOnlyCommandDefinition> remaining = definitions;
+        var sessionCount = 0;
+        var reconnectCount = 0;
+        InteractiveSessionAttempt result;
+        while (true)
+        {
+            sessionCount++;
+            try
+            {
+                result = await ExecuteInteractiveSessionAsync(
+                        endpoint,
+                        credentials,
+                        promptProfile,
+                        remaining,
+                        CalculateSessionBudget(remaining),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                outputs.AddRange(result.Outputs);
+                break;
+            }
+            catch (InteractiveAttemptException exception)
+            {
+                outputs.AddRange(exception.CompletedOutputs);
+                remaining = remaining.Skip(exception.CompletedOutputs.Count).ToArray();
+                if (string.Equals(
+                        exception.Failure.Error.Code,
+                        ErrorCodes.TelnetSessionClosed,
+                        StringComparison.Ordinal) &&
+                    string.Equals(
+                        exception.Failure.Error.Stage,
+                        "command",
+                        StringComparison.Ordinal) &&
+                    remaining.Count > 0 &&
+                    reconnectCount < _options.SessionCloseRetryCount)
+                {
+                    reconnectCount++;
+                    await Task.Delay(
+                            _options.SessionCloseRetryDelay,
+                            _timeProvider,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
+                throw exception.Failure;
+            }
+        }
+
+        return new TelnetInteractiveResult(
+            outputs,
+            result.Privilege,
+            result.PromptTerminator,
+            startedAt,
+            _timeProvider.GetUtcNow())
+        {
+            SessionCount = sessionCount,
+            ReconnectCount = reconnectCount
+        };
+    }
+
     private async Task<IReadOnlyList<CommandOutput>> ExecuteSessionAttemptAsync(
         TelnetEndpoint endpoint,
         TelnetCredentials credentials,
@@ -162,13 +246,14 @@ public sealed class TelnetClient : ITelnetClient
         try
         {
             await ConnectAsync(transport, endpoint, sessionToken).ConfigureAwait(false);
-            var devicePromptPattern = await AuthenticateAsync(
+            var authenticatedPrompt = await AuthenticateAsync(
                     transport,
                     negotiator,
                     credentials,
                     promptProfile,
                     sessionToken)
                 .ConfigureAwait(false);
+            var devicePromptPattern = authenticatedPrompt.ExactPattern;
             authenticated = true;
 
             foreach (var command in commands)
@@ -254,6 +339,130 @@ public sealed class TelnetClient : ITelnetClient
         }
     }
 
+    private async Task<InteractiveSessionAttempt> ExecuteInteractiveSessionAsync(
+        TelnetEndpoint endpoint,
+        TelnetCredentials credentials,
+        TelnetPromptProfile promptProfile,
+        IReadOnlyList<ReadOnlyCommandDefinition> commands,
+        TimeSpan sessionBudget,
+        CancellationToken cancellationToken)
+    {
+        await using var transport = _transportFactory.Create();
+        var negotiator = new TelnetNegotiator();
+        var authenticated = false;
+        var outputs = new List<CommandOutput>(commands.Count);
+        using var sessionCancellation = CreateStageCancellation(cancellationToken, sessionBudget);
+        var sessionToken = sessionCancellation.Token;
+
+        try
+        {
+            await ConnectAsync(transport, endpoint, sessionToken).ConfigureAwait(false);
+            var prompt = await AuthenticateAsync(
+                    transport,
+                    negotiator,
+                    credentials,
+                    promptProfile,
+                    sessionToken)
+                .ConfigureAwait(false);
+            authenticated = true;
+
+            if (prompt.Terminator == '>' && credentials.EnablePassword is not null)
+            {
+                prompt = await ElevateAsync(
+                        transport,
+                        negotiator,
+                        credentials.EnablePassword,
+                        promptProfile,
+                        sessionToken)
+                    .ConfigureAwait(false);
+            }
+
+            foreach (var command in commands)
+            {
+                sessionToken.ThrowIfCancellationRequested();
+                await WriteLineWithTimeoutAsync(
+                        transport,
+                        command.Command,
+                        ErrorCodes.CommandTimeout,
+                        "command-write",
+                        sessionToken)
+                    .ConfigureAwait(false);
+                var response = await ReadUntilAsync(
+                        transport,
+                        negotiator,
+                        [prompt.ExactPattern],
+                        [],
+                        promptProfile.PagingMarkers,
+                        promptProfile.PagingContinueByte,
+                        command.Timeout,
+                        ErrorCodes.CommandTimeout,
+                        "command",
+                        sessionToken)
+                    .ConfigureAwait(false);
+
+                outputs.Add(new CommandOutput(
+                    command.Id,
+                    command.Command,
+                    response.Text,
+                    OutputNormalizer.NormalizeCommandOutput(
+                        response.VisibleText,
+                        command.Command,
+                        prompt.ExactPattern,
+                        promptProfile.PagingMarkers),
+                    _timeProvider.GetUtcNow()));
+            }
+
+            return new InteractiveSessionAttempt(
+                outputs,
+                prompt.Terminator == '#' ? TelnetPrivilege.Privileged : TelnetPrivilege.User,
+                prompt.Terminator);
+        }
+        catch (SwitchWatchException exception)
+        {
+            throw new InteractiveAttemptException(exception, outputs.ToArray());
+        }
+        catch (TelnetProtocolException exception)
+        {
+            throw new InteractiveAttemptException(Failure(
+                ErrorCodes.TelnetNegotiationFailed,
+                "telnet-negotiation",
+                "The Telnet option negotiation did not complete safely.",
+                true,
+                exception), outputs.ToArray());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException exception) when (sessionCancellation.IsCancellationRequested)
+        {
+            throw new InteractiveAttemptException(Failure(
+                ErrorCodes.CommandTimeout,
+                "telnet-session",
+                "The Telnet session exceeded its total time limit.",
+                true,
+                exception), outputs.ToArray());
+        }
+        catch (Exception exception) when (exception is IOException or SocketException or InvalidOperationException)
+        {
+            throw new InteractiveAttemptException(Failure(
+                ErrorCodes.TelnetSessionClosed,
+                authenticated ? "command" : "telnet-session",
+                "The switch closed the Telnet session before a valid prompt was received.",
+                true,
+                exception), outputs.ToArray());
+        }
+        finally
+        {
+            if (authenticated && transport.IsConnected)
+            {
+                await TryLogoutAsync(transport, promptProfile.LogoutCommand).ConfigureAwait(false);
+            }
+
+            await transport.CloseAsync().ConfigureAwait(false);
+        }
+    }
+
     private IReadOnlyList<IReadOnlyList<ReadOnlyCommandDefinition>> PlanCommandBatches(
         IReadOnlyList<ReadOnlyCommandDefinition> commands)
     {
@@ -314,7 +523,7 @@ public sealed class TelnetClient : ITelnetClient
         }
     }
 
-    private async Task<string> AuthenticateAsync(
+    private async Task<AuthenticatedPrompt> AuthenticateAsync(
         IByteTransport transport,
         TelnetNegotiator negotiator,
         TelnetCredentials credentials,
@@ -341,7 +550,7 @@ public sealed class TelnetClient : ITelnetClient
 
         if (initial.PatternIndex == 2)
         {
-            return CreateExactPromptPattern(initial.MatchedText);
+            return CreateAuthenticatedPrompt(initial.MatchedText);
         }
 
         if (initial.PatternIndex == 0)
@@ -373,7 +582,7 @@ public sealed class TelnetClient : ITelnetClient
 
             if (passwordPrompt.PatternIndex == 2)
             {
-                return CreateExactPromptPattern(passwordPrompt.MatchedText);
+                return CreateAuthenticatedPrompt(passwordPrompt.MatchedText);
             }
         }
 
@@ -402,7 +611,73 @@ public sealed class TelnetClient : ITelnetClient
             throw AuthFailure();
         }
 
-        return CreateExactPromptPattern(authenticated.MatchedText);
+        return CreateAuthenticatedPrompt(authenticated.MatchedText);
+    }
+
+    private async Task<AuthenticatedPrompt> ElevateAsync(
+        IByteTransport transport,
+        TelnetNegotiator negotiator,
+        string enablePassword,
+        TelnetPromptProfile promptProfile,
+        CancellationToken cancellationToken)
+    {
+        await WriteLineWithTimeoutAsync(
+                transport,
+                "enable",
+                ErrorCodes.EnableFailed,
+                "enable-write",
+                cancellationToken)
+            .ConfigureAwait(false);
+        var challenge = await ReadUntilAsync(
+                transport,
+                negotiator,
+                [promptProfile.PasswordPromptPattern, promptProfile.DevicePromptPattern],
+                promptProfile.AuthenticationFailurePatterns,
+                promptProfile.PagingMarkers,
+                promptProfile.PagingContinueByte,
+                _options.Timeouts.Authentication,
+                ErrorCodes.EnableFailed,
+                "enable",
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (challenge.IsFailure)
+        {
+            throw EnableFailure();
+        }
+
+        if (challenge.PatternIndex == 1)
+        {
+            var prompt = CreateAuthenticatedPrompt(challenge.MatchedText);
+            return prompt.Terminator == '#' ? prompt : throw EnableFailure();
+        }
+
+        await WriteLineWithTimeoutAsync(
+                transport,
+                enablePassword,
+                ErrorCodes.EnableFailed,
+                "enable-write",
+                cancellationToken)
+            .ConfigureAwait(false);
+        var enabled = await ReadUntilAsync(
+                transport,
+                negotiator,
+                [promptProfile.DevicePromptPattern, promptProfile.PasswordPromptPattern],
+                promptProfile.AuthenticationFailurePatterns,
+                promptProfile.PagingMarkers,
+                promptProfile.PagingContinueByte,
+                _options.Timeouts.Authentication,
+                ErrorCodes.EnableFailed,
+                "enable",
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (enabled.IsFailure || enabled.PatternIndex != 0)
+        {
+            throw EnableFailure();
+        }
+
+        var elevatedPrompt = CreateAuthenticatedPrompt(enabled.MatchedText);
+        return elevatedPrompt.Terminator == '#' ? elevatedPrompt : throw EnableFailure();
     }
 
     private async Task<ReadMatch> ReadUntilAsync(
@@ -656,7 +931,7 @@ public sealed class TelnetClient : ITelnetClient
         return selected;
     }
 
-    private static string CreateExactPromptPattern(string? matchedText)
+    private static AuthenticatedPrompt CreateAuthenticatedPrompt(string? matchedText)
     {
         var prompt = OutputNormalizer.CleanControlCharacters(matchedText ?? string.Empty)
             .TrimEnd('\r', '\n', ' ', '\t');
@@ -668,13 +943,51 @@ public sealed class TelnetClient : ITelnetClient
                 "The authenticated device prompt could not be captured safely.");
         }
 
-        return $@"(?m)^{Regex.Escape(prompt)}[ \t]*\r?$";
+        var terminator = prompt[^1];
+        if (terminator is not '>' and not '#')
+        {
+            throw Failure(
+                ErrorCodes.PromptParseFailed,
+                "authentication",
+                "The authenticated device prompt has an unsupported privilege terminator.");
+        }
+
+        return new AuthenticatedPrompt(
+            $@"(?m)^{Regex.Escape(prompt)}[ \t]*\r?$",
+            terminator);
+    }
+
+    private static void ValidateEndpoint(TelnetEndpoint endpoint)
+    {
+        if (!IPAddress.TryParse(endpoint.Host, out var endpointAddress) ||
+            endpointAddress.AddressFamily != AddressFamily.InterNetwork)
+        {
+            throw Failure(
+                endpointAddress?.AddressFamily == AddressFamily.InterNetworkV6
+                    ? ErrorCodes.Ipv6Unsupported
+                    : ErrorCodes.PromptParseFailed,
+                "endpoint-validation",
+                "A numeric IPv4 switch endpoint is required.");
+        }
+
+        if (endpoint.Port != 23)
+        {
+            throw Failure(
+                ErrorCodes.PromptParseFailed,
+                "endpoint-validation",
+                "Only Telnet TCP port 23 is permitted.");
+        }
     }
 
     private static SwitchWatchException AuthFailure() => Failure(
         ErrorCodes.AuthFailed,
         "authentication",
         "The switch rejected the supplied credentials.");
+
+    private static SwitchWatchException EnableFailure() => Failure(
+        ErrorCodes.EnableFailed,
+        "enable",
+        "The switch rejected privilege elevation.");
 
     private static SwitchWatchException Failure(
         string code,
@@ -694,6 +1007,22 @@ public sealed class TelnetClient : ITelnetClient
     private sealed record TerminalPatternMatch(int PatternIndex, string MatchedText);
 
     private sealed record PagingMarkerMatch(int Index, int Length);
+
+    private sealed record AuthenticatedPrompt(string ExactPattern, char Terminator);
+
+    private sealed record InteractiveSessionAttempt(
+        IReadOnlyList<CommandOutput> Outputs,
+        TelnetPrivilege Privilege,
+        char PromptTerminator);
+
+    private sealed class InteractiveAttemptException(
+        SwitchWatchException failure,
+        IReadOnlyList<CommandOutput> completedOutputs) : Exception(failure.Message, failure)
+    {
+        public SwitchWatchException Failure { get; } = failure;
+
+        public IReadOnlyList<CommandOutput> CompletedOutputs { get; } = completedOutputs;
+    }
 
     private sealed class TelnetAttemptException(
         SwitchWatchException failure,

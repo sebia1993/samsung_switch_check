@@ -18,6 +18,9 @@ public static class AgentApiRoutes
         $"/api/v3/events/changes?after={Math.Max(0, cursor)}&limit={Math.Clamp(limit, 1, 500)}";
     public const string CheckRunsV3 = "/api/v3/check-runs";
     public const string ReadOnlyQueriesV3 = "/api/v3/read-only-queries";
+    public const string IdentityV4 = "/api/v4/identity";
+    public const string TelnetTestV4 = "/api/v4/telnet/test";
+    public const string TelnetExecuteV4 = "/api/v4/telnet/execute";
     public static string Command(string deviceId, string commandId) =>
         $"/api/v1/commands/{Uri.EscapeDataString(deviceId)}/{Uri.EscapeDataString(commandId)}";
     public static string Acknowledge(string eventId) => $"/api/v1/events/{Uri.EscapeDataString(eventId)}/ack";
@@ -25,6 +28,84 @@ public static class AgentApiRoutes
 
 public static class AgentContractMapper
 {
+    public static AgentIdentityDto MapIdentityV4(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        var result = new AgentIdentityDto(
+            IntValue(root, "apiVersion") ?? 0,
+            StringValue(root, "agentId") ?? string.Empty,
+            StringValue(root, "instanceId") ?? string.Empty,
+            StringValue(root, "certificatePublicKeySha256") ?? string.Empty,
+            StringValue(root, "protocol") ?? string.Empty,
+            IntValue(root, "maxCommandsPerRequest") ?? 0,
+            IntValue(root, "maxOutputBytes") ?? 0);
+        if (result.ApiVersion != 4
+            || string.IsNullOrWhiteSpace(result.AgentId)
+            || string.IsNullOrWhiteSpace(result.InstanceId)
+            || result.CertificatePublicKeySha256.Length != 64
+            || !result.CertificatePublicKeySha256.All(character =>
+                character is >= '0' and <= '9'
+                    or >= 'A' and <= 'F'
+                    or >= 'a' and <= 'f')
+            || !result.Protocol.Equals("https", StringComparison.OrdinalIgnoreCase)
+            || result.MaxCommandsPerRequest is < 1 or > 64
+            || result.MaxOutputBytes is < 1 or > 16 * 1024 * 1024)
+        {
+            throw new JsonException("AGENT_IDENTITY_INVALID");
+        }
+        return result with { CertificatePublicKeySha256 = result.CertificatePublicKeySha256.ToUpperInvariant() };
+    }
+
+    public static TelnetExecutionResultDto MapTelnetExecutionResultV4(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (IntValue(root, "apiVersion") != 4
+            || StringValue(root, "requestId") is not { Length: > 0 } requestId
+            || BoolValue(root, "success") is not { } success
+            || DateTimeValue(root, "startedUtc") is not { } startedUtc
+            || DateTimeValue(root, "completedUtc") is not { } completedUtc)
+        {
+            throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
+        }
+
+        var commands = new List<TelnetCommandOutputDto>();
+        if (root.TryGetProperty("commands", out var commandItems)
+            && commandItems.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in commandItems.EnumerateArray())
+            {
+                var command = StringValue(item, "command");
+                var collectedUtc = DateTimeValue(item, "collectedUtc");
+                if (string.IsNullOrWhiteSpace(command) || collectedUtc is null)
+                {
+                    throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
+                }
+                commands.Add(new TelnetCommandOutputDto(
+                    command,
+                    StringValue(item, "output") ?? string.Empty,
+                    BoolValue(item, "truncated") ?? false,
+                    collectedUtc.Value));
+            }
+        }
+
+        return new TelnetExecutionResultDto(
+            4,
+            requestId,
+            success,
+            StringValue(root, "privilege") ?? "user",
+            StringValue(root, "promptTerminator") ?? string.Empty,
+            startedUtc,
+            completedUtc,
+            Math.Max(0, LongValue(root, "durationMs") ?? 0),
+            commands)
+        {
+            SessionCount = Math.Max(1, IntValue(root, "sessionCount") ?? 1),
+            ReconnectCount = Math.Max(0, IntValue(root, "reconnectCount") ?? 0)
+        };
+    }
+
     public static AgentSnapshotDto MapSnapshotV3(string snapshotJson)
     {
         using var document = JsonDocument.Parse(snapshotJson);

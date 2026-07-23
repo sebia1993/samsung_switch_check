@@ -29,6 +29,46 @@ public sealed class DemoAgentClient : IAgentClient
 
     public event EventHandler<AgentEventChangeDto>? EventChanged;
     public event EventHandler<AgentConnectionState>? ConnectionStateChanged;
+    public bool SupportsStatelessV4 => true;
+
+    public Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(new AgentIdentityDto(
+            4,
+            "demo-agent",
+            "demo-instance",
+            new string('A', 64),
+            "https",
+            8,
+            65_536));
+
+    public async Task<TelnetExecutionResultDto> TestTelnetAsync(
+        TelnetTargetDto target,
+        CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        await Task.Delay(180, cancellationToken);
+        return new TelnetExecutionResultDto(
+            4, target.RequestId, true, string.IsNullOrEmpty(target.EnablePassword) ? "user" : "privileged",
+            string.IsNullOrEmpty(target.EnablePassword) ? ">" : "#",
+            started, DateTimeOffset.UtcNow, 180, []);
+    }
+
+    public async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+        TelnetExecuteRequestDto request,
+        CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        var outputs = new List<TelnetCommandOutputDto>();
+        foreach (var command in request.Commands)
+        {
+            var legacy = await ExecuteReadOnlyQueryAsync(request.RequestId, command, cancellationToken);
+            outputs.Add(new TelnetCommandOutputDto(command, legacy.Output, legacy.Truncated, DateTimeOffset.UtcNow));
+        }
+        return new TelnetExecutionResultDto(
+            4, request.RequestId, true, string.IsNullOrEmpty(request.EnablePassword) ? "user" : "privileged",
+            string.IsNullOrEmpty(request.EnablePassword) ? ">" : "#",
+            started, DateTimeOffset.UtcNow, Math.Max(0, (long)(DateTimeOffset.UtcNow - started).TotalMilliseconds), outputs);
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {

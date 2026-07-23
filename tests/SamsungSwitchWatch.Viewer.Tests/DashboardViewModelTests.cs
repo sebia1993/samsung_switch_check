@@ -541,7 +541,7 @@ public sealed class DashboardViewModelTests
 
             await Assert.ThrowsAsync<HttpRequestException>(() => viewModel.SwitchClientAsync(candidate));
 
-            Assert.Equal("http://original.example.test:18443", viewModel.CurrentSettings.AgentUri);
+            Assert.Equal("https://original.example.test:18443", viewModel.CurrentSettings.AgentUri);
             Assert.False(original.DisposeCalled);
             Assert.True(replacement.DisposeCalled);
             await viewModel.DisposeAsync();
@@ -574,7 +574,7 @@ public sealed class DashboardViewModelTests
 
             await viewModel.SwitchClientAsync(candidate);
 
-            Assert.Equal("http://replacement.example.test:18443", viewModel.CurrentSettings.AgentUri);
+            Assert.Equal("https://replacement.example.test:18443", viewModel.CurrentSettings.AgentUri);
             Assert.Equal(AgentConnectionState.Stale, viewModel.ConnectionState);
             Assert.Contains("AGENT_UNREACHABLE", viewModel.OperationMessage, StringComparison.Ordinal);
             Assert.True(original.DisposeCalled);
@@ -874,6 +874,35 @@ public sealed class DashboardViewModelTests
         await WaitUntilAsync(() => !viewModel.IsReadOnlyQueryRunning);
 
         Assert.StartsWith("취소됨", viewModel.ReadOnlyQueryStatusText, StringComparison.Ordinal);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ReadOnlyQuery_ChangingDeviceCancelsAndClearsPreviousRawOutput()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0,
+            [Device("a", DeviceHealth.Normal, now), Device("b", DeviceHealth.Normal, now)]) with
+        {
+            ApiVersion = 3,
+            ReadOnlyQueriesEnabled = true
+        };
+        fixture.Client.BlockReadOnlyQuery = true;
+        var viewModel = fixture.CreateViewModel();
+        await viewModel.InitializeAsync();
+        viewModel.ReadOnlyQueryCommand = "show running-config";
+        viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+        await fixture.Client.ReadOnlyQueryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        viewModel.SelectedDevice = viewModel.Devices.Single(item => item.Id == "b");
+
+        Assert.Empty(viewModel.ReadOnlyQueryOutput);
+        Assert.Equal("준비", viewModel.ReadOnlyQueryStatusText);
+        Assert.Equal("실행 결과가 없습니다.", viewModel.ReadOnlyQueryResultMeta);
+        await WaitUntilAsync(() => !viewModel.IsReadOnlyQueryRunning);
+        Assert.Empty(viewModel.ReadOnlyQueryOutput);
+        Assert.DoesNotContain("SW-A", viewModel.ReadOnlyQueryResultMeta, StringComparison.Ordinal);
         await viewModel.DisposeAsync();
     }
 

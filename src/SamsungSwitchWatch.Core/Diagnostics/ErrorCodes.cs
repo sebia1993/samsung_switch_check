@@ -10,6 +10,7 @@ public static class ErrorCodes
     public const string TelnetNegotiationFailed = "TELNET_NEGOTIATION_FAILED";
     public const string LoginPromptNotFound = "LOGIN_PROMPT_NOT_FOUND";
     public const string AuthFailed = "AUTH_FAILED";
+    public const string EnableFailed = "ENABLE_FAILED";
     public const string CommandTimeout = "COMMAND_TIMEOUT";
     public const string PromptParseFailed = "PROMPT_PARSE_FAILED";
     public const string TelnetSessionClosed = "TELNET_SESSION_CLOSED";

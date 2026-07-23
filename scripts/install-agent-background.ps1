@@ -2,7 +2,7 @@
     [string]$SourceDirectory = $PSScriptRoot,
     [string]$InstallDirectory = "$env:LOCALAPPDATA\Programs\SamsungSwitchWatch\Agent",
     [string]$DataDirectory = "$env:LOCALAPPDATA\SamsungSwitchWatch\AgentData",
-    [switch]$EnableReadOnlyQueries,
+    [string[]]$AllowedTargetCidrs,
     [switch]$Repair,
     [switch]$Preflight
 )
@@ -26,7 +26,6 @@ $installedExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
 $ownerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $ownerSid = Get-SswCurrentUserSid
 $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$enableReadOnlyQueriesWasSpecified = $PSBoundParameters.ContainsKey('EnableReadOnlyQueries')
 
 function Read-SswJsonFile {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
@@ -46,36 +45,46 @@ function Get-SswAgentProperty {
 function New-SswBackgroundProductionConfiguration {
     param([AllowNull()][object]$ExistingConfiguration)
 
-    $result = if ($ExistingConfiguration) {
-        $ExistingConfiguration | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $agentId = if ($ExistingConfiguration -and $ExistingConfiguration.Agent.AgentId) {
+        [string]$ExistingConfiguration.Agent.AgentId
+    } else { "agent-$env:COMPUTERNAME" }
+    $preservedCidrs = if ($ExistingConfiguration -and
+        $ExistingConfiguration.Agent.PSObject.Properties['AllowedTargetCidrs']) {
+        @($ExistingConfiguration.Agent.AllowedTargetCidrs)
+    } else { @() }
+    $resolvedCidrs = if ($AllowedTargetCidrs -and @($AllowedTargetCidrs).Count -gt 0) {
+        @(ConvertTo-SswIpv4Cidrs -Cidr @($AllowedTargetCidrs))
+    } elseif ($preservedCidrs.Count -gt 0) {
+        @(ConvertTo-SswIpv4Cidrs -Cidr $preservedCidrs)
+    } else {
+        $answer = Read-Host 'Switch target CIDR(s), comma separated (example 10.40.0.0/16)'
+        $entries = @($answer.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        @(ConvertTo-SswIpv4Cidrs -Cidr $entries)
     }
-    else { [pscustomobject]@{} }
-    if (-not $result.PSObject.Properties['Agent'] -or -not $result.Agent) {
-        $result | Add-Member -NotePropertyName Agent -NotePropertyValue ([pscustomobject]@{}) -Force
-    }
-    foreach ($removedProperty in @('Https', 'PairingCodeLifetimeMinutes', 'TokenPepper', 'Tokens')) {
-        $result.Agent.PSObject.Properties.Remove($removedProperty)
-    }
-    $result.Agent | Add-Member -NotePropertyName DataDirectory -NotePropertyValue $data -Force
-    if ($enableReadOnlyQueriesWasSpecified) {
-        $result.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $true -Force
-    }
-    elseif (-not $result.Agent.PSObject.Properties['EnableReadOnlyQueries']) {
-        $result.Agent | Add-Member -NotePropertyName EnableReadOnlyQueries -NotePropertyValue $false -Force
-    }
-    foreach ($readOnlyQueryDefault in ([ordered]@{
-        ReadOnlyQueryMaxCommandLength = 128
-        ReadOnlyQueryMaxOutputBytes = 65536
-        ReadOnlyQueryRateLimitPerMinute = 12
-        ReadOnlyQueryDeviceWaitSeconds = 5
-        ReadOnlyQueryTotalTimeoutSeconds = 60
-    }).GetEnumerator()) {
-        if (-not $result.Agent.PSObject.Properties[$readOnlyQueryDefault.Key]) {
-            $result.Agent | Add-Member -NotePropertyName $readOnlyQueryDefault.Key `
-                -NotePropertyValue $readOnlyQueryDefault.Value
+    return [ordered]@{
+        Agent = [ordered]@{
+            AgentId = $agentId
+            ListenUrl = 'https://0.0.0.0:18443'
+            DataDirectory = $data
+            MockMode = $false
+            AllowedTargetCidrs = @($resolvedCidrs)
+            MaxConcurrentExecutions = 2
+            RateLimitPerMinute = 60
+            MaxRequestBodyBytes = 32768
+            MaxCommandsPerRequest = 8
+            MaxCommandLength = 128
+            MaxOutputBytes = 65536
+            Telnet = [ordered]@{
+                MaxSessionSeconds = 240
+                ImmediateSessionCloseRetryCount = 1
+                ImmediateSessionCloseRetryDelaySeconds = 2
+            }
         }
+        Logging = [ordered]@{
+            LogLevel = [ordered]@{ Default = 'Information'; 'Microsoft.AspNetCore' = 'Warning' }
+        }
+        AllowedHosts = '*'
     }
-    return $result
 }
 
 function Get-SswTaskActionArguments {
@@ -272,6 +281,9 @@ elseif ($existingReceipt -and (Test-Path -LiteralPath $preservedConfigPath -Path
     $configurationSource = Read-SswJsonFile -Path $preservedConfigPath -Label '보존된 Agent 운영 설정'
 }
 elseif ($sourceProductionConfig) { $configurationSource = $sourceProductionConfig }
+$migratingLegacyBackgroundState = $configurationSource -and
+    ($configurationSource.Agent.PSObject.Properties['Switches'] -or
+     $configurationSource.Agent.PSObject.Properties['EnablePolling'])
 $productionConfiguration = New-SswBackgroundProductionConfiguration -ExistingConfiguration $configurationSource
 $listenUrl = Get-SswAgentProperty -Configuration $productionConfiguration -Name 'ListenUrl'
 if ([string]::IsNullOrWhiteSpace([string]$listenUrl)) {
@@ -279,8 +291,8 @@ if ([string]::IsNullOrWhiteSpace([string]$listenUrl)) {
 }
 $listenUri = $null
 if (-not [Uri]::TryCreate([string]$listenUrl, [UriKind]::Absolute, [ref]$listenUri) -or
-    $listenUri.Scheme -ne 'http' -or $listenUri.Port -lt 1) {
-    throw 'Agent HTTP ListenUrl 설정이 올바르지 않습니다.'
+    $listenUri.Scheme -ne 'https' -or $listenUri.Port -ne 18443) {
+    throw 'Agent HTTPS ListenUrl must be fixed at TCP/18443.'
 }
 $httpPort = $listenUri.Port
 
@@ -324,7 +336,7 @@ if ($foreignAgent) {
     throw "수동 또는 다른 Agent가 실행 중입니다. 해당 창을 한 번 종료한 뒤 다시 실행하세요. PID=$($foreignAgent.ProcessId), Path=$displayPath"
 }
 if ($allowedOwnedProcesses.Count -eq 0 -and -not (Test-SswTcpPortAvailable -Port $httpPort)) {
-    throw "Agent HTTP 포트를 다른 프로세스가 사용 중입니다: TCP/$httpPort"
+    throw "Agent HTTPS port is already in use: TCP/$httpPort"
 }
 
 $actionArguments = Get-SswTaskActionArguments -InstalledRunnerPath $runnerPath
@@ -343,8 +355,8 @@ Write-Host "  source : $source"
 Write-Host "  install: $install"
 Write-Host "  data   : $data"
 Write-Host "  task   : $taskName (현재 사용자, 숨김)"
-Write-Host "  HTTP   : TCP/$httpPort (기존 방화벽 정책 유지)"
-Write-Host "  조회 명령: $(if ($Repair -and -not $enableReadOnlyQueriesWasSpecified) { '기존 설정 보존' } elseif ($EnableReadOnlyQueries) { '사용' } else { '사용 안 함(기본값)' })"
+Write-Host "  HTTPS  : TCP/$httpPort (existing firewall policy is unchanged)"
+Write-Host "  target : $(@($productionConfiguration.Agent.AllowedTargetCidrs) -join ', ')"
 if ($Preflight) {
     Write-SswStep '사전 검사를 통과했습니다. 예약 작업·파일·방화벽은 변경되지 않았습니다.'
     return
@@ -371,9 +383,7 @@ $dataOriginalMoved = $false
 $dataSnapshotTaken = $false
 $taskRegistrationAttempted = $false
 $transactionCommitted = $false
-$databaseFiles = @('switchwatch.db', 'switchwatch.db-wal', 'switchwatch.db-shm')
-$dataFileExistence = @{}
-$schemaBackupsBefore = @()
+$fullDataSnapshot = Join-Path $transactionBackup 'data'
 
 Write-SswOperationJournal -Path $journalPath -Operation 'agent-background-install' -TransactionId $transactionId `
     -Stage 'prepared' -Status 'running' -Version ([string]$sourceManifest.version)
@@ -395,7 +405,7 @@ try {
         Stop-SswOwnedBackgroundProcesses
     }
     if (-not (Test-SswTcpPortAvailable -Port $httpPort)) {
-        throw "기존 작업을 중지한 뒤에도 Agent HTTP 포트가 사용 중입니다: TCP/$httpPort"
+        throw "Agent HTTPS port is still in use after stopping the old task: TCP/$httpPort"
     }
 
     $initializeData = -not $existingReceipt
@@ -413,13 +423,7 @@ try {
         $dataSwapped = $true
     }
     else {
-        foreach ($name in @($databaseFiles + @('background-install-receipt.json', 'background-appsettings.Production.json'))) {
-            $path = Join-Path $data $name
-            $dataFileExistence[$name] = Test-Path -LiteralPath $path -PathType Leaf
-            if ($dataFileExistence[$name]) { Copy-Item -LiteralPath $path -Destination (Join-Path $transactionBackup $name) -Force }
-        }
-        $schemaBackupsBefore = @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File `
-            -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        Copy-Item -LiteralPath $data -Destination $fullDataSnapshot -Recurse -Force
         $dataSnapshotTaken = $true
     }
 
@@ -434,10 +438,42 @@ try {
     $registeredTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
     if (-not (Test-SswOwnedBackgroundTask -Task $registeredTask)) { throw '등록된 숨김 Agent 예약 작업의 소유권 검증에 실패했습니다.' }
 
-    Write-SswStep '숨김 Agent 시작 및 HTTP liveness 확인'
+    Write-SswStep '숨김 Agent 시작 및 HTTPS liveness 확인'
     Start-ScheduledTask -TaskName $taskName -TaskPath '\'
-    $healthStatus = Invoke-SswLocalLivenessProbe -Port $httpPort -TimeoutSeconds 45
+    $healthStatus = Invoke-SswLocalLivenessProbe -Port $httpPort -TimeoutSeconds 45 -UseHttps
     Write-Host "  liveness: $healthStatus"
+
+    if ($migratingLegacyBackgroundState) {
+        Write-SswStep 'Archive legacy Agent-owned credentials, database, and raw history'
+        $legacyArchiveName = 'legacy-v0.7-backup-{0}-{1}' -f
+            [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss'),
+            ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+        $legacyArchive = Join-Path $data $legacyArchiveName
+        Assert-SswChildPath -Parent $data -Child $legacyArchive
+        New-Item -ItemType Directory -Path $legacyArchive -Force | Out-Null
+        $legacyCredentialDirectory = Join-Path $data 'credentials'
+        if (Test-Path -LiteralPath $legacyCredentialDirectory -PathType Container) {
+            Move-Item -LiteralPath $legacyCredentialDirectory -Destination $legacyArchive
+        }
+        foreach ($legacyDatabaseName in @('switchwatch.db', 'switchwatch.db-wal', 'switchwatch.db-shm')) {
+            $legacyDatabasePath = Join-Path $data $legacyDatabaseName
+            if (Test-Path -LiteralPath $legacyDatabasePath -PathType Leaf) {
+                Move-Item -LiteralPath $legacyDatabasePath -Destination $legacyArchive
+            }
+        }
+        foreach ($legacySchemaBackup in @(Get-ChildItem -LiteralPath $data `
+            -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue)) {
+            Move-Item -LiteralPath $legacySchemaBackup.FullName -Destination $legacyArchive
+        }
+        $archiveMetadata = [ordered]@{
+            formatVersion = 1
+            source = 'SamsungSwitchWatch Agent v0.7 or earlier'
+            purpose = 'manual recovery or administrator-approved cleanup only'
+            archivedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        } | ConvertTo-Json
+        Write-SswAtomicText -Path (Join-Path $legacyArchive 'README.json') -Content $archiveMetadata
+        Write-Host "  legacy backup: $legacyArchive"
+    }
 
     $productionJson = $productionConfiguration | ConvertTo-Json -Depth 20
     Write-SswAtomicText -Path $preservedConfigPath -Content $productionJson
@@ -501,16 +537,8 @@ catch {
                 if (Test-Path -LiteralPath $dataBackup) { Move-Item -LiteralPath $dataBackup -Destination $data }
             }
             elseif ($dataSnapshotTaken) {
-                foreach ($name in @($databaseFiles + @('background-install-receipt.json', 'background-appsettings.Production.json'))) {
-                    $path = Join-Path $data $name
-                    if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force }
-                    if ([bool]$dataFileExistence[$name]) {
-                        Copy-Item -LiteralPath (Join-Path $transactionBackup $name) -Destination $path -Force
-                    }
-                }
-                foreach ($schemaBackup in @(Get-ChildItem -LiteralPath $data -Filter 'switchwatch.db.schema-*.bak' -File -ErrorAction SilentlyContinue)) {
-                    if ($schemaBackup.FullName -notin $schemaBackupsBefore) { Remove-Item -LiteralPath $schemaBackup.FullName -Force }
-                }
+                if (Test-Path -LiteralPath $data) { Remove-Item -LiteralPath $data -Recurse -Force }
+                Move-Item -LiteralPath $fullDataSnapshot -Destination $data
             }
         } },
         [pscustomobject]@{ Name = 'restore-program'; Action = {

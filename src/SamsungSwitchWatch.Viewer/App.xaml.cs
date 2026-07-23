@@ -17,6 +17,9 @@ public partial class App : Application
     private AlertPopupService? _alertService;
     private SingleInstanceCoordinator? _singleInstance;
     private ConnectionSettingsWindow? _connectionDialog;
+    private DeviceManagementWindow? _deviceManagementDialog;
+    private ManagedDeviceStore? _deviceStore;
+    private ViewerMonitoringStore? _monitoringStore;
     private readonly CancellationTokenSource _lifetime = new();
     private bool _exiting;
 
@@ -37,7 +40,14 @@ public partial class App : Application
 
         _settingsStore = new ViewerSettingsStore();
         var settings = _settingsStore.Load();
-        _viewModel = new DashboardViewModel(settings, _settingsStore, synchronizationContext: SynchronizationContext.Current);
+        _deviceStore = new ManagedDeviceStore();
+        _monitoringStore = new ViewerMonitoringStore();
+        _viewModel = new DashboardViewModel(
+            settings,
+            _settingsStore,
+            synchronizationContext: SynchronizationContext.Current,
+            deviceStore: _deviceStore,
+            monitoringStore: _monitoringStore);
         _mainWindow = new MainWindow(_viewModel);
         MainWindow = _mainWindow;
         _trayIcon = new TrayIconService(_viewModel, ShowDashboard, ShowMiniWindow, OpenConnectionSettings, ExitApplication);
@@ -132,6 +142,28 @@ public partial class App : Application
         finally
         {
             if (ReferenceEquals(_connectionDialog, dialog)) _connectionDialog = null;
+        }
+    }
+
+    public void OpenDeviceManagement()
+    {
+        if (_viewModel is null || _mainWindow is null) return;
+        if (_deviceManagementDialog is { IsVisible: true } existing)
+        {
+            if (existing.WindowState == WindowState.Minimized) existing.WindowState = WindowState.Normal;
+            existing.Activate();
+            return;
+        }
+
+        var dialog = new DeviceManagementWindow(_viewModel) { Owner = _mainWindow };
+        _deviceManagementDialog = dialog;
+        try
+        {
+            dialog.ShowDialog();
+        }
+        finally
+        {
+            if (ReferenceEquals(_deviceManagementDialog, dialog)) _deviceManagementDialog = null;
         }
     }
 

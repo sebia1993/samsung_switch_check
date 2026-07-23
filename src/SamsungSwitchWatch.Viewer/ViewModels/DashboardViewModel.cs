@@ -41,13 +41,20 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private readonly IAgentClientFactory _clientFactory;
     private readonly ViewerSettingsStore _settingsStore;
+    private readonly ManagedDeviceStore? _deviceStore;
+    private readonly ViewerMonitoringStore? _monitoringStore;
     private readonly SynchronizationContext? _uiContext;
     private readonly CancellationTokenSource _lifetime = new();
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private readonly SemaphoreSlim _syncGate = new(1, 1);
     private readonly object _changeSync = new();
     private readonly object _settingsSync = new();
+    private readonly object _monitoringCredentialBlockSync = new();
+    private readonly object _deviceOperationGateSync = new();
     private readonly Dictionary<string, EventViewModel> _eventsById = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _monitoringCredentialBlocks = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SemaphoreSlim> _deviceOperationGates =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly SortedDictionary<long, AgentEventChangeDto> _changeBuffer = [];
     private readonly HashSet<long> _liveAlertSequences = [];
     private IAgentClient _client;
@@ -83,6 +90,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private string _readOnlyQueryHistoryDraft = string.Empty;
     private bool _movingReadOnlyQueryHistory;
     private CancellationTokenSource? _readOnlyQueryCancellation;
+    private long _readOnlyQueryContextGeneration;
     private IReadOnlyList<OperationalStatusDto> _snapshotOperationalStatuses = [];
     private long _changeCursor;
     private long _settingsGeneration;
@@ -91,16 +99,24 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private bool _allowLiveAlerts;
     private bool _initialized;
     private bool _disposed;
+    private bool _statelessV4;
     private Task? _snapshotLoop;
+    private Task? _monitorLoop;
+    private readonly SemaphoreSlim _monitorGate = new(1, 1);
+    private readonly SemaphoreSlim _monitorConcurrency = new(2, 2);
 
     public DashboardViewModel(
         ViewerSettings settings,
         ViewerSettingsStore settingsStore,
         IAgentClientFactory? clientFactory = null,
-        SynchronizationContext? synchronizationContext = null)
+        SynchronizationContext? synchronizationContext = null,
+        ManagedDeviceStore? deviceStore = null,
+        ViewerMonitoringStore? monitoringStore = null)
     {
         _settings = ViewerSettingsSanitizer.Sanitize(settings);
         _settingsStore = settingsStore;
+        _deviceStore = deviceStore;
+        _monitoringStore = monitoringStore;
         _clientFactory = clientFactory ?? new AgentClientFactory();
         _uiContext = synchronizationContext ?? SynchronizationContext.Current;
         _client = CreateInitialClient(_settings);
@@ -161,6 +177,110 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public ViewerSettings CurrentSettings => _settings;
     public long AppliedChangeCursor => Interlocked.Read(ref _changeCursor);
     internal int ReadOnlyQueryHistoryCount => _readOnlyQueryHistory.Count;
+    public bool HasManagedDeviceStore => _deviceStore is not null;
+
+    public IReadOnlyList<ManagedDeviceProfile> GetManagedDevices() => _deviceStore?.Load() ?? [];
+
+    public ManagedDeviceDraft GetManagedDeviceDraft(string id) =>
+        _deviceStore?.CreateEditDraft(id)
+        ?? throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
+
+    public ManagedDeviceProfile SaveManagedDevice(ManagedDeviceDraft draft)
+    {
+        if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
+        var result = _deviceStore.Save(draft);
+        if (result.ConnectionVerified)
+        {
+            ClearMonitoringCredentialBlock(result.Id);
+            _monitoringStore?.ClearCapabilities(result.Id);
+        }
+        if (!result.MonitoringEnabled) _monitoringStore?.ClearActiveFailure(result.Id);
+        ReloadManagedDevices(result.Id);
+        return result;
+    }
+
+    public bool DeleteManagedDevice(string id)
+    {
+        if (_deviceStore is null) return false;
+        var removed = _deviceStore.Delete(id);
+        if (removed)
+        {
+            ClearMonitoringCredentialBlock(id);
+            ReloadManagedDevices();
+        }
+        return removed;
+    }
+
+    public ManagedDeviceProfile SetManagedDeviceMonitoring(string id, bool enabled)
+    {
+        if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
+        var result = _deviceStore.SetMonitoring(id, enabled);
+        if (enabled) _monitoringStore?.ClearCapabilities(id);
+        else _monitoringStore?.ClearActiveFailure(id);
+        ReloadManagedDevices(id);
+        return result;
+    }
+
+    public async Task<TelnetExecutionResultDto> TestManagedDeviceAsync(
+        ManagedDeviceDraft draft,
+        CancellationToken cancellationToken = default)
+    {
+        if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
+        var resolved = _deviceStore.ResolveDraftForOperation(draft);
+        if (!ManagedDeviceValidator.TryValidate(resolved, true, out var reason))
+        {
+            throw new InvalidDataException(reason);
+        }
+        var request = new TelnetTargetDto(
+            Guid.NewGuid().ToString("N"),
+            resolved.Host.Trim(),
+            23,
+            resolved.Model.Trim(),
+            resolved.Username.Trim(),
+            resolved.Password,
+            string.IsNullOrEmpty(resolved.EnablePassword) ? null : resolved.EnablePassword,
+            "test");
+        var operationGate = GetDeviceOperationGate(resolved.Host);
+        await operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var result = await _client.TestTelnetAsync(request, cancellationToken).ConfigureAwait(false);
+            if (result.Success
+                && !string.IsNullOrWhiteSpace(draft.Id)
+                && _monitoringStore is not null)
+            {
+                var profile = _deviceStore.Load().FirstOrDefault(item =>
+                    item.Id.Equals(draft.Id, StringComparison.Ordinal));
+                if (profile is not null)
+                {
+                    var recoveries = _monitoringStore.RecordSuccess(profile);
+                    if (recoveries.Count > 0) ApplyEvents(recoveries);
+                    await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            operationGate.Release();
+        }
+    }
+
+    public void ReloadManagedDevices(string? preferredId = null)
+    {
+        if (_deviceStore is null) return;
+        var profiles = _deviceStore.Load();
+        var selectedId = preferredId ?? SelectedDevice?.Id;
+        Devices.Clear();
+        foreach (var profile in profiles)
+        {
+            Devices.Add(new DeviceViewModel(CreateManagedDeviceSnapshot(profile)));
+        }
+        SelectedDevice = Devices.FirstOrDefault(item => item.Id.Equals(selectedId, StringComparison.Ordinal))
+                         ?? Devices.FirstOrDefault();
+        NotifySummaryChanged();
+        ReadOnlyQueriesEnabled = _statelessV4 && Devices.Count > 0;
+    }
 
     public DeviceViewModel? SelectedDevice
     {
@@ -169,6 +289,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             if (SetProperty(ref _selectedDevice, value))
             {
+                Interlocked.Increment(ref _readOnlyQueryContextGeneration);
+                _readOnlyQueryCancellation?.Cancel();
+                ReadOnlyQueryOutput = string.Empty;
+                ReadOnlyQueryTruncated = false;
+                ReadOnlyQueryStatusText = "준비";
+                ReadOnlyQueryResultMeta = "실행 결과가 없습니다.";
                 RebuildSelectedDeviceEvents();
                 OnPropertyChanged(nameof(HasSelectedDevice));
                 NotifyCommandStates();
@@ -250,25 +376,29 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _ => DeviceHealth.Disconnected
     };
 
-    public string HttpConnectionText => HttpConnectionState switch
-    {
-        AgentConnectionState.Connected => "HTTP 상태 수신 정상",
-        AgentConnectionState.Demo => "데모 상태 수신",
-        AgentConnectionState.Stale => "HTTP 상태 준비 안 됨",
-        AgentConnectionState.NeedsConnection => "HTTP 연결 설정 필요",
-        AgentConnectionState.Connecting => "HTTP 연결 중",
-        _ => "HTTP 상태 수신 실패"
-    };
+    public string HttpConnectionText => _statelessV4 && HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+        ? "HTTPS API 연결 정상"
+        : HttpConnectionState switch
+        {
+            AgentConnectionState.Connected => "HTTP 상태 수신 정상",
+            AgentConnectionState.Demo => "데모 상태 수신",
+            AgentConnectionState.Stale => "HTTP 상태 준비 안 됨",
+            AgentConnectionState.NeedsConnection => "HTTP 연결 설정 필요",
+            AgentConnectionState.Connecting => "HTTP 연결 중",
+            _ => "HTTP 상태 수신 실패"
+        };
 
-    public string RealtimeConnectionText => RealtimeConnectionState switch
-    {
-        AgentConnectionState.Connected => "실시간 이벤트 연결됨",
-        AgentConnectionState.Demo => "데모 이벤트 연결됨",
-        AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
-        AgentConnectionState.Connecting => "실시간 이벤트 연결 중",
-        AgentConnectionState.NeedsConnection => "실시간 이벤트 연결 설정 필요",
-        _ => "실시간 이벤트 연결 끊김"
-    };
+    public string RealtimeConnectionText => _statelessV4 && RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+        ? "Viewer 로컬 감시 준비"
+        : RealtimeConnectionState switch
+        {
+            AgentConnectionState.Connected => "실시간 이벤트 연결됨",
+            AgentConnectionState.Demo => "데모 이벤트 연결됨",
+            AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
+            AgentConnectionState.Connecting => "실시간 이벤트 연결 중",
+            AgentConnectionState.NeedsConnection => "실시간 이벤트 연결 설정 필요",
+            _ => "실시간 이벤트 연결 끊김"
+        };
 
     public bool IsBusy
     {
@@ -416,6 +546,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     public string ReadOnlyQueryUnavailableText => !_hasSnapshot
         ? "Agent 기능 정보를 확인하는 중입니다."
+        : _statelessV4 && Devices.Count == 0
+        ? "장비 관리에서 스위치 IP와 계정을 먼저 등록해 주세요."
         : _apiVersion < 3
         ? "현재 Agent 버전은 장비 명령 기능을 지원하지 않습니다. Agent를 최신 버전으로 업데이트해 주세요."
         : "Agent에서 장비 명령 기능이 꺼져 있습니다. Agent 설치 또는 복구 설정에서 읽기 전용 명령을 사용하도록 설정해 주세요.";
@@ -527,6 +659,63 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     RealtimeConnectionState = AgentConnectionState.NeedsConnection;
                     OperationMessage = "Agent 주소와 포트를 설정해 주세요.";
                 }).ConfigureAwait(false);
+                _initialized = true;
+                return;
+            }
+
+            if (_client.SupportsStatelessV4)
+            {
+                _statelessV4 = true;
+                await RunOnUiAsync(() =>
+                {
+                    _apiVersion = 4;
+                    _hasSnapshot = true;
+                    CollectorVersion = "Agent API v4";
+                    CollectorSummary = "Viewer 주도형 Telnet 중계 · Agent 연결 확인 중";
+                    ReadOnlyQueryMaxCommandLength = 128;
+                    ReloadManagedDevices();
+                    if (_monitoringStore is not null)
+                    {
+                        ApplyEvents(_monitoringStore.LoadEvents(), false);
+                        ApplyEvents(_monitoringStore.BeginSession(_deviceStore?.Load() ?? []), false);
+                    }
+                    RebuildCollectorHealth(DateTimeOffset.UtcNow);
+                }).ConfigureAwait(false);
+                try
+                {
+                    await _client.StartAsync(cancellationToken).ConfigureAwait(false);
+                    var identity = await _client.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
+                    _settingsStore.Save(_settings);
+                    await RunOnUiAsync(() =>
+                    {
+                        _apiVersion = 4;
+                        _currentAgentId = identity.AgentId;
+                        _hasSnapshot = true;
+                        _lastRefreshedAt = DateTimeOffset.UtcNow;
+                        _lastSuccessfulReceiptAt = DateTimeOffset.Now;
+                        HttpConnectionState = _settings.DemoMode
+                            ? AgentConnectionState.Demo
+                            : AgentConnectionState.Connected;
+                        RealtimeConnectionState = HttpConnectionState;
+                        CollectorVersion = $"Agent {identity.AgentId} · API v4";
+                        CollectorSummary = "Viewer 주도형 Telnet 중계 준비";
+                        ReadOnlyQueryMaxCommandLength = 128;
+                        ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
+                        RebuildCollectorHealth(DateTimeOffset.UtcNow);
+                        OperationMessage = "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다.";
+                        OnPropertyChanged(nameof(LastRefreshText));
+                        OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
+                        OnPropertyChanged(nameof(LastSuccessfulReceiptText));
+                    }).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                }
+                if (_monitoringStore is not null && _deviceStore is not null)
+                {
+                    _monitorLoop = Task.Run(() => MonitorLoopAsync(_lifetime.Token));
+                }
                 _initialized = true;
                 return;
             }
@@ -683,6 +872,56 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             var replacement = _clientFactory.Create(clean);
             try
             {
+                if (replacement.SupportsStatelessV4)
+                {
+                    await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
+                    var identity = await replacement.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
+                    _settingsStore.Save(clean);
+                    var oldClient = _client;
+                    UnsubscribeClient(oldClient);
+                    _client = replacement;
+                    _settings = clean;
+                    _statelessV4 = true;
+                    _currentAgentId = identity.AgentId;
+                    SubscribeClient(replacement);
+                    await RunOnUiAsync(() =>
+                    {
+                        Devices.Clear();
+                        RecentEvents.Clear();
+                        _eventsById.Clear();
+                        SelectedDevice = null;
+                        _apiVersion = 4;
+                        _hasSnapshot = true;
+                        _lastRefreshedAt = DateTimeOffset.UtcNow;
+                        _lastSuccessfulReceiptAt = DateTimeOffset.Now;
+                        HttpConnectionState = clean.DemoMode ? AgentConnectionState.Demo : AgentConnectionState.Connected;
+                        RealtimeConnectionState = HttpConnectionState;
+                        CollectorVersion = $"Agent {identity.AgentId} · API v4";
+                        CollectorSummary = "Viewer 주도형 Telnet 중계 준비";
+                        ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
+                        ReloadManagedDevices();
+                        if (_monitoringStore is not null)
+                        {
+                            ApplyEvents(_monitoringStore.LoadEvents(), false);
+                        }
+                        RebuildCollectorHealth(DateTimeOffset.UtcNow);
+                        OperationMessage = "Agent 연결 설정을 저장했습니다.";
+                    }).ConfigureAwait(false);
+                    if (_monitoringStore is not null
+                        && _deviceStore is not null
+                        && (_monitorLoop is null || _monitorLoop.IsCompleted)
+                        && !_lifetime.IsCancellationRequested)
+                    {
+                        _monitorLoop = Task.Run(() => MonitorLoopAsync(_lifetime.Token));
+                    }
+                    if (!ReferenceEquals(oldClient, replacement))
+                    {
+                        try { await oldClient.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false); }
+                        catch (Exception exception) when (exception is TimeoutException or OperationCanceledException) { }
+                    }
+                    return;
+                }
+
                 var snapshot = await replacement.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
                 var recent = await replacement.GetRecentEventsAsync(EventPageSize, cancellationToken).ConfigureAwait(false);
                 await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -833,8 +1072,143 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
+    private async Task MonitorLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunMonitoringCycleSafelyAsync(cancellationToken).ConfigureAwait(false);
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await RunMonitoringCycleSafelyAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task RunMonitoringCycleSafelyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunMonitoringCycleAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            await RunOnUiAsync(() =>
+                OperationMessage = "주기 감시 상태 저장 실패 · 다음 주기에 다시 시도합니다.").ConfigureAwait(false);
+        }
+    }
+
+    internal async Task RunMonitoringCycleAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_statelessV4 || _deviceStore is null || _monitoringStore is null || _disposed) return;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        await _monitorGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            try
+            {
+                await _client.StartAsync(linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (linked.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                _monitoringStore.Heartbeat();
+                return;
+            }
+            var profiles = _deviceStore.Load().Where(item =>
+                    item.MonitoringEnabled
+                    && item.ConnectionVerified
+                    && !IsMonitoringCredentialBlocked(item.Id))
+                .ToArray();
+            await Task.WhenAll(profiles.Select(profile =>
+                MonitorDeviceAsync(profile, linked.Token))).ConfigureAwait(false);
+            _monitoringStore.Heartbeat();
+        }
+        finally
+        {
+            _monitorGate.Release();
+        }
+    }
+
+    private static bool LooksUnsupported(string output)
+    {
+        var lines = (output ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Take(8);
+        return lines.Any(line =>
+            line.StartsWith("% Invalid", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("invalid command", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("invalid input", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("unknown command", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("unrecognized command", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("ambiguous command", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("incomplete command", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("syntax error", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("지원하지", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsAuthenticationFailure(string code) => code is
+        "AUTH_FAILED" or
+        "ENABLE_FAILED" or
+        "ENABLE_AUTH_FAILED" or
+        "CREDENTIAL_REJECTED";
+
     private async Task RefreshAsync()
     {
+        if (_statelessV4)
+        {
+            await RunOnUiAsync(() =>
+            {
+                IsBusy = true;
+                ReloadManagedDevices();
+                OperationMessage = "Agent 연결 상태를 확인하는 중입니다.";
+            }).ConfigureAwait(false);
+            try
+            {
+                await _client.StartAsync(_lifetime.Token).ConfigureAwait(false);
+                var identity = await _client.GetIdentityAsync(_lifetime.Token).ConfigureAwait(false);
+                _settingsStore.Save(_settings);
+                await RunOnUiAsync(() =>
+                {
+                    _currentAgentId = identity.AgentId;
+                    _lastRefreshedAt = DateTimeOffset.UtcNow;
+                    _lastSuccessfulReceiptAt = DateTimeOffset.Now;
+                    HttpConnectionState = _settings.DemoMode
+                        ? AgentConnectionState.Demo
+                        : AgentConnectionState.Connected;
+                    RealtimeConnectionState = HttpConnectionState;
+                    CollectorVersion = $"Agent {identity.AgentId} · API v4";
+                    CollectorSummary = "Viewer 주도형 Telnet 중계 준비";
+                    ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
+                    RebuildCollectorHealth(DateTimeOffset.UtcNow);
+                    OperationMessage = "Agent 연결 확인 완료 · Viewer 장비 목록을 새로고침했습니다.";
+                    OnPropertyChanged(nameof(LastRefreshText));
+                    OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
+                    OnPropertyChanged(nameof(LastSuccessfulReceiptText));
+                }).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+            }
+            finally
+            {
+                await RunOnUiAsync(() => IsBusy = false).ConfigureAwait(false);
+            }
+            return;
+        }
+
         var feedResetBefore = Interlocked.Read(ref _feedResetCount);
         await RunOnUiAsync(() =>
         {
@@ -911,6 +1285,19 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         var device = SelectedDevice;
         if (device is null) return;
+        if (_statelessV4)
+        {
+            ReadOnlyQueryCommand = SelectedCheckId switch
+            {
+                "log_ram" => "show sylog tail num 100",
+                "interface_status" => "show port status",
+                "system" => "show system",
+                "version" => "show version",
+                _ => "show port status"
+            };
+            await ExecuteReadOnlyQueryAsync().ConfigureAwait(false);
+            return;
+        }
         await RunOnUiAsync(() =>
         {
             IsBusy = true;
@@ -937,8 +1324,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         var device = SelectedDevice;
         var command = ReadOnlyQueryCommand.Trim();
         if (device is null || !ReadOnlyQueriesEnabled || command.Length == 0) return;
+        if (!ManagedDeviceValidator.IsSingleShowCommand(command, ReadOnlyQueryMaxCommandLength))
+        {
+            await RunOnUiAsync(() =>
+            {
+                ReadOnlyQueryStatusText = "실패 · QUERY_COMMAND_BLOCKED";
+                ReadOnlyQueryResultMeta = "한 줄짜리 show 조회 명령만 입력할 수 있습니다.";
+            }).ConfigureAwait(false);
+            return;
+        }
 
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var queryContextGeneration = Interlocked.Read(ref _readOnlyQueryContextGeneration);
         _readOnlyQueryCancellation?.Dispose();
         _readOnlyQueryCancellation = cancellation;
         await RunOnUiAsync(() =>
@@ -952,9 +1349,54 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         try
         {
-            var result = await _client.ExecuteReadOnlyQueryAsync(device.Id, command, cancellation.Token).ConfigureAwait(false);
+            ReadOnlyQueryResultDto result;
+            if (_statelessV4 && _deviceStore is not null)
+            {
+                var profile = _deviceStore.Load().FirstOrDefault(item => item.Id.Equals(device.Id, StringComparison.Ordinal))
+                              ?? throw new AgentClientException("VIEWER_DEVICE_NOT_FOUND", AgentConnectionState.Stale);
+                var secrets = _deviceStore.GetSecrets(profile.Id);
+                var request = new TelnetExecuteRequestDto(
+                    Guid.NewGuid().ToString("N"),
+                    profile.Host,
+                    23,
+                    profile.Model,
+                    secrets.Username,
+                    secrets.Password,
+                    secrets.EnablePassword,
+                    "manual",
+                    [command]);
+                var operationGate = GetDeviceOperationGate(profile.Host);
+                await operationGate.WaitAsync(cancellation.Token).ConfigureAwait(false);
+                TelnetExecutionResultDto execution;
+                try
+                {
+                    execution = await _client.ExecuteTelnetAsync(request, cancellation.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    operationGate.Release();
+                }
+                var output = execution.Commands.FirstOrDefault()
+                             ?? new TelnetCommandOutputDto(command, string.Empty, false, execution.CompletedUtc);
+                result = new ReadOnlyQueryResultDto(
+                    4,
+                    device.Id,
+                    output.Command,
+                    execution.StartedUtc,
+                    execution.CompletedUtc,
+                    execution.DurationMs,
+                    output.Output,
+                    output.Truncated,
+                    execution.SessionCount,
+                    execution.ReconnectCount);
+            }
+            else
+            {
+                result = await _client.ExecuteReadOnlyQueryAsync(device.Id, command, cancellation.Token).ConfigureAwait(false);
+            }
             await RunOnUiAsync(() =>
             {
+                if (queryContextGeneration != Interlocked.Read(ref _readOnlyQueryContextGeneration)) return;
                 AddReadOnlyQueryHistory(result.Command);
                 ReadOnlyQueryOutput = result.Output;
                 ReadOnlyQueryTruncated = result.Truncated;
@@ -971,6 +1413,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             await RunOnUiAsync(() =>
             {
+                if (queryContextGeneration != Interlocked.Read(ref _readOnlyQueryContextGeneration)) return;
                 ReadOnlyQueryStatusText = "취소됨 · 연결 종료 요청됨";
                 ReadOnlyQueryResultMeta = $"{device.Name} · {command} · 사용자가 취소했습니다.";
             }).ConfigureAwait(false);
@@ -980,6 +1423,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             var code = SafeMessage(exception);
             await RunOnUiAsync(() =>
             {
+                if (queryContextGeneration != Interlocked.Read(ref _readOnlyQueryContextGeneration)) return;
                 ReadOnlyQueryStatusText = $"실패 · {code}";
                 ReadOnlyQueryResultMeta = ViewerConnectionMessages.ForCode(code);
             }).ConfigureAwait(false);
@@ -1052,6 +1496,19 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         if (item is null || item.Acknowledged) return;
         try
         {
+            if (_statelessV4 && _monitoringStore is not null)
+            {
+                if (_monitoringStore.Acknowledge(item.AgentEventId))
+                {
+                    await RunOnUiAsync(() =>
+                    {
+                        item.Acknowledged = true;
+                        RebuildFilteredEvents();
+                        NotifySummaryChanged();
+                    }).ConfigureAwait(false);
+                }
+                return;
+            }
             if (await _client.AcknowledgeAsync(item.AgentEventId, _lifetime.Token).ConfigureAwait(false))
             {
                 await RunOnUiAsync(() =>
@@ -1323,9 +1780,355 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         RunOnUi(() =>
         {
             if (!ReferenceEquals(sender, _client)) return;
+            if (_statelessV4)
+            {
+                HttpConnectionState = state;
+                RealtimeConnectionState = state;
+                if (state is AgentConnectionState.Connected or AgentConnectionState.Demo)
+                {
+                    _lastSuccessfulReceiptAt = DateTimeOffset.Now;
+                    OnPropertyChanged(nameof(LastSuccessfulReceiptAt));
+                    OnPropertyChanged(nameof(LastSuccessfulReceiptText));
+                    ClearConnectionFailureMessageIfHealthy();
+                }
+                return;
+            }
             RealtimeConnectionState = state;
         });
-        if (state == AgentConnectionState.Connected && _initialized) _ = ReconnectCatchupAsync();
+        if (!_statelessV4 && state == AgentConnectionState.Connected && _initialized) _ = ReconnectCatchupAsync();
+    }
+
+    private async Task MonitorDeviceAsync(
+        ManagedDeviceProfile profile,
+        CancellationToken cancellationToken)
+    {
+        await _monitorConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var operationGate = GetDeviceOperationGate(profile.Host);
+        var entered = false;
+        try
+        {
+            entered = await operationGate.WaitAsync(0, cancellationToken).ConfigureAwait(false);
+            if (!entered) return;
+
+            var secrets = _deviceStore!.GetSecrets(profile.Id);
+            var knownCapabilities = _monitoringStore!.LoadCapabilities(profile.Id);
+            var interfaceCapability = knownCapabilities.FirstOrDefault(item =>
+                item.CommandId.Equals("interface_status", StringComparison.Ordinal));
+            var logCapability = knownCapabilities.FirstOrDefault(item =>
+                item.CommandId.Equals("log_ram", StringComparison.Ordinal));
+            var commands = new List<string>(2);
+            if (interfaceCapability is not { Supported: false, State: "Unsupported" })
+            {
+                commands.Add("show port status");
+            }
+            string? selectedLogCommand = null;
+            if (logCapability is not { Supported: false, State: "Unsupported" })
+            {
+                selectedLogCommand = logCapability is { Supported: true }
+                                     && IsKnownLogCommand(logCapability.SelectedCli)
+                    ? logCapability.SelectedCli
+                    : "show sylog tail num 100";
+                commands.Add(selectedLogCommand!);
+            }
+
+            if (commands.Count == 0)
+            {
+                var testRequest = new TelnetTargetDto(
+                    Guid.NewGuid().ToString("N"),
+                    profile.Host,
+                    23,
+                    profile.Model,
+                    secrets.Username,
+                    secrets.Password,
+                    secrets.EnablePassword,
+                    "monitor");
+                _ = await _client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
+                var testRecoveries = _monitoringStore.RecordSuccess(profile);
+                if (testRecoveries.Count > 0) ApplyEvents(testRecoveries);
+                await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                return;
+            }
+
+            var request = new TelnetExecuteRequestDto(
+                Guid.NewGuid().ToString("N"),
+                profile.Host,
+                23,
+                profile.Model,
+                secrets.Username,
+                secrets.Password,
+                secrets.EnablePassword,
+                "monitor",
+                commands);
+            var result = await _client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
+            var outputs = result.Commands.ToList();
+            var recoveries = _monitoringStore.RecordSuccess(profile);
+            if (recoveries.Count > 0) ApplyEvents(recoveries);
+
+            if (commands.Contains("show port status", StringComparer.OrdinalIgnoreCase))
+            {
+                RecordMonitoredOutput(
+                    profile,
+                    "interface_status",
+                    "show port status",
+                    ["show port status"],
+                    outputs.FirstOrDefault(item =>
+                        item.Command.Equals("show port status", StringComparison.OrdinalIgnoreCase)));
+            }
+
+            if (selectedLogCommand is not null)
+            {
+                var selectedLog = outputs.FirstOrDefault(item =>
+                    item.Command.Equals(selectedLogCommand, StringComparison.OrdinalIgnoreCase));
+                if (selectedLog is null || LooksUnsupported(selectedLog.Output))
+                {
+                    var alternate = selectedLogCommand.Equals(
+                        "show sylog tail num 100",
+                        StringComparison.OrdinalIgnoreCase)
+                        ? "show syslog tail num 100"
+                        : "show sylog tail num 100";
+                    var fallbackRequest = request with
+                    {
+                        RequestId = Guid.NewGuid().ToString("N"),
+                        Commands = [alternate]
+                    };
+                    var fallback = await _client.ExecuteTelnetAsync(fallbackRequest, cancellationToken).ConfigureAwait(false);
+                    selectedLog = fallback.Commands.FirstOrDefault(item =>
+                        item.Command.Equals(alternate, StringComparison.OrdinalIgnoreCase));
+                }
+                RecordMonitoredOutput(
+                    profile,
+                    "log_ram",
+                    "show sylog tail num 100",
+                    ["show sylog tail num 100", "show syslog tail num 100"],
+                    selectedLog);
+            }
+            await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            var code = SafeMessage(exception);
+            if (IsAgentChannelFailure(code))
+            {
+                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+            }
+            else if (!IsTransientBusy(code))
+            {
+                var failures = _monitoringStore!.RecordFailure(profile, code);
+                if (failures.Count > 0) ApplyEvents(failures);
+                await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+            }
+            if (IsAuthenticationFailure(code))
+            {
+                BlockMonitoringForCredentialFailure(profile.Id);
+                var persistenceFailed = false;
+                try
+                {
+                    _deviceStore!.MarkConnectionTest(profile.Id, false, code);
+                }
+                catch
+                {
+                    persistenceFailed = true;
+                }
+                await RunOnUiAsync(() =>
+                {
+                    ReloadManagedDevices(profile.Id);
+                    OperationMessage = persistenceFailed
+                        ? $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. 설정 파일 저장은 실패했습니다."
+                        : $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다.";
+                }).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            if (entered) operationGate.Release();
+            _monitorConcurrency.Release();
+        }
+    }
+
+    private void RecordMonitoredOutput(
+        ManagedDeviceProfile profile,
+        string commandId,
+        string primaryCommand,
+        IReadOnlyList<string> candidates,
+        TelnetCommandOutputDto? output)
+    {
+        var unsupported = output is null || LooksUnsupported(output.Output);
+        var selected = output?.Command;
+        _monitoringStore!.RecordCapability(
+            profile.Id,
+            new CollectorCapabilityDto(
+                commandId,
+                !unsupported,
+                unsupported ? "Unsupported" : "Ready",
+                unsupported ? output is null ? "COMMAND_OUTPUT_MISSING" : "COMMAND_UNSUPPORTED" : null,
+                primaryCommand,
+                selected,
+                candidates,
+                unsupported ? null : selected));
+        if (unsupported) return;
+
+        var events = _monitoringStore.RecordOutput(profile, output!.Command, output.Output);
+        if (events.Count > 0) ApplyEvents(events);
+    }
+
+    private DeviceSnapshotDto CreateManagedDeviceSnapshot(ManagedDeviceProfile profile)
+    {
+        var credentialBlocked = IsMonitoringCredentialBlocked(profile.Id);
+        var credentialCorrupt = profile.LastConnectionTestCode == "VIEWER_CREDENTIAL_CORRUPT";
+        var activeFailure = profile.MonitoringEnabled
+            ? _monitoringStore?.GetActiveFailureCode(profile.Id)
+            : null;
+        var effectiveMonitoringEnabled = profile.MonitoringEnabled && !credentialBlocked;
+        var capabilities = profile.MonitoringEnabled
+            ? _monitoringStore?.LoadCapabilities(profile.Id) ?? []
+            : [];
+        if (profile.MonitoringEnabled && capabilities.Count == 0)
+        {
+            capabilities =
+            [
+                new CollectorCapabilityDto(
+                    "interface_status",
+                    true,
+                    "Initializing",
+                    PrimaryCli: "show port status",
+                    CandidateClis: ["show port status"]),
+                new CollectorCapabilityDto(
+                    "log_ram",
+                    true,
+                    "Initializing",
+                    PrimaryCli: "show sylog tail num 100",
+                    CandidateClis: ["show sylog tail num 100", "show syslog tail num 100"])
+            ];
+        }
+        var capabilityIssue = capabilities.Any(item =>
+            !item.Supported || !item.State.Equals("Ready", StringComparison.OrdinalIgnoreCase));
+        var health = activeFailure is not null
+            ? DeviceHealth.Disconnected
+            : credentialBlocked
+                     || credentialCorrupt
+                     || !profile.ConnectionVerified
+                     || (effectiveMonitoringEnabled && capabilityIssue)
+                ? DeviceHealth.Warning
+                : effectiveMonitoringEnabled ? DeviceHealth.Normal : DeviceHealth.Empty;
+        var summary = activeFailure is not null
+            ? $"주기 감시 실패 · {activeFailure}"
+            : credentialBlocked
+            ? "인증 실패 · 접속 시험 후 감시 재개"
+            : credentialCorrupt
+                ? "저장 계정 사용 불가 · ID/PW 재입력 필요"
+            : !profile.ConnectionVerified
+                ? $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}"
+                : effectiveMonitoringEnabled && capabilityIssue
+                    ? "주기 감시 중 · 일부 명령 확인 필요"
+                    : effectiveMonitoringEnabled ? "Viewer 실행 중 주기 감시" : "등록됨 · 주기 감시 꺼짐";
+        var capabilityMetric = capabilities.Count == 0
+            ? "감시 꺼짐"
+            : capabilities.Any(item => item.State.Equals("Initializing", StringComparison.OrdinalIgnoreCase))
+                ? "확인 중"
+                : $"{capabilities.Count(item => item.Supported)}/{capabilities.Count} 지원";
+        var collectionState = credentialBlocked
+            ? "AuthBlocked"
+            : activeFailure is not null
+                ? "Failed"
+            : credentialCorrupt
+                ? "CredentialCorrupt"
+            : effectiveMonitoringEnabled && capabilityIssue
+                ? "Degraded"
+                : effectiveMonitoringEnabled ? "Monitoring" : "Registered";
+        var collectionError = credentialBlocked
+            ? "AUTH_MONITORING_BLOCKED"
+            : activeFailure
+              ?? (credentialCorrupt
+                  ? "VIEWER_CREDENTIAL_CORRUPT"
+                  : capabilities.FirstOrDefault(item => !item.Supported)?.ErrorCode
+                    ?? profile.LastConnectionTestCode);
+        return new DeviceSnapshotDto(
+            profile.Id,
+            profile.DisplayName,
+            profile.Model,
+            profile.Host,
+            health,
+            profile.LastConnectionTestUtc ?? profile.UpdatedUtc,
+            summary,
+            "-",
+            [
+                new("장비 IP", profile.Host),
+                new("Telnet", "TCP/23"),
+                new("접속 시험", profile.ConnectionVerified ? "성공" : "미확인", profile.ConnectionVerified ? DeviceHealth.Normal : DeviceHealth.Warning),
+                new("주기 감시", effectiveMonitoringEnabled ? "켜짐" : "꺼짐", effectiveMonitoringEnabled ? DeviceHealth.Normal : credentialBlocked ? DeviceHealth.Warning : DeviceHealth.Empty),
+                new("수집 기능", capabilityMetric, capabilityIssue ? DeviceHealth.Warning : DeviceHealth.Normal)
+            ],
+            capabilities,
+            collectionState,
+            collectionError);
+    }
+
+    private void UpdateManagedDevicePresentation(string id)
+    {
+        if (_deviceStore is null) return;
+        var profile = _deviceStore.Load().FirstOrDefault(item => item.Id.Equals(id, StringComparison.Ordinal));
+        if (profile is null) return;
+        var existing = Devices.FirstOrDefault(item => item.Id.Equals(id, StringComparison.Ordinal));
+        if (existing is null)
+        {
+            ReloadManagedDevices(id);
+            return;
+        }
+        existing.Update(CreateManagedDeviceSnapshot(profile));
+        RebuildCollectorHealth(DateTimeOffset.UtcNow);
+        NotifySummaryChanged();
+    }
+
+    private SemaphoreSlim GetDeviceOperationGate(string host)
+    {
+        lock (_deviceOperationGateSync)
+        {
+            if (_deviceOperationGates.TryGetValue(host, out var existing)) return existing;
+            var created = new SemaphoreSlim(1, 1);
+            _deviceOperationGates[host] = created;
+            return created;
+        }
+    }
+
+    private static bool IsTransientBusy(string code) =>
+        code is "AGENT_BUSY" or "DEVICE_BUSY" or "QUERY_RATE_LIMITED";
+
+    private static bool IsAgentChannelFailure(string code) =>
+        (code.StartsWith("AGENT_", StringComparison.Ordinal)
+         && !code.Equals("AGENT_BUSY", StringComparison.Ordinal))
+        || code.Equals("TLS_IDENTITY_INVALID", StringComparison.Ordinal);
+
+    private static bool IsKnownLogCommand(string? command) =>
+        command is not null
+        && (command.Equals("show sylog tail num 100", StringComparison.OrdinalIgnoreCase)
+            || command.Equals("show syslog tail num 100", StringComparison.OrdinalIgnoreCase));
+
+    internal bool IsMonitoringCredentialBlocked(string id)
+    {
+        lock (_monitoringCredentialBlockSync)
+        {
+            return _monitoringCredentialBlocks.Contains(id);
+        }
+    }
+
+    private void BlockMonitoringForCredentialFailure(string id)
+    {
+        lock (_monitoringCredentialBlockSync)
+        {
+            _monitoringCredentialBlocks.Add(id);
+        }
+    }
+
+    private void ClearMonitoringCredentialBlock(string id)
+    {
+        lock (_monitoringCredentialBlockSync)
+        {
+            _monitoringCredentialBlocks.Remove(id);
+        }
     }
 
     private async Task ReconnectCatchupAsync()
@@ -1394,16 +2197,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         CollectorHealth.Clear();
         CollectorHealth.Add(new("Agent", ConnectionText, ConnectionHealth));
-        CollectorHealth.Add(new("HTTP 상태", HttpConnectionText,
+        CollectorHealth.Add(new(_statelessV4 ? "HTTPS API" : "HTTP 상태", HttpConnectionText,
             HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
-        CollectorHealth.Add(new("실시간 이벤트", RealtimeConnectionText,
+        CollectorHealth.Add(new(_statelessV4 ? "Viewer 감시" : "실시간 이벤트", RealtimeConnectionText,
             RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
         CollectorHealth.Add(new("마지막 성공 수신", LastSuccessfulReceiptText));
         CollectorHealth.Add(new("수집기 버전", CollectorVersion));
         CollectorHealth.Add(new("API 버전", $"v{_apiVersion}"));
         CollectorHealth.Add(new("수집기 요약", CollectorSummary));
         CollectorHealth.Add(new("마지막 상태 생성", generatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")));
-        CollectorHealth.Add(new("데이터 범위", "구조화 이벤트만 수신 · 원문 미수신"));
+        CollectorHealth.Add(new("데이터 범위", _statelessV4
+            ? "수동 원문은 화면 메모리만 · 감시 기준값/이벤트는 Viewer 로컬 저장"
+            : "구조화 이벤트만 수신 · 원문 미수신"));
 
         OperationalStatuses.Clear();
         OperationalStatuses.Add(new OperationalStatusDto(
@@ -1420,17 +2225,23 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
                 ? DeviceHealth.Normal
                 : DeviceHealth.Warning));
-        OperationalStatuses.Add(new OperationalStatusDto(
-            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-                ? "REALTIME_AVAILABLE"
-                : "REALTIME_DEGRADED",
-            "SignalR 실시간",
-            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-                ? RealtimeConnectionText
-                : $"{RealtimeConnectionText} · HTTP 캐치업 유지",
-            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-                ? DeviceHealth.Normal
-                : DeviceHealth.Warning));
+        OperationalStatuses.Add(_statelessV4
+            ? new OperationalStatusDto(
+                "VIEWER_LOCAL_MONITOR",
+                "Viewer 로컬 감시",
+                "Viewer가 실행 중인 동안 등록 장비를 감시합니다.",
+                DeviceHealth.Normal)
+            : new OperationalStatusDto(
+                RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                    ? "REALTIME_AVAILABLE"
+                    : "REALTIME_DEGRADED",
+                "SignalR 실시간",
+                RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                    ? RealtimeConnectionText
+                    : $"{RealtimeConnectionText} · HTTP 캐치업 유지",
+                RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+                    ? DeviceHealth.Normal
+                    : DeviceHealth.Warning));
 
         foreach (var status in _snapshotOperationalStatuses.Where(status =>
                      status.Code is not "AGENT_CHANNEL" and not "API_CHANNEL"
@@ -1442,7 +2253,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
         }
 
-        if (OperationalStatuses.All(status =>
+        if (!_statelessV4 && OperationalStatuses.All(status =>
                 !status.Code.Equals("HTTP_UNPROTECTED", StringComparison.Ordinal)))
         {
             OperationalStatuses.Add(new OperationalStatusDto(
@@ -1450,6 +2261,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 "통신 보호",
                 "사내 관리망 전용 · 암호화/인증 없음 · Windows 방화벽 허용 IPv4만 접근",
                 DeviceHealth.Warning));
+        }
+        else if (_statelessV4)
+        {
+            OperationalStatuses.Add(new OperationalStatusDto(
+                "HTTPS_TOFU",
+                "HTTPS 보호",
+                "Agent 주소 기준으로 서버 인증 정보를 자동 확인합니다.",
+                DeviceHealth.Normal));
         }
 
         foreach (var device in Devices)
@@ -1647,6 +2466,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         TaskCanceledException => "AGENT_TIMEOUT",
         InvalidOperationException invalid when invalid.Message.Contains("CONNECTION", StringComparison.OrdinalIgnoreCase) => "VIEWER_CONNECTION_REQUIRED",
         InvalidOperationException => "VIEWER_CONFIGURATION_INVALID",
+        InvalidDataException invalid when invalid.Message == "VIEWER_CREDENTIAL_CORRUPT" => "VIEWER_CREDENTIAL_CORRUPT",
         JsonException => "AGENT_RESPONSE_INVALID",
         _ => "VIEWER_UNEXPECTED_ERROR"
     };
@@ -1676,6 +2496,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             try { await _snapshotLoop.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
             catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
         }
+        if (_monitorLoop is not null)
+        {
+            try { await _monitorLoop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
+        }
+        try { _monitoringStore?.EndSession(); } catch { }
 
         try { await _client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
         catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
@@ -1684,6 +2510,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         if (initializeQuiesced) _initializeGate.Dispose();
         if (syncQuiesced) _syncGate.Dispose();
+        _monitorGate.Dispose();
         if (initializeQuiesced && syncQuiesced) _lifetime.Dispose();
     }
 }
