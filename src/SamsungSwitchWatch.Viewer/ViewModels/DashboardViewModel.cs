@@ -2,15 +2,27 @@ using System.Collections.ObjectModel;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Input;
+using SamsungSwitchWatch.Core.Diagnostics;
+using SamsungSwitchWatch.Core.Parsing;
+using SamsungSwitchWatch.Core.Profiles;
 using SamsungSwitchWatch.Viewer.Infrastructure;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 
 namespace SamsungSwitchWatch.Viewer.ViewModels;
 
-public sealed record DeviceHealthSummary(int Total, int Normal, int Warning, int Critical, int Disconnected, int Loading)
+public sealed record DeviceHealthSummary(
+    int Total,
+    int Normal,
+    int Warning,
+    int Critical,
+    int Disconnected,
+    int Loading,
+    int Unmonitored)
 {
     public int ProblemCount => Warning + Critical + Disconnected;
+
+    public int Monitored => Total - Unmonitored;
 }
 
 public static class StatusAggregator
@@ -24,7 +36,8 @@ public static class StatusAggregator
             items.Count(item => item.Health == DeviceHealth.Warning),
             items.Count(item => item.Health == DeviceHealth.Critical),
             items.Count(item => item.Health == DeviceHealth.Disconnected),
-            items.Count(item => item.Health == DeviceHealth.Loading));
+            items.Count(item => item.Health == DeviceHealth.Loading),
+            items.Count(item => item.Health == DeviceHealth.Empty));
     }
 }
 
@@ -34,10 +47,21 @@ public sealed record RegisteredCheckOption(string Id, string DisplayName);
 public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 {
     private sealed record AlertCandidate(long ChangeSequence, string ChangeKind, SwitchEventDto Event);
+    private sealed record MonitoringOutputAssessment(
+        TelnetCommandOutputDto? Output,
+        bool Ready,
+        bool ExplicitlyUnsupported,
+        string? ErrorCode);
     private enum AgentChannel { Http, Realtime }
 
     private const int EventPageSize = 500;
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(60);
+    private static readonly DeviceProfileRegistry MonitoringProfiles = new(
+    [
+        Ies4028XpProfile.Create(),
+        Ies4224GpProfile.Create(),
+        Ies4226XpProfile.Create()
+    ]);
 
     private readonly IAgentClientFactory _clientFactory;
     private readonly ViewerSettingsStore _settingsStore;
@@ -202,10 +226,19 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public bool DeleteManagedDevice(string id)
     {
         if (_deviceStore is null) return false;
+        var removedHost = _deviceStore.Load()
+            .FirstOrDefault(item => item.Id.Equals(id, StringComparison.Ordinal))?.Host;
         var removed = _deviceStore.Delete(id);
         if (removed)
         {
             ClearMonitoringCredentialBlock(id);
+            if (!string.IsNullOrWhiteSpace(removedHost))
+            {
+                lock (_deviceOperationGateSync)
+                {
+                    _deviceOperationGates.Remove(removedHost);
+                }
+            }
             ReloadManagedDevices();
         }
         return removed;
@@ -272,14 +305,21 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         var profiles = _deviceStore.Load();
         var selectedId = preferredId ?? SelectedDevice?.Id;
         Devices.Clear();
-        foreach (var profile in profiles)
+        foreach (var snapshot in profiles
+                     .Select(CreateManagedDeviceSnapshot)
+                     .OrderBy(snapshot => DeviceDisplayPriority(snapshot.Health))
+                     .ThenBy(snapshot => snapshot.Name, StringComparer.CurrentCultureIgnoreCase))
         {
-            Devices.Add(new DeviceViewModel(CreateManagedDeviceSnapshot(profile)));
+            Devices.Add(new DeviceViewModel(snapshot));
         }
         SelectedDevice = Devices.FirstOrDefault(item => item.Id.Equals(selectedId, StringComparison.Ordinal))
                          ?? Devices.FirstOrDefault();
         NotifySummaryChanged();
         ReadOnlyQueriesEnabled = _statelessV4 && Devices.Count > 0;
+        if (ManagedDeviceStoreWarning() is { } warning)
+        {
+            OperationMessage = warning;
+        }
     }
 
     public DeviceViewModel? SelectedDevice
@@ -323,6 +363,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(MiniCurrentStatusText));
                 OnPropertyChanged(nameof(MiniIssueTitle));
                 OnPropertyChanged(nameof(MiniIssueDetail));
+                OnPropertyChanged(nameof(NormalSummaryCaption));
                 NotifyCommandStates();
             }
         }
@@ -492,7 +533,20 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 _readOnlyQueryHistoryIndex = _readOnlyQueryHistory.Count;
                 _readOnlyQueryHistoryDraft = clean;
             }
+            OnPropertyChanged(nameof(ReadOnlyQueryMayContainSensitiveData));
             NotifyCommandStates();
+        }
+    }
+
+    public bool ReadOnlyQueryMayContainSensitiveData
+    {
+        get
+        {
+            var normalized = ReadOnlyQueryCommand.Trim();
+            return normalized.StartsWith("show running-config", StringComparison.OrdinalIgnoreCase)
+                   || normalized.StartsWith("show startup-config", StringComparison.OrdinalIgnoreCase)
+                   || normalized.StartsWith("show configuration", StringComparison.OrdinalIgnoreCase)
+                   || normalized.StartsWith("show tech-support", StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -575,6 +629,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public int WarningCount => HealthSummary.Warning;
     public int CriticalCount => HealthSummary.Critical;
     public int DisconnectedCount => HealthSummary.Disconnected;
+    public int UnmonitoredCount => HealthSummary.Unmonitored;
+    public int MonitoredCount => HealthSummary.Monitored;
     public int CriticalDisplayCount => CriticalCount + DisconnectedCount;
     public int NewLogCount => RecentEvents.Count(item => !item.Acknowledged && IsLogEvent(item));
     public int RecoveredCount => RecentEvents.Count(item => item.Recovered);
@@ -587,8 +643,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public string UnacknowledgedDisplayText => $"미확인 이벤트 {UnacknowledgedCount:N0}건";
     public string EventCountText => $"{UnacknowledgedDisplayText} · 표시 {VisibleEventCount:N0}건";
     public string ApiVersionText => $"API v{_apiVersion}";
+    public string NormalSummaryCaption =>
+        $"{(ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? "현재 확인" : "마지막 확인")} 정상"
+        + (UnmonitoredCount > 0 ? $" · 미감시 {UnmonitoredCount}대" : string.Empty);
     public string MiniCurrentStatusText => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-        ? "현재 상태 확인됨"
+        ? MonitoredCount == 0
+            ? "Agent 연결됨 · 감시 대상 없음"
+            : "현재 감시 상태 확인됨"
         : "현재 상태 미확인";
     public DeviceHealth MiniIssueHealth => ConnectionState switch
     {
@@ -598,6 +659,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _ when CriticalCount > 0 => DeviceHealth.Critical,
         _ when DisconnectedCount > 0 => DeviceHealth.Disconnected,
         _ when WarningCount > 0 => DeviceHealth.Warning,
+        _ when MonitoredCount == 0 => DeviceHealth.Empty,
         _ => DeviceHealth.Normal
     };
     public string MiniIssueTitle => ConnectionState switch
@@ -611,10 +673,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _ when CriticalCount > 0 => $"장애 장비 {CriticalCount}대",
         _ when DisconnectedCount > 0 => $"접속 끊김 장비 {DisconnectedCount}대",
         _ when WarningCount > 0 => $"경고 장비 {WarningCount}대",
-        _ => "모든 장비 정상"
+        _ when TotalCount == 0 => "등록된 장비 없음",
+        _ when MonitoredCount == 0 => "주기 감시 대상 없음",
+        _ when UnacknowledgedCount > 0 => $"현재 감시 장비 정상 · 확인 대기 {UnacknowledgedCount}건",
+        _ => "현재 감시 장비 정상"
     };
     public string MiniIssueDetail => ConnectionState switch
     {
+        AgentConnectionState.Connected or AgentConnectionState.Demo when MonitoredCount == 0 =>
+            "장비 관리에서 접속 시험 후 주기 감시를 켜세요.",
         AgentConnectionState.Connected or AgentConnectionState.Demo =>
             $"새 로그 {NewLogCount}건 · 미확인 이벤트 {UnacknowledgedCount}건",
         AgentConnectionState.Connecting => "첫 상태를 기다리는 중",
@@ -1061,11 +1128,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private async Task SnapshotLoopAsync(CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(SnapshotInterval);
         try
         {
-            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            while (true)
             {
+                await Task.Delay(SnapshotInterval, cancellationToken).ConfigureAwait(false);
                 _ = await RefreshSnapshotAndChangesAsync(true, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1076,11 +1143,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         try
         {
-            await RunMonitoringCycleSafelyAsync(cancellationToken).ConfigureAwait(false);
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
-            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            while (true)
             {
                 await RunMonitoringCycleSafelyAsync(cancellationToken).ConfigureAwait(false);
+                await Task.Delay(SnapshotInterval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
@@ -1741,6 +1807,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             if (existing is null) Devices.Add(new DeviceViewModel(source));
             else existing.Update(source);
         }
+        SortDevicesByPriority();
 
         SelectedDevice ??= Devices.FirstOrDefault();
         if (SelectedDevice is not null && !incomingIds.Contains(SelectedDevice.Id)) SelectedDevice = Devices.FirstOrDefault();
@@ -1812,23 +1879,26 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
             var secrets = _deviceStore!.GetSecrets(profile.Id);
             var knownCapabilities = _monitoringStore!.LoadCapabilities(profile.Id);
-            var interfaceCapability = knownCapabilities.FirstOrDefault(item =>
-                item.CommandId.Equals("interface_status", StringComparison.Ordinal));
-            var logCapability = knownCapabilities.FirstOrDefault(item =>
-                item.CommandId.Equals("log_ram", StringComparison.Ordinal));
-            var commands = new List<string>(2);
-            if (interfaceCapability is not { Supported: false, State: "Unsupported" })
+            if (!MonitoringProfiles.TryGet(profile.Model, out var commandProfile))
             {
-                commands.Add("show port status");
+                throw new AgentClientException("VIEWER_DEVICE_INVALID", AgentConnectionState.Stale);
             }
-            string? selectedLogCommand = null;
-            if (logCapability is not { Supported: false, State: "Unsupported" })
+            var definitions = new[]
             {
-                selectedLogCommand = logCapability is { Supported: true }
-                                     && IsKnownLogCommand(logCapability.SelectedCli)
-                    ? logCapability.SelectedCli
-                    : "show sylog tail num 100";
-                commands.Add(selectedLogCommand!);
+                commandProfile.GetRequiredCommand(CommandIds.InterfaceStatus),
+                commandProfile.GetRequiredCommand(CommandIds.LogRam)
+            };
+            var selections = new Dictionary<string, string>(StringComparer.Ordinal);
+            var commands = new List<string>(2);
+            foreach (var definition in definitions)
+            {
+                var capability = knownCapabilities.FirstOrDefault(item =>
+                    item.CommandId.Equals(definition.Id, StringComparison.Ordinal));
+                if (capability is { Supported: false, State: "Unsupported" }) continue;
+
+                var selected = SelectMonitoringCommand(definition, capability);
+                selections[definition.Id] = selected;
+                commands.Add(selected);
             }
 
             if (commands.Count == 0)
@@ -1842,7 +1912,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     secrets.Password,
                     secrets.EnablePassword,
                     "monitor");
-                _ = await _client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
+                var tested = await _client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
+                if (!tested.Success)
+                {
+                    throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
+                }
                 var testRecoveries = _monitoringStore.RecordSuccess(profile);
                 if (testRecoveries.Count > 0) ApplyEvents(testRecoveries);
                 await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
@@ -1860,53 +1934,39 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 "monitor",
                 commands);
             var result = await _client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!result.Success)
+            {
+                throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
+            }
             var outputs = result.Commands.ToList();
             var recoveries = _monitoringStore.RecordSuccess(profile);
             if (recoveries.Count > 0) ApplyEvents(recoveries);
 
-            if (commands.Contains("show port status", StringComparer.OrdinalIgnoreCase))
+            foreach (var definition in definitions)
             {
-                RecordMonitoredOutput(
+                if (!selections.TryGetValue(definition.Id, out var selected)) continue;
+                await ProbeAndRecordMonitoredOutputAsync(
                     profile,
-                    "interface_status",
-                    "show port status",
-                    ["show port status"],
+                    secrets,
+                    definition,
+                    knownCapabilities.FirstOrDefault(item =>
+                        item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
                     outputs.FirstOrDefault(item =>
-                        item.Command.Equals("show port status", StringComparison.OrdinalIgnoreCase)));
-            }
-
-            if (selectedLogCommand is not null)
-            {
-                var selectedLog = outputs.FirstOrDefault(item =>
-                    item.Command.Equals(selectedLogCommand, StringComparison.OrdinalIgnoreCase));
-                if (selectedLog is null || LooksUnsupported(selectedLog.Output))
-                {
-                    var alternate = selectedLogCommand.Equals(
-                        "show sylog tail num 100",
-                        StringComparison.OrdinalIgnoreCase)
-                        ? "show syslog tail num 100"
-                        : "show sylog tail num 100";
-                    var fallbackRequest = request with
-                    {
-                        RequestId = Guid.NewGuid().ToString("N"),
-                        Commands = [alternate]
-                    };
-                    var fallback = await _client.ExecuteTelnetAsync(fallbackRequest, cancellationToken).ConfigureAwait(false);
-                    selectedLog = fallback.Commands.FirstOrDefault(item =>
-                        item.Command.Equals(alternate, StringComparison.OrdinalIgnoreCase));
-                }
-                RecordMonitoredOutput(
-                    profile,
-                    "log_ram",
-                    "show sylog tail num 100",
-                    ["show sylog tail num 100", "show syslog tail num 100"],
-                    selectedLog);
+                        item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
+                    cancellationToken).ConfigureAwait(false);
             }
             await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
+        {
+            await RunOnUiAsync(() =>
+                OperationMessage =
+                    $"감시 상태 저장 실패 · {ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_WRITE_FAILED")}")
+                .ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -1949,30 +2009,127 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private void RecordMonitoredOutput(
+    private async Task ProbeAndRecordMonitoredOutputAsync(
         ManagedDeviceProfile profile,
-        string commandId,
-        string primaryCommand,
-        IReadOnlyList<string> candidates,
-        TelnetCommandOutputDto? output)
+        ManagedDeviceSecrets secrets,
+        ReadOnlyCommandDefinition definition,
+        CollectorCapabilityDto? previousCapability,
+        TelnetCommandOutputDto? initialOutput,
+        CancellationToken cancellationToken)
     {
-        var unsupported = output is null || LooksUnsupported(output.Output);
-        var selected = output?.Command;
+        var assessment = AssessMonitoringOutput(definition.Id, initialOutput);
+        if (assessment.ExplicitlyUnsupported)
+        {
+            foreach (var alternate in definition.CandidateCommands.Where(candidate =>
+                         !candidate.Equals(initialOutput?.Command, StringComparison.OrdinalIgnoreCase)))
+            {
+                var fallbackRequest = new TelnetExecuteRequestDto(
+                    Guid.NewGuid().ToString("N"),
+                    profile.Host,
+                    23,
+                    profile.Model,
+                    secrets.Username,
+                    secrets.Password,
+                    secrets.EnablePassword,
+                    "monitor",
+                    [alternate]);
+                var fallback = await _client.ExecuteTelnetAsync(fallbackRequest, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!fallback.Success)
+                {
+                    throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
+                }
+                assessment = AssessMonitoringOutput(
+                    definition.Id,
+                    fallback.Commands.FirstOrDefault(item =>
+                        item.Command.Equals(alternate, StringComparison.OrdinalIgnoreCase)));
+                if (!assessment.ExplicitlyUnsupported) break;
+            }
+        }
+
+        if (assessment.Ready)
+        {
+            var selected = assessment.Output!.Command;
+            _monitoringStore!.RecordCapability(
+                profile.Id,
+                new CollectorCapabilityDto(
+                    definition.Id,
+                    true,
+                    "Ready",
+                    null,
+                    definition.Command,
+                    selected,
+                    definition.CandidateCommands,
+                    selected));
+            var events = _monitoringStore.RecordOutput(profile, selected, assessment.Output.Output);
+            if (events.Count > 0) ApplyEvents(events);
+            return;
+        }
+
+        var confirmUnsupported = assessment.ExplicitlyUnsupported
+                                 && previousCapability is
+                                 {
+                                     Supported: true,
+                                     State: "Degraded",
+                                     ErrorCode: "COMMAND_UNSUPPORTED"
+                                 };
+        var state = confirmUnsupported ? "Unsupported" : "Degraded";
         _monitoringStore!.RecordCapability(
             profile.Id,
             new CollectorCapabilityDto(
-                commandId,
-                !unsupported,
-                unsupported ? "Unsupported" : "Ready",
-                unsupported ? output is null ? "COMMAND_OUTPUT_MISSING" : "COMMAND_UNSUPPORTED" : null,
-                primaryCommand,
-                selected,
-                candidates,
-                unsupported ? null : selected));
-        if (unsupported) return;
+                definition.Id,
+                !confirmUnsupported,
+                state,
+                assessment.ErrorCode,
+                definition.Command,
+                assessment.Output?.Command,
+                definition.CandidateCommands,
+                previousCapability?.LastSuccessfulCli));
+    }
 
-        var events = _monitoringStore.RecordOutput(profile, output!.Command, output.Output);
-        if (events.Count > 0) ApplyEvents(events);
+    private static MonitoringOutputAssessment AssessMonitoringOutput(
+        string commandId,
+        TelnetCommandOutputDto? output)
+    {
+        if (output is null)
+        {
+            return new MonitoringOutputAssessment(null, false, false, "COMMAND_OUTPUT_MISSING");
+        }
+        if (output.Truncated)
+        {
+            return new MonitoringOutputAssessment(output, false, false, "OUTPUT_TRUNCATED");
+        }
+        if (string.IsNullOrWhiteSpace(output.Output))
+        {
+            return new MonitoringOutputAssessment(output, false, false, "COMMAND_OUTPUT_EMPTY");
+        }
+        if (LooksUnsupported(output.Output))
+        {
+            return new MonitoringOutputAssessment(output, false, true, "COMMAND_UNSUPPORTED");
+        }
+
+        DiagnosticError? error = commandId switch
+        {
+            CommandIds.InterfaceStatus => InterfaceStatusOutputParser.Parse(output.Output).Error,
+            CommandIds.LogRam => LogOutputParser.Parse(output.Output).Error,
+            _ => new DiagnosticError(ErrorCodes.ParserUnsupported, "monitor-output", "Unknown command ID.")
+        };
+        return error is null
+            ? new MonitoringOutputAssessment(output, true, false, null)
+            : new MonitoringOutputAssessment(output, false, false, error.Code);
+    }
+
+    private static string SelectMonitoringCommand(
+        ReadOnlyCommandDefinition definition,
+        CollectorCapabilityDto? capability)
+    {
+        var selected = capability?.State.Equals("Ready", StringComparison.OrdinalIgnoreCase) == true
+            ? capability.SelectedCli
+            : capability?.LastSuccessfulCli;
+        return selected is not null
+               && definition.CandidateCommands.Contains(selected, StringComparer.OrdinalIgnoreCase)
+            ? selected
+            : definition.Command;
     }
 
     private DeviceSnapshotDto CreateManagedDeviceSnapshot(ManagedDeviceProfile profile)
@@ -1983,6 +2140,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             ? _monitoringStore?.GetActiveFailureCode(profile.Id)
             : null;
         var effectiveMonitoringEnabled = profile.MonitoringEnabled && !credentialBlocked;
+        var activeInterfaceIssues = effectiveMonitoringEnabled
+            ? _monitoringStore?.GetActiveInterfaceConditionCount(profile.Id) ?? 0
+            : 0;
         var capabilities = profile.MonitoringEnabled
             ? _monitoringStore?.LoadCapabilities(profile.Id) ?? []
             : [];
@@ -2001,7 +2161,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     true,
                     "Initializing",
                     PrimaryCli: "show sylog tail num 100",
-                    CandidateClis: ["show sylog tail num 100", "show syslog tail num 100"])
+                    CandidateClis:
+                    [
+                        "show sylog tail num 100",
+                        "show syslog tail num 100",
+                        "show log ram"
+                    ])
             ];
         }
         var capabilityIssue = capabilities.Any(item =>
@@ -2011,6 +2176,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : credentialBlocked
                      || credentialCorrupt
                      || !profile.ConnectionVerified
+                     || activeInterfaceIssues > 0
                      || (effectiveMonitoringEnabled && capabilityIssue)
                 ? DeviceHealth.Warning
                 : effectiveMonitoringEnabled ? DeviceHealth.Normal : DeviceHealth.Empty;
@@ -2022,6 +2188,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 ? "저장 계정 사용 불가 · ID/PW 재입력 필요"
             : !profile.ConnectionVerified
                 ? $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}"
+                : activeInterfaceIssues > 0
+                    ? $"포트 상태 변경 확인 필요 · {activeInterfaceIssues}개"
                 : effectiveMonitoringEnabled && capabilityIssue
                     ? "주기 감시 중 · 일부 명령 확인 필요"
                     : effectiveMonitoringEnabled ? "Viewer 실행 중 주기 감시" : "등록됨 · 주기 감시 꺼짐";
@@ -2036,6 +2204,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 ? "Failed"
             : credentialCorrupt
                 ? "CredentialCorrupt"
+            : activeInterfaceIssues > 0
+                ? "Degraded"
             : effectiveMonitoringEnabled && capabilityIssue
                 ? "Degraded"
                 : effectiveMonitoringEnabled ? "Monitoring" : "Registered";
@@ -2044,7 +2214,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : activeFailure
               ?? (credentialCorrupt
                   ? "VIEWER_CREDENTIAL_CORRUPT"
-                  : capabilities.FirstOrDefault(item => !item.Supported)?.ErrorCode
+                  : activeInterfaceIssues > 0
+                      ? "INTERFACE_LINK_DOWN"
+                  : capabilities.FirstOrDefault(item =>
+                      !item.Supported
+                      || !item.State.Equals("Ready", StringComparison.OrdinalIgnoreCase))?.ErrorCode
                     ?? profile.LastConnectionTestCode);
         return new DeviceSnapshotDto(
             profile.Id,
@@ -2060,6 +2234,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 new("Telnet", "TCP/23"),
                 new("접속 시험", profile.ConnectionVerified ? "성공" : "미확인", profile.ConnectionVerified ? DeviceHealth.Normal : DeviceHealth.Warning),
                 new("주기 감시", effectiveMonitoringEnabled ? "켜짐" : "꺼짐", effectiveMonitoringEnabled ? DeviceHealth.Normal : credentialBlocked ? DeviceHealth.Warning : DeviceHealth.Empty),
+                new("활성 포트 변경", $"{activeInterfaceIssues}개", activeInterfaceIssues > 0 ? DeviceHealth.Warning : DeviceHealth.Normal),
                 new("수집 기능", capabilityMetric, capabilityIssue ? DeviceHealth.Warning : DeviceHealth.Normal)
             ],
             capabilities,
@@ -2079,9 +2254,36 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             return;
         }
         existing.Update(CreateManagedDeviceSnapshot(profile));
+        SortDevicesByPriority();
         RebuildCollectorHealth(DateTimeOffset.UtcNow);
         NotifySummaryChanged();
     }
+
+    private void SortDevicesByPriority()
+    {
+        var desired = Devices
+            .OrderBy(item => DeviceDisplayPriority(item.Health))
+            .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        for (var targetIndex = 0; targetIndex < desired.Length; targetIndex++)
+        {
+            var currentIndex = Devices.IndexOf(desired[targetIndex]);
+            if (currentIndex >= 0 && currentIndex != targetIndex)
+            {
+                Devices.Move(currentIndex, targetIndex);
+            }
+        }
+    }
+
+    private static int DeviceDisplayPriority(DeviceHealth health) => health switch
+    {
+        DeviceHealth.Critical => 0,
+        DeviceHealth.Disconnected => 1,
+        DeviceHealth.Warning => 2,
+        DeviceHealth.Loading => 3,
+        DeviceHealth.Normal => 4,
+        _ => 5
+    };
 
     private SemaphoreSlim GetDeviceOperationGate(string host)
     {
@@ -2102,10 +2304,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
          && !code.Equals("AGENT_BUSY", StringComparison.Ordinal))
         || code.Equals("TLS_IDENTITY_INVALID", StringComparison.Ordinal);
 
-    private static bool IsKnownLogCommand(string? command) =>
-        command is not null
-        && (command.Equals("show sylog tail num 100", StringComparison.OrdinalIgnoreCase)
-            || command.Equals("show syslog tail num 100", StringComparison.OrdinalIgnoreCase));
+    private static bool IsMonitoringPersistenceFailure(Exception exception) =>
+        exception is IOException
+        or UnauthorizedAccessException;
 
     internal bool IsMonitoringCredentialBlocked(string id)
     {
@@ -2167,7 +2368,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         var query = EventSearchText.Trim();
         FilteredEvents.Clear();
-        foreach (var item in RecentEvents)
+        var ordered = RecentEvents
+            .ToArray()
+            .OrderBy(EventDisplayPriority)
+            .ThenByDescending(item => item.OccurredAt)
+            .ThenByDescending(item => item.Sequence);
+        foreach (var item in ordered)
         {
             var filterMatch = SelectedEventFilter.Value switch
             {
@@ -2191,6 +2397,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         OnPropertyChanged(nameof(VisibleEventCount));
         OnPropertyChanged(nameof(EventCountText));
+    }
+
+    private static int EventDisplayPriority(EventViewModel item)
+    {
+        if (!item.Recovered && item.Severity is DeviceHealth.Critical or DeviceHealth.Disconnected) return 0;
+        if (!item.Recovered && !item.Acknowledged && item.Severity == DeviceHealth.Warning) return 1;
+        if (!item.Recovered && !item.Acknowledged) return 2;
+        if (item.Recovered) return 3;
+        return 4;
     }
 
     private void RebuildCollectorHealth(DateTimeOffset generatedAt)
@@ -2315,9 +2530,23 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }).ConfigureAwait(false);
     }
 
-    private static string ReadyOperationMessage(ViewerSettings settings) => settings.DemoMode
-        ? "오프라인 데모가 실행 중입니다."
-        : "실시간 모니터링 중입니다.";
+    private string ReadyOperationMessage(ViewerSettings settings)
+    {
+        if (ManagedDeviceStoreWarning() is { } warning) return warning;
+        if (settings.DemoMode) return "오프라인 데모 · 실제 장비에는 접속하지 않습니다.";
+        return MonitoredCount == 0
+            ? $"Agent 연결됨 · 등록 장비 {TotalCount}대 · 주기 감시 대상 없음"
+            : $"Agent 연결됨 · 장비 {MonitoredCount}대 주기 감시 중";
+    }
+
+    private string? ManagedDeviceStoreWarning() => _deviceStore?.LastLoadStatus switch
+    {
+        ManagedDeviceLoadStatus.Corrupt =>
+            "장비 목록 파일 손상 · 안전하게 격리했습니다. 장비를 다시 등록하세요. · VIEWER_DEVICE_STORE_CORRUPT",
+        ManagedDeviceLoadStatus.StorageUnavailable =>
+            "장비 목록 파일을 읽을 수 없음 · 파일 권한과 잠금을 확인하세요. · VIEWER_DEVICE_STORE_UNAVAILABLE",
+        _ => null
+    };
 
     private void SetReadyOperationMessageIfHealthy(ViewerSettings settings)
     {
@@ -2389,6 +2618,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(WarningCount));
         OnPropertyChanged(nameof(CriticalCount));
         OnPropertyChanged(nameof(DisconnectedCount));
+        OnPropertyChanged(nameof(UnmonitoredCount));
+        OnPropertyChanged(nameof(MonitoredCount));
         OnPropertyChanged(nameof(CriticalDisplayCount));
         OnPropertyChanged(nameof(MiniIssueHealth));
         OnPropertyChanged(nameof(NewLogCount));
@@ -2399,9 +2630,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(VisibleEventCount));
         OnPropertyChanged(nameof(EventCountText));
         OnPropertyChanged(nameof(ApiVersionText));
+        OnPropertyChanged(nameof(NormalSummaryCaption));
         OnPropertyChanged(nameof(MiniCurrentStatusText));
         OnPropertyChanged(nameof(MiniIssueTitle));
         OnPropertyChanged(nameof(MiniIssueDetail));
+        foreach (var item in RecentEvents) item.RefreshElapsedText();
     }
 
     private void NotifyCommandStates()
@@ -2486,6 +2719,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         var initializeQuiesced = false;
         var syncQuiesced = false;
+        var snapshotQuiesced = _snapshotLoop is null;
+        var monitorLoopQuiesced = _monitorLoop is null;
+        var monitorGateQuiesced = false;
         try { initializeQuiesced = await _initializeGate.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
         catch (ObjectDisposedException) { }
         try { syncQuiesced = await _syncGate.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
@@ -2495,11 +2731,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             try { await _snapshotLoop.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
             catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
+            snapshotQuiesced = _snapshotLoop.IsCompleted;
         }
         if (_monitorLoop is not null)
         {
             try { await _monitorLoop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
             catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
+            monitorLoopQuiesced = _monitorLoop.IsCompleted;
+        }
+        if (monitorLoopQuiesced)
+        {
+            try { monitorGateQuiesced = await _monitorGate.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false); }
+            catch (ObjectDisposedException) { }
         }
         try { _monitoringStore?.EndSession(); } catch { }
 
@@ -2510,7 +2753,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
         if (initializeQuiesced) _initializeGate.Dispose();
         if (syncQuiesced) _syncGate.Dispose();
-        _monitorGate.Dispose();
-        if (initializeQuiesced && syncQuiesced) _lifetime.Dispose();
+        if (monitorGateQuiesced)
+        {
+            _monitorGate.Dispose();
+            _monitorConcurrency.Dispose();
+        }
+        if (initializeQuiesced
+            && syncQuiesced
+            && snapshotQuiesced
+            && monitorLoopQuiesced
+            && monitorGateQuiesced)
+        {
+            _lifetime.Dispose();
+        }
     }
 }

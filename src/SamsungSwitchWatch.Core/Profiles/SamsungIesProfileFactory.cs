@@ -28,10 +28,10 @@ internal static class SamsungIesProfileFactory
             new ReadOnlyCommandDefinition(
                 CommandIds.LogRam,
                 "시스템 로그",
-                "show syslog tail num 100",
+                "show sylog tail num 100",
                 TimeSpan.FromSeconds(60),
                 60,
-                ["show sylog tail num 100", "show log ram"]),
+                ["show syslog tail num 100", "show log ram"]),
             new ReadOnlyCommandDefinition(
                 CommandIds.InterfaceStatus,
                 "포트 상태",

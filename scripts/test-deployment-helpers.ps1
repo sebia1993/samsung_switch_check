@@ -21,6 +21,7 @@ function Assert-ContainsAll {
 
 $install = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-agent.ps1') -Raw -Encoding UTF8
 $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Install-or-Update-Agent.cmd') -Raw -Encoding UTF8
+$viewerLauncher = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Install-or-Update-Viewer.cmd') -Raw -Encoding UTF8
 $uninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-agent.ps1') -Raw -Encoding UTF8
 $viewerInstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-viewer.ps1') -Raw -Encoding UTF8
 $mockSmoke = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'smoke-mock-agent.ps1') -Raw -Encoding UTF8
@@ -123,10 +124,20 @@ Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
     'Read-Host',
     'pause'
 )
-Assert-DeploymentTest -Condition ($build -match "\[string\]\`$Version\s*=\s*'0\.8\.0-poc'") `
-    -Message 'Release build default must be 0.8.0-poc.'
+Assert-DeploymentTest -Condition ($build -match "\[string\]\`$Version\s*=\s*'0\.9\.0-poc'") `
+    -Message 'Release build default must be 0.9.0-poc.'
 Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Agent.cmd'") `
     -Message 'Agent package must include the one-click UAC launcher.'
+Assert-ContainsAll -Name 'Viewer launcher' -Text $viewerLauncher -Needles @(
+    'install-viewer.ps1',
+    'powershell.exe',
+    '-StartWithWindows',
+    'pause'
+)
+Assert-DeploymentTest -Condition (-not $viewerLauncher.Contains('-Verb RunAs')) `
+    -Message 'Per-user Viewer launcher must not request administrator elevation.'
+Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Viewer.cmd'") `
+    -Message 'Viewer package must include the one-click per-user launcher.'
 Assert-DeploymentTest -Condition $build.Contains("'docs\SamsungSwitchWatch_User_Manual_KO.pdf'") `
     -Message 'Both release packages must include the final PDF user manual.'
 Assert-DeploymentTest -Condition (-not $build.Contains('SamsungSwitchWatch_User_Manual_KO.docx')) `

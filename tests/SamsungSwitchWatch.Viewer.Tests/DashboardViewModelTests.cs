@@ -985,6 +985,67 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
+    public async Task DeviceList_PrioritizesProblemsBeforeNormalAndUnmonitoredDevices()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0,
+        [
+            Device("normal", DeviceHealth.Normal, now),
+            Device("empty", DeviceHealth.Empty, now),
+            Device("warning", DeviceHealth.Warning, now),
+            Device("offline", DeviceHealth.Disconnected, now),
+            Device("critical", DeviceHealth.Critical, now)
+        ]);
+        var viewModel = fixture.CreateViewModel();
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(
+            ["critical", "offline", "warning", "normal", "empty"],
+            viewModel.Devices.Select(item => item.Id));
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Summary_DistinguishesUnmonitoredDevicesAndLastConfirmedState()
+    {
+        using var fixture = new ViewModelFixture();
+        var now = DateTimeOffset.UtcNow;
+        fixture.Client.Snapshot = Snapshot(now, 0,
+        [
+            Device("normal", DeviceHealth.Normal, now),
+            Device("registered", DeviceHealth.Empty, now)
+        ]);
+        var viewModel = fixture.CreateViewModel();
+
+        await viewModel.InitializeAsync();
+
+        Assert.Equal(1, viewModel.MonitoredCount);
+        Assert.Equal(1, viewModel.UnmonitoredCount);
+        Assert.Equal("현재 확인 정상 · 미감시 1대", viewModel.NormalSummaryCaption);
+        viewModel.ReportOperation("test");
+        fixture.Client.EmitState(AgentConnectionState.Offline);
+        Assert.Equal("마지막 확인 정상 · 미감시 1대", viewModel.NormalSummaryCaption);
+        await viewModel.DisposeAsync();
+    }
+
+    [Theory]
+    [InlineData("show running-config", true)]
+    [InlineData(" SHOW TECH-SUPPORT ", true)]
+    [InlineData("show port status", false)]
+    public async Task ManualQuery_WarnsForPotentiallySensitiveShowOutput(string command, bool expected)
+    {
+        using var fixture = new ViewModelFixture();
+        var viewModel = fixture.CreateViewModel();
+
+        viewModel.ReadOnlyQueryCommand = command;
+
+        Assert.Equal(expected, viewModel.ReadOnlyQueryMayContainSensitiveData);
+        await viewModel.DisposeAsync();
+    }
+
+    [Fact]
     public void EventAccessibility_ContainsSeverityAndAcknowledgementState()
     {
         var item = new EventViewModel(new SwitchEventDto(
@@ -1030,8 +1091,8 @@ public sealed class DashboardViewModelTests
     }
 
     [Theory]
-    [InlineData(true, "오프라인 데모가 실행 중입니다.")]
-    [InlineData(false, "실시간 모니터링 중입니다.")]
+    [InlineData(true, "오프라인 데모 · 실제 장비에는 접속하지 않습니다.")]
+    [InlineData(false, "Agent 연결됨 · 등록 장비 0대 · 주기 감시 대상 없음")]
     public async Task SwitchClient_SuccessClearsPreviousConnectionFailure(bool demoMode, string expectedMessage)
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));

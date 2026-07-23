@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Execution;
@@ -117,6 +118,7 @@ public sealed class ErrorHandlingMiddleware(
 {
     public async Task InvokeAsync(HttpContext context)
     {
+        var startedTimestamp = Stopwatch.GetTimestamp();
         try
         {
             await next(context);
@@ -148,19 +150,49 @@ public sealed class ErrorHandlingMiddleware(
         }
         catch (Exception)
         {
+            var durationMs = (long)Math.Max(
+                0,
+                Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds);
             logger.LogError(
-                "Unhandled Agent request failure with correlation id {TraceIdentifier}.",
-                context.TraceIdentifier);
+                "Agent request failed. Stage={Stage} Code={Code} CorrelationId={CorrelationId} DurationMs={DurationMs}.",
+                SafeStage(context.Request.Path),
+                AgentErrorCodes.InternalError,
+                SafeCorrelationId(context.TraceIdentifier),
+                durationMs);
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
             await context.Response.WriteAsJsonAsync(new
             {
                 error = new
                 {
-                    code = "AGENT_INTERNAL_ERROR",
+                    code = AgentErrorCodes.InternalError,
                     message = "Agent request failed.",
-                    correlationId = context.TraceIdentifier
+                    correlationId = SafeCorrelationId(context.TraceIdentifier)
                 }
             }, cancellationToken: context.RequestAborted);
         }
+    }
+
+    private static string SafeStage(PathString path) =>
+        path.Value?.ToLowerInvariant() switch
+        {
+            "/api/v4/telnet/test" => "telnet-test",
+            "/api/v4/telnet/execute" => "telnet-execute",
+            "/api/v4/identity" => "identity",
+            "/health/live" => "health-live",
+            "/health/ready" => "health-ready",
+            _ => "http-request"
+        };
+
+    private static string SafeCorrelationId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 64)
+        {
+            return "unavailable";
+        }
+
+        return value.All(character =>
+            char.IsLetterOrDigit(character) || character is '-' or '_' or '.')
+            ? value
+            : "unavailable";
     }
 }

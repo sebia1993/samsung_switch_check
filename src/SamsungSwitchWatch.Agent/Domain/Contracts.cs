@@ -6,6 +6,7 @@ namespace SamsungSwitchWatch.Agent.Domain;
 /// </summary>
 public static class AgentErrorCodes
 {
+    public const string InternalError = "AGENT_INTERNAL_ERROR";
     public const string ConfigurationInvalid = "CONFIG_INVALID";
     public const string RequestInvalid = "REQUEST_INVALID";
     public const string RequestTooLarge = "REQUEST_TOO_LARGE";

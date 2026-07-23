@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.8 operator manual.
+"""Build the Korean Samsung Switch Watch v0.9 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.8.0-poc"
+VERSION = "0.9.0-poc"
 DOCUMENT_DATE = "2026-07-23"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -622,7 +622,7 @@ def build_manual(output_path: Path, images_dir: Path):
 
     core = doc.core_properties
     core.title = "Samsung Switch Watch 사용자 설명서"
-    core.subject = "v0.8 Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
+    core.subject = "v0.9 Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
     core.author = "Samsung Switch Watch Project"
     core.keywords = "Samsung Switch Watch, Telnet, Windows Service, Viewer, Agent"
     core.comments = "Sanitized offline manual; contains no company credentials or device data."
@@ -658,7 +658,8 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 Install-or-Update-Agent.cmd를 실행합니다.",
-            "Viewer PC에서 Viewer를 실행하고 Agent 주소만 입력합니다. HTTPS/18443은 자동입니다.",
+            "Viewer PC에서 Viewer ZIP을 풀고 Install-or-Update-Viewer.cmd를 실행합니다.",
+            "Viewer가 열리면 Agent 주소만 입력합니다. HTTPS/18443은 자동입니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
@@ -710,7 +711,7 @@ Viewer PC                 Agent PC                    Samsung Switch
         "Telnet 자체는 암호화되지 않습니다. Agent와 스위치 사이 경로는 반드시 제한된 관리망으로 구성하세요.",
         "danger",
     )
-    add_heading(doc, "Agent 설치와 Viewer 연결", 1, heading_num_id)
+    add_heading(doc, "Agent와 Viewer 설치·연결", 1, heading_num_id)
     add_heading(doc, "Agent 설치", 2, heading_num_id)
     add_steps(
         doc,
@@ -729,6 +730,22 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
 서비스 이름          : SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
 """,
+    )
+    add_heading(doc, "Viewer 설치", 2, heading_num_id)
+    add_steps(
+        doc,
+        [
+            "Viewer 릴리스 ZIP을 운영자 PC의 임시 폴더에 압축 해제합니다.",
+            "Install-or-Update-Viewer.cmd를 더블클릭합니다. 관리자 권한은 필요하지 않습니다.",
+            "설치 완료 뒤 Viewer가 실행되고 다음 Windows 로그인부터 자동 시작되는지 확인합니다.",
+        ],
+    )
+    add_callout(
+        doc,
+        "고급 설치",
+        "설치 전 검사, 설치 위치 또는 자동 시작 상태를 직접 지정할 때만 INSTALL_KO.md의 "
+        "install-viewer.ps1 옵션을 사용하세요.",
+        "info",
     )
     add_heading(doc, "Viewer에서 Agent 연결", 2, heading_num_id)
     add_image(
@@ -829,7 +846,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         ["용도", "우선 명령", "대체 처리"],
         [
             ("포트 상태", "show port status", "모델에서 미지원이면 해당 점검만 실패 표시"),
-            ("최근 로그", "show sylog tail num 100", "미지원이면 show syslog tail num 100 재시도"),
+            ("최근 로그", "show sylog tail num 100", "미지원이면 show syslog tail num 100, show log ram 순서로 재시도"),
         ],
         [1800, 3300, 4260],
     )
@@ -837,7 +854,8 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         [
             "최초 정상 결과는 기준선으로만 저장하며 기존 로그를 새 이벤트로 알리지 않습니다.",
-            "포트 상태는 의미 있는 필드로 비교해 Up → Down, Down → Up을 표시합니다.",
+            "포트 상태는 의미 있는 필드로 비교합니다. 최초 Down은 기존 상태로 보고, 이후 Up → Down과 Down → Up만 표시합니다.",
+            "중요 업링크로 지정되지 않은 일반 포트 변화는 장애가 아닌 경고로 표시하며, 케이블·상대 장비와 실제 사용 여부를 확인합니다.",
             "로그는 저장된 식별 해시와 비교해 새 항목만 이벤트로 만듭니다.",
             "주기 감시 저장소에는 기준 해시, 이벤트와 상태만 남고 Telnet 원문은 남지 않습니다.",
             "같은 장애가 계속되면 반복 팝업 대신 지속 상태를 유지하고, 정상화되면 복구 이벤트를 만듭니다.",
@@ -876,8 +894,8 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         ["영역", "확인할 내용"],
         [
             ("상단", "Agent 연결, 장비 관리, 수동 새로고침, 미니 창"),
-            ("요약", "전체/정상/경고/장애/연결 끊김 수"),
-            ("왼쪽", "등록 장비와 마지막 확인 상태"),
+            ("요약", "현재 확인/마지막 확인, 정상/경고/장애/연결 끊김/미감시 수"),
+            ("왼쪽", "문제 우선으로 정렬된 등록 장비와 마지막 확인 시각"),
             ("가운데", "선택 장비 상태, 새 로그, 변경 이력, 장비 명령"),
             ("오른쪽", "모든 장비의 최근 이벤트, 검색과 확인 처리"),
             ("하단", "현재 작업과 계정·원문 저장 정책"),
@@ -921,6 +939,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             "대시보드 열기: 전체 상태와 변경 이력 확인",
             "새로고침: Viewer에서 즉시 상태 요청",
             "같은 장애 지속 중에는 팝업을 반복하지 않고 복구 시 별도 알림",
+            "팝업 위에 마우스를 두거나 키보드 포커스가 있으면 읽는 동안 자동으로 닫히지 않음",
         ],
         bullet_num_id,
     )
@@ -966,11 +985,13 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
-            ("COMMAND_NOT_ALLOWED", "한 줄 show 형식, 줄바꿈/구분자 포함 여부 확인"),
+            ("QUERY_COMMAND_BLOCKED", "한 줄 show 형식, 줄바꿈/구분자 포함 여부 확인"),
             ("COMMAND_TIMEOUT", "출력 페이징, 장비 부하, 프롬프트 복귀와 세션 시간 확인"),
             ("TELNET_SESSION_CLOSED", "재연결 1회 뒤에도 종료됨. 완료된 결과와 남은 명령을 확인"),
             ("PROMPT_PARSE_FAILED", "로그인 후 > 또는 # 프롬프트 형식을 확인"),
-            ("OUTPUT_TRUNCATED", "64KiB를 넘지 않도록 더 좁은 show 명령 사용"),
+            ("OUTPUT_LIMIT_EXCEEDED", "세션 처리 안전 한도 초과. 더 좁은 show 명령 사용"),
+            ("VIEWER_DEVICE_STORE_CORRUPT", "손상 파일은 자동 격리됨. 장비 관리에서 장비를 다시 등록"),
+            ("VIEWER_DEVICE_STORE_UNAVAILABLE", "Viewer 사용자 폴더의 파일 권한과 다른 프로세스의 잠금 확인"),
         ],
         [2800, 6560],
     )
@@ -994,7 +1015,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         [
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
             "Agent PC에서 Install-or-Update-Agent.cmd를 실행합니다. 기존 CIDR 설정은 기본적으로 보존됩니다.",
-            "Viewer PC에서 기존 Viewer를 종료하고 새 Viewer 패키지의 설치 스크립트를 실행합니다.",
+            "Viewer PC에서 새 Viewer 패키지의 Install-or-Update-Viewer.cmd를 실행합니다.",
             "Agent 연결, 장비 목록, 접속 시험, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
     )

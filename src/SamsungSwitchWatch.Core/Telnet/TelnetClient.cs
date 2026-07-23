@@ -212,7 +212,18 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                     continue;
                 }
 
-                throw exception.Failure;
+                if (outputs.Count == 0)
+                {
+                    throw exception.Failure;
+                }
+
+                throw new TelnetExecutionException(
+                    exception.Failure.Error,
+                    outputs.ToArray(),
+                    remaining.Select(static command => command.Id).ToArray(),
+                    sessionCount,
+                    reconnectCount,
+                    exception.Failure);
             }
         }
 

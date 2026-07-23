@@ -25,11 +25,14 @@ public static class TrayStatusProjector
         int criticalCount,
         int warningCount,
         int disconnectedCount,
+        int monitoredCount,
         DateTimeOffset? lastSuccessfulReceipt)
     {
+        monitoredCount = Math.Max(0, monitoredCount);
         var receipt = lastSuccessfulReceipt is null
             ? "수신 기록 없음"
             : $"수신 {lastSuccessfulReceipt.Value.LocalDateTime:MM-dd HH:mm}";
+        var monitoring = monitoredCount > 0 ? $"감시 {monitoredCount}대" : "감시 대상 없음";
         var status = connectionState switch
         {
             AgentConnectionState.NeedsConnection => new TrayStatus(TrayIndicator.NeedsConnection, "연결 설정 필요"),
@@ -40,11 +43,17 @@ public static class TrayStatusProjector
             _ when criticalCount > 0 => new TrayStatus(TrayIndicator.Critical, $"장애 {criticalCount}"),
             _ when warningCount > 0 || disconnectedCount > 0 =>
                 new TrayStatus(TrayIndicator.Warning, $"경고 {warningCount + disconnectedCount}"),
+            _ when monitoredCount == 0 => new TrayStatus(TrayIndicator.Normal, "대기"),
             _ => new TrayStatus(TrayIndicator.Normal, "정상")
         };
-        var text = $"Switch Watch · {status.Text} · {receipt}";
+        var text = $"Switch Watch · {status.Text} · {monitoring} · {receipt}";
         return status with { Text = text.Length <= 63 ? text : text[..63] };
     }
+
+    public static string CreateCloseToTrayHint(int monitoredCount) =>
+        monitoredCount > 0
+            ? $"장비 {monitoredCount}대의 주기 감시는 계속됩니다. 완전히 종료하려면 트레이 메뉴의 '프로그램 종료'를 선택하세요."
+            : "현재 주기 감시 대상이 없습니다. 프로그램은 트레이에서 대기합니다. 완전히 종료하려면 트레이 메뉴의 '프로그램 종료'를 선택하세요.";
 }
 
 public sealed class TrayIconService : IDisposable, IWindowsToastBackend
@@ -94,7 +103,11 @@ public sealed class TrayIconService : IDisposable, IWindowsToastBackend
     {
         if (_hintShown) return;
         _hintShown = true;
-        _icon.ShowBalloonTip(2500, "Samsung Switch Watch", "모니터링은 계속됩니다. 완전히 종료하려면 트레이 메뉴의 '프로그램 종료'를 선택하세요.", Forms.ToolTipIcon.Info);
+        _icon.ShowBalloonTip(
+            2500,
+            "Samsung Switch Watch",
+            TrayStatusProjector.CreateCloseToTrayHint(_viewModel.MonitoredCount),
+            Forms.ToolTipIcon.Info);
     }
 
     public bool TryShow(EventViewModel item, Action<EventViewModel> activated)
@@ -123,6 +136,7 @@ public sealed class TrayIconService : IDisposable, IWindowsToastBackend
     {
         if (e.PropertyName is nameof(DashboardViewModel.CriticalCount) or nameof(DashboardViewModel.WarningCount)
             or nameof(DashboardViewModel.DisconnectedCount) or nameof(DashboardViewModel.ConnectionState)
+            or nameof(DashboardViewModel.MonitoredCount)
             or nameof(DashboardViewModel.LastSuccessfulReceiptAt))
         {
             UpdateIcon();
@@ -136,6 +150,7 @@ public sealed class TrayIconService : IDisposable, IWindowsToastBackend
             _viewModel.CriticalCount,
             _viewModel.WarningCount,
             _viewModel.DisconnectedCount,
+            _viewModel.MonitoredCount,
             _viewModel.LastSuccessfulReceiptAt);
         _icon.Icon = status.Indicator switch
         {

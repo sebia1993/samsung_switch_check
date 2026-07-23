@@ -1,4 +1,4 @@
-# Samsung Switch Watch 0.8.0-poc 릴리스 노트
+# Samsung Switch Watch 0.9.0-poc 릴리스 노트
 
 ## 핵심 변경
 
@@ -18,6 +18,12 @@
 - `show port status`, `show sylog tail num 100`, `show syslog tail num 100` 후보 지원
 - Viewer 실행 중에만 주기 감시하고 재실행 시 감시 공백 표시
 - 인증서 지문과 페어링 토큰 수동 입력 제거
+- 포트·로그 원문 전체 비교 대신 구조화 파서로 변경을 판정해 첫 Down, 누락 행,
+  로그 재정렬·순환을 장애로 잘못 표시하지 않음
+- 대시보드에서 문제 장비를 먼저 정렬하고 현재 확인/마지막 확인과 미감시 장비를 구분
+- 장비 목록 파일 손상과 읽기 실패를 빈 목록으로 숨기지 않고 복구 안내 코드로 표시
+- 민감정보가 포함될 수 있는 show 명령 사전 주의, 알림 팝업 읽기 중 자동 닫힘 일시정지
+- Viewer 진단 로그는 시각·단계·안정 오류 코드만 기록하고 1MiB 현재 파일과 백업 1개만 유지
 
 ## Agent
 
@@ -31,6 +37,10 @@
 - 요청 본문 32KiB 상한과 바인딩 전 413 거부
 - 요청마다 새 Telnet 세션을 만들고 각 세션을 최대 240초 안에 종료
 - 명령 실행 중 원격 종료 시 완료된 명령을 제외한 나머지만 새 세션으로 1회 재시도
+- Viewer는 API 요청 ID, 명령 개수·순서, 필수 필드, UTF-8와 응답 크기를 검증하고
+  불완전한 HTTP 200 응답을 정상 결과로 사용하지 않음
+- 장기 실행 시 만료된 요청 제한 창을 정리하고 예상하지 못한 Agent 오류 로그에서
+  장비 주소·계정·명령·원문을 제외
 - 수동 결과에 세션 수와 재연결 횟수 표시
 - 인증·enable 실패와 명령 타임아웃은 자동 재시도하지 않음
 - 로그인·무암호/암호 enable·페이징·프롬프트 복귀 처리
@@ -40,6 +50,9 @@
 
 - Agent ZIP 루트에 `Install-or-Update-Agent.cmd` 추가
 - 더블클릭 시 UAC 요청
+- Viewer ZIP 루트에 `Install-or-Update-Viewer.cmd` 추가
+- Viewer는 관리자 권한 없이 현재 Windows 사용자에게 설치하고 로그인 시 자동 시작
+- 고급 관리자를 위한 기존 `install-viewer.ps1` 옵션 유지
 - 신규 설치와 기존 서비스 업데이트 자동 판별
 - Viewer 관리 CIDR 기반 HTTPS 인바운드 방화벽
 - Agent가 소비하는 스위치 대상 CIDR allowlist
@@ -73,11 +86,12 @@ API v4를 추가했습니다.
 ## 호환성과 주의사항
 
 - 업데이트 순서는 Agent 먼저, Viewer 다음입니다.
-- v0.7 Agent의 저장 장비 목록과 방화벽 주소는 v0.8 설치 시 대상/관리 `/32` CIDR로
+- v0.7 Agent의 저장 장비 목록과 방화벽 주소는 v0.9 설치 시 대상/관리 `/32` CIDR로
   안전하게 이관할 수 있습니다.
 - v0.7 Agent의 로컬 자격 증명과 SQLite 원문·이력 DB는 제한 ACL의
   `legacy-v0.7-backup-*` 폴더로 이동하고 자동 삭제하지 않습니다.
-- v0.8 Viewer가 다시 장비와 계정을 등록해야 할 수 있습니다.
+- v0.8 Viewer의 장비 목록과 현재 Windows 사용자로 보호된 계정은 같은 사용자로
+  업데이트하면 유지됩니다.
 - Viewer가 꺼져 있는 동안에는 감시하지 않으며 그 사이 사라진 장비 로그를 복원할 수 없습니다.
 - Telnet 구간은 계속 평문이므로 격리된 사내 관리망에서만 사용하십시오.
 - 애플리케이션 인증이 없으므로 Windows 방화벽의 관리 CIDR을 최소 범위로 유지하십시오.
@@ -87,5 +101,5 @@ API v4를 추가했습니다.
 
 GitHub Release의 사용자 정의 Assets에는 다음 두 파일만 게시합니다.
 
-- `SamsungSwitchWatch-Agent-0.8.0-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.8.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.0-poc-win-x64.zip`

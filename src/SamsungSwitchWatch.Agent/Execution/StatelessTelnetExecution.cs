@@ -186,15 +186,33 @@ public sealed class TargetNetworkPolicy
     }
 }
 
-public sealed class TelnetExecutionAdmission(AgentOptions options)
+public sealed class TelnetExecutionAdmission
 {
-    private readonly SemaphoreSlim _concurrency = new(
-        options.MaxConcurrentExecutions,
-        options.MaxConcurrentExecutions);
+    private static readonly TimeSpan RateWindowDuration = TimeSpan.FromMinutes(1);
+    private readonly AgentOptions _options;
+    private readonly TimeProvider _timeProvider;
+    private readonly SemaphoreSlim _concurrency;
     private readonly ConcurrentDictionary<string, RateWindow> _rateWindows =
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TargetGate> _targetGates =
         new(StringComparer.Ordinal);
+    private long _nextRateWindowPruneUtcTicks;
+
+    public TelnetExecutionAdmission(AgentOptions options)
+        : this(options, TimeProvider.System)
+    {
+    }
+
+    internal TelnetExecutionAdmission(AgentOptions options, TimeProvider timeProvider)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _concurrency = new SemaphoreSlim(
+            options.MaxConcurrentExecutions,
+            options.MaxConcurrentExecutions);
+    }
+
+    internal int TrackedRateWindowCount => _rateWindows.Count;
 
     public async Task<IAsyncDisposable> EnterAsync(
         string clientAddress,
@@ -202,12 +220,13 @@ public sealed class TelnetExecutionAdmission(AgentOptions options)
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(targetAddress);
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         var window = _rateWindows.AddOrUpdate(
             clientAddress,
             _ => new RateWindow(now, 1),
             (_, current) => current.Add(now));
-        if (window.Count > options.RateLimitPerMinute)
+        PruneExpiredRateWindows(now);
+        if (window.Count > _options.RateLimitPerMinute)
         {
             throw new AgentOperationException(
                 AgentErrorCodes.QueryRateLimited,
@@ -273,6 +292,37 @@ public sealed class TelnetExecutionAdmission(AgentOptions options)
         }
     }
 
+    private void PruneExpiredRateWindows(DateTimeOffset now)
+    {
+        var nowTicks = now.UtcDateTime.Ticks;
+        var observed = Volatile.Read(ref _nextRateWindowPruneUtcTicks);
+        if (observed > nowTicks)
+        {
+            return;
+        }
+
+        var next = now.Add(RateWindowDuration).UtcDateTime.Ticks;
+        if (Interlocked.CompareExchange(
+                ref _nextRateWindowPruneUtcTicks,
+                next,
+                observed) != observed)
+        {
+            return;
+        }
+
+        foreach (var entry in _rateWindows)
+        {
+            if (now - entry.Value.StartedUtc < RateWindowDuration)
+            {
+                continue;
+            }
+
+            // Compare-and-remove prevents a concurrent request from losing a
+            // newly refreshed window and therefore preserves the rate limit.
+            _rateWindows.TryRemove(entry);
+        }
+    }
+
     private static AgentOperationException Busy(string message) =>
         new(
             AgentErrorCodes.AgentBusy,
@@ -308,7 +358,7 @@ public sealed class TelnetExecutionAdmission(AgentOptions options)
     private sealed record RateWindow(DateTimeOffset StartedUtc, int Count)
     {
         public RateWindow Add(DateTimeOffset now) =>
-            now - StartedUtc >= TimeSpan.FromMinutes(1)
+            now - StartedUtc >= RateWindowDuration
                 ? new RateWindow(now, 1)
                 : this with { Count = Count + 1 };
     }

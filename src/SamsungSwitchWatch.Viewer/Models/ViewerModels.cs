@@ -192,6 +192,8 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
     private string _uptime;
     private string _collectionState;
     private string? _collectionErrorCode;
+    private ObservableCollection<DeviceMetricDto> _metrics;
+    private ObservableCollection<CollectorCapabilityDto> _capabilities;
 
     public DeviceViewModel(DeviceSnapshotDto source)
     {
@@ -205,16 +207,25 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         _uptime = source.Uptime;
         _collectionState = source.CollectionState;
         _collectionErrorCode = source.CollectionErrorCode;
-        Metrics = new ObservableCollection<DeviceMetricDto>(source.Metrics ?? []);
-        Capabilities = new ObservableCollection<CollectorCapabilityDto>(source.Capabilities ?? []);
+        _metrics = new ObservableCollection<DeviceMetricDto>(source.Metrics ?? []);
+        _capabilities = new ObservableCollection<CollectorCapabilityDto>(source.Capabilities ?? []);
     }
 
     public string Id { get; }
     public string Name { get; }
     public string Model { get; }
     public string AddressLabel { get; }
-    public ObservableCollection<DeviceMetricDto> Metrics { get; }
-    public ObservableCollection<CollectorCapabilityDto> Capabilities { get; }
+    public ObservableCollection<DeviceMetricDto> Metrics
+    {
+        get => _metrics;
+        private set => SetProperty(ref _metrics, value);
+    }
+
+    public ObservableCollection<CollectorCapabilityDto> Capabilities
+    {
+        get => _capabilities;
+        private set => SetProperty(ref _capabilities, value);
+    }
     public int SupportedCapabilityCount => Capabilities.Count(item => item.Supported);
     public int CapabilityCount => Capabilities.Count;
     public int CapabilityIssueCount => Capabilities.Count(item =>
@@ -272,7 +283,16 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         }
     }
 
-    public string LastCheckedText => LastCheckedAt.LocalDateTime.ToString("HH:mm:ss");
+    public string LastCheckedText
+    {
+        get
+        {
+            var local = LastCheckedAt.LocalDateTime;
+            return local.Date == DateTime.Now.Date
+                ? local.ToString("HH:mm:ss")
+                : local.ToString("MM-dd HH:mm");
+        }
+    }
 
     public string Summary
     {
@@ -294,13 +314,11 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         Uptime = source.Uptime;
         CollectionState = source.CollectionState;
         CollectionErrorCode = source.CollectionErrorCode;
-        Metrics.Clear();
-        foreach (var metric in source.Metrics ?? [])
-        {
-            Metrics.Add(metric);
-        }
-        Capabilities.Clear();
-        foreach (var capability in source.Capabilities ?? []) Capabilities.Add(capability);
+        // Replace the collections atomically. Clearing and repopulating an
+        // ObservableCollection while a WPF binding or test enumerates it can
+        // throw "Collection was modified" on a background monitoring update.
+        Metrics = new ObservableCollection<DeviceMetricDto>(source.Metrics ?? []);
+        Capabilities = new ObservableCollection<CollectorCapabilityDto>(source.Capabilities ?? []);
         OnPropertyChanged(nameof(SupportedCapabilityCount));
         OnPropertyChanged(nameof(CapabilityCount));
         OnPropertyChanged(nameof(CapabilityIssueCount));
@@ -424,7 +442,11 @@ public sealed class EventViewModel : Infrastructure.ObservableObject
 
     public string AlertDetail => Recovered && RecoveryDuration is { } duration
         ? $"{Detail} · 장애 지속 {FormatDuration(duration)}"
-        : Detail;
+        : !Recovered && Severity is DeviceHealth.Warning or DeviceHealth.Critical or DeviceHealth.Disconnected
+            ? $"{Detail} · 지속 {FormatDuration(DateTimeOffset.Now - OccurredAt)}"
+            : Detail;
+
+    public void RefreshElapsedText() => OnPropertyChanged(nameof(AlertDetail));
 
     public bool Acknowledged
     {

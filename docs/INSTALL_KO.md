@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.8.0-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.0-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.8.0-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.8.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.0-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -119,7 +119,19 @@ Agent는 `LocalService` 계정의 Windows 서비스로 Session 0에서 실행됩
 
 ## 4. Viewer 설치와 Agent 연결
 
-Viewer ZIP을 운영자 PC에 압축 해제하고 일반 사용자 PowerShell에서 실행합니다.
+### 가장 간단한 방법
+
+1. Viewer ZIP을 운영자 PC의 임시 폴더에 압축 해제합니다.
+2. `Install-or-Update-Viewer.cmd`를 더블클릭합니다.
+3. 설치 완료 메시지를 확인합니다. Viewer는 현재 Windows 사용자에게 설치되고 바로
+   실행되며, 다음 로그인부터 자동 시작됩니다.
+
+Viewer 설치에는 관리자 권한이나 UAC 승인이 필요하지 않습니다.
+
+### 고급 설치
+
+설치 전 검사, 설치 위치 또는 자동 시작 상태를 직접 지정할 때만 일반 사용자 PowerShell에서
+다음 명령을 사용합니다.
 
 ```powershell
 .\install-viewer.ps1 -SourceDirectory . -StartWithWindows -Preflight
@@ -133,6 +145,8 @@ Viewer ZIP을 운영자 PC에 압축 해제하고 일반 사용자 PowerShell에
 ```powershell
 .\install-viewer.ps1 -SourceDirectory . -DisableStartWithWindows
 ```
+
+더블클릭 설치는 주기 감시가 계속 시작되도록 `-StartWithWindows`를 기본 적용합니다.
 
 Viewer의 `Agent 연결`에서 Agent PC의 IPv4 또는 사내 DNS 이름과 고정 포트 `18443`을
 입력합니다. 인증서 SHA-256 지문과 페어링 토큰을 직접 입력하지 않습니다.

@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text;
+using SamsungSwitchWatch.Core.Profiles;
 using SamsungSwitchWatch.Viewer.Models;
 
 namespace SamsungSwitchWatch.Viewer.Services;
@@ -57,52 +59,150 @@ public static class AgentContractMapper
         return result with { CertificatePublicKeySha256 = result.CertificatePublicKeySha256.ToUpperInvariant() };
     }
 
-    public static TelnetExecutionResultDto MapTelnetExecutionResultV4(string json)
+    public static TelnetExecutionResultDto MapTelnetExecutionResultV4(string json) =>
+        MapTelnetExecutionResultV4Core(
+            json,
+            expectedRequestId: null,
+            expectedCommands: null,
+            ReadOnlyQueryPolicy.MaximumOutputBytes);
+
+    public static TelnetExecutionResultDto MapTelnetExecutionResultV4(
+        string json,
+        string expectedRequestId,
+        IReadOnlyList<string> expectedCommands,
+        int maximumOutputBytes)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedRequestId);
+        ArgumentNullException.ThrowIfNull(expectedCommands);
+        return MapTelnetExecutionResultV4Core(
+            json,
+            expectedRequestId,
+            expectedCommands,
+            maximumOutputBytes);
+    }
+
+    private static TelnetExecutionResultDto MapTelnetExecutionResultV4Core(
+        string json,
+        string? expectedRequestId,
+        IReadOnlyList<string>? expectedCommands,
+        int maximumOutputBytes)
+    {
+        if (maximumOutputBytes is < 1 or > 16 * 1024 * 1024)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumOutputBytes));
+        }
+
+        string[]? normalizedExpected = null;
+        if (expectedCommands is not null)
+        {
+            normalizedExpected = new string[expectedCommands.Count];
+            var expectedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < expectedCommands.Count; index++)
+            {
+                var validation = ReadOnlyQueryPolicy.Validate(expectedCommands[index]);
+                if (!validation.IsAllowed || !expectedSet.Add(validation.NormalizedCommand!))
+                {
+                    throw new ArgumentException(
+                        "Expected commands must be unique, single-line show commands.",
+                        nameof(expectedCommands));
+                }
+
+                normalizedExpected[index] = validation.NormalizedCommand!;
+            }
+        }
+
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        if (IntValue(root, "apiVersion") != 4
-            || StringValue(root, "requestId") is not { Length: > 0 } requestId
-            || BoolValue(root, "success") is not { } success
+        if (root.ValueKind != JsonValueKind.Object
+            || StrictIntValue(root, "apiVersion") != 4
+            || StrictStringValue(root, "requestId") is not { Length: > 0 } requestId
+            || StrictBoolValue(root, "success") is not true
+            || StrictStringValue(root, "privilege") is not { Length: > 0 } privilege
+            || StrictStringValue(root, "promptTerminator") is not { } promptTerminator
             || DateTimeValue(root, "startedUtc") is not { } startedUtc
-            || DateTimeValue(root, "completedUtc") is not { } completedUtc)
+            || DateTimeValue(root, "completedUtc") is not { } completedUtc
+            || StrictLongValue(root, "durationMs") is not { } durationMs
+            || durationMs < 0
+            || StrictIntValue(root, "sessionCount") is not { } sessionCount
+            || sessionCount < 1
+            || StrictIntValue(root, "reconnectCount") is not { } reconnectCount
+            || reconnectCount < 0
+            || reconnectCount >= sessionCount
+            || expectedRequestId is not null
+               && !string.Equals(requestId, expectedRequestId, StringComparison.Ordinal))
+        {
+            throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
+        }
+
+        if (!root.TryGetProperty("commands", out var commandItems)
+            || commandItems.ValueKind != JsonValueKind.Array)
         {
             throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
         }
 
         var commands = new List<TelnetCommandOutputDto>();
-        if (root.TryGetProperty("commands", out var commandItems)
-            && commandItems.ValueKind == JsonValueKind.Array)
+        var returnedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in commandItems.EnumerateArray())
         {
-            foreach (var item in commandItems.EnumerateArray())
+            var command = StrictStringValue(item, "command");
+            var output = StrictStringValue(item, "output");
+            var truncated = StrictBoolValue(item, "truncated");
+            var collectedUtc = DateTimeValue(item, "collectedUtc");
+            var commandValidation = ReadOnlyQueryPolicy.Validate(command);
+            if (item.ValueKind != JsonValueKind.Object
+                || !commandValidation.IsAllowed
+                || !string.Equals(
+                    command,
+                    commandValidation.NormalizedCommand,
+                    StringComparison.Ordinal)
+                || output is null
+                || truncated is null
+                || collectedUtc is null
+                || !returnedSet.Add(commandValidation.NormalizedCommand!)
+                || Encoding.UTF8.GetByteCount(output) > maximumOutputBytes)
             {
-                var command = StringValue(item, "command");
-                var collectedUtc = DateTimeValue(item, "collectedUtc");
-                if (string.IsNullOrWhiteSpace(command) || collectedUtc is null)
+                throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
+            }
+
+            commands.Add(new TelnetCommandOutputDto(
+                command!,
+                output,
+                truncated.Value,
+                collectedUtc.Value));
+        }
+
+        if (normalizedExpected is not null)
+        {
+            if (commands.Count != normalizedExpected.Length)
+            {
+                throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
+            }
+
+            for (var index = 0; index < normalizedExpected.Length; index++)
+            {
+                if (!string.Equals(
+                    commands[index].Command,
+                    normalizedExpected[index],
+                    StringComparison.Ordinal))
                 {
                     throw new JsonException("TELNET_RESULT_CONTRACT_INVALID");
                 }
-                commands.Add(new TelnetCommandOutputDto(
-                    command,
-                    StringValue(item, "output") ?? string.Empty,
-                    BoolValue(item, "truncated") ?? false,
-                    collectedUtc.Value));
             }
         }
 
         return new TelnetExecutionResultDto(
             4,
             requestId,
-            success,
-            StringValue(root, "privilege") ?? "user",
-            StringValue(root, "promptTerminator") ?? string.Empty,
+            true,
+            privilege,
+            promptTerminator,
             startedUtc,
             completedUtc,
-            Math.Max(0, LongValue(root, "durationMs") ?? 0),
+            durationMs,
             commands)
         {
-            SessionCount = Math.Max(1, IntValue(root, "sessionCount") ?? 1),
-            ReconnectCount = Math.Max(0, IntValue(root, "reconnectCount") ?? 0)
+            SessionCount = sessionCount,
+            ReconnectCount = reconnectCount
         };
     }
 
@@ -277,7 +377,7 @@ public static class AgentContractMapper
         {
             foreach (var device in devices.EnumerateArray())
             {
-                mappedDevices.Add(MapDevice(device, generatedAt, 0, false));
+                mappedDevices.Add(MapDevice(device, generatedAt));
             }
         }
 
@@ -398,7 +498,7 @@ public static class AgentContractMapper
         {
             foreach (var device in devices.EnumerateArray())
             {
-                mappedDevices.Add(MapDevice(device, generatedAt, activeCritical, mappedDevices.Count == 0));
+                mappedDevices.Add(MapDevice(device, generatedAt));
             }
         }
 
@@ -411,7 +511,7 @@ public static class AgentContractMapper
             mappedDevices,
             Math.Max(0, highWatermark),
             $"Agent {agentId}",
-            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · {readinessCode}",
+            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · 활성 장애 {activeCritical}건 · {readinessCode}",
             agentId,
             ready,
             readinessCode,
@@ -443,7 +543,7 @@ public static class AgentContractMapper
         {
             foreach (var device in devices.EnumerateArray())
             {
-                mappedDevices.Add(MapDevice(device, generatedAt, activeCritical, mappedDevices.Count == 0));
+                mappedDevices.Add(MapDevice(device, generatedAt));
             }
         }
 
@@ -453,7 +553,7 @@ public static class AgentContractMapper
             mappedDevices,
             Math.Max(0, lastSequence),
             $"Agent {agentId}",
-            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · 원문 미전송");
+            $"{(mockMode ? "모의" : "실환경")} · 장비 {mappedDevices.Count}대 · 활성 장애 {activeCritical}건 · 원문 미전송");
     }
 
     internal static SwitchEventDto? MapEvent(JsonElement item, IReadOnlyDictionary<string, string>? deviceNames = null)
@@ -498,7 +598,7 @@ public static class AgentContractMapper
             DateTimeValue(item, "recoveredUtc"));
     }
 
-    private static DeviceSnapshotDto MapDevice(JsonElement device, DateTimeOffset generatedAt, int activeCritical, bool firstDevice)
+    private static DeviceSnapshotDto MapDevice(JsonElement device, DateTimeOffset generatedAt)
     {
         var id = StringValue(device, "id") ?? "unknown";
         var name = StringValue(device, "displayName") ?? id;
@@ -537,7 +637,6 @@ public static class AgentContractMapper
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value) && !value.Equals("OK", StringComparison.OrdinalIgnoreCase));
         var collectorDegraded = string.Equals(collectorState, "Degraded", StringComparison.OrdinalIgnoreCase);
         var collectorUnsupported = string.Equals(collectorState, "Unsupported", StringComparison.OrdinalIgnoreCase);
-        var hasActiveCriticalEvent = firstDevice && activeCritical > 0;
         var collectorFailed = string.Equals(collectorState, "Failed", StringComparison.OrdinalIgnoreCase)
                               || string.Equals(collectorState, "AuthBlocked", StringComparison.OrdinalIgnoreCase)
                               || (reportedCollectorState is null && collectorCode is not null);
@@ -572,10 +671,9 @@ public static class AgentContractMapper
             }
         }
 
-        var health = !hasCapture ? hasActiveCriticalEvent ? DeviceHealth.Critical : DeviceHealth.Loading
+        var health = !hasCapture ? DeviceHealth.Loading
             : collectorFailed ? DeviceHealth.Disconnected
             : uplinkUp == false ? DeviceHealth.Critical
-            : hasActiveCriticalEvent ? DeviceHealth.Critical
             : collectorDegraded || collectorUnsupported ? DeviceHealth.Warning
             : generatedAt - latestCapture > TimeSpan.FromMinutes(10) ? DeviceHealth.Warning
             : DeviceHealth.Normal;
@@ -583,8 +681,6 @@ public static class AgentContractMapper
             ? $"스위치 수집 실패 · {collectorCode}"
             : uplinkUp == false
                 ? $"중요 업링크 포트 {uplinkPort} 장애"
-            : hasActiveCriticalEvent
-                ? $"활성 장애 이벤트 {activeCritical}건"
             : collectorUnsupported
                 ? $"일부 명령을 지원하지 않음 · {collectorCode}"
             : collectorDegraded
@@ -606,11 +702,6 @@ public static class AgentContractMapper
             new("수집 기능", capabilities.Count == 0 ? "확인 중" : $"{capabilities.Count(item => item.Supported)}/{capabilities.Count} 지원",
                 capabilities.Any(item => !item.Supported) ? DeviceHealth.Warning : DeviceHealth.Normal)
         };
-        if (hasActiveCriticalEvent)
-        {
-            metrics.Add(new DeviceMetricDto("활성 장애", $"{activeCritical}건", DeviceHealth.Critical));
-        }
-
         return new DeviceSnapshotDto(
             id,
             name,
@@ -670,15 +761,45 @@ public static class AgentContractMapper
         && item.TryGetProperty(property, out var value)
         && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;
 
+    private static string? StrictStringValue(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static bool? StrictBoolValue(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : null;
+
     private static long? LongValue(JsonElement item, string property) =>
         item.ValueKind == JsonValueKind.Object
         && item.TryGetProperty(property, out var value)
         && value.TryGetInt64(out var result) ? result : null;
 
+    private static long? StrictLongValue(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt64(out var result)
+            ? result
+            : null;
+
     private static int? IntValue(JsonElement item, string property) =>
         item.ValueKind == JsonValueKind.Object
         && item.TryGetProperty(property, out var value)
         && value.TryGetInt32(out var result) ? result : null;
+
+    private static int? StrictIntValue(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object
+        && item.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var result)
+            ? result
+            : null;
 
     private static DateTimeOffset? DateTimeValue(JsonElement item, string property) =>
         item.ValueKind == JsonValueKind.Object

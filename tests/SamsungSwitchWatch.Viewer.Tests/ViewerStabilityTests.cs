@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
+using SamsungSwitchWatch.Viewer.Views;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
 
@@ -93,13 +94,81 @@ public sealed class ViewerStabilityTests
     {
         var received = new DateTimeOffset(2026, 7, 21, 3, 4, 0, TimeSpan.Zero);
 
-        var projection = TrayStatusProjector.Create(state, 0, 0, 0, received);
+        var projection = TrayStatusProjector.Create(state, 0, 0, 0, 3, received);
 
         Assert.Equal(indicator, projection.Indicator);
         Assert.Contains(expectedText, projection.Text, StringComparison.Ordinal);
         Assert.Contains("07-21", projection.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("· 정상 ·", projection.Text, StringComparison.Ordinal);
         Assert.InRange(projection.Text.Length, 1, 63);
+    }
+
+    [Fact]
+    public void TrayProjection_NoMonitoringTargetsReportsWaiting()
+    {
+        var projection = TrayStatusProjector.Create(
+            AgentConnectionState.Connected,
+            0,
+            0,
+            0,
+            0,
+            null);
+
+        Assert.Equal(TrayIndicator.Normal, projection.Indicator);
+        Assert.Contains("대기", projection.Text, StringComparison.Ordinal);
+        Assert.Contains("감시 대상 없음", projection.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("정상", projection.Text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(1, 0, 0, TrayIndicator.Critical, "장애 1")]
+    [InlineData(0, 1, 0, TrayIndicator.Warning, "경고 1")]
+    [InlineData(0, 0, 1, TrayIndicator.Warning, "경고 1")]
+    public void TrayProjection_ProblemStateKeepsPriorityWhenMonitoringCountIsZero(
+        int critical,
+        int warning,
+        int disconnected,
+        TrayIndicator expectedIndicator,
+        string expectedText)
+    {
+        var projection = TrayStatusProjector.Create(
+            AgentConnectionState.Connected,
+            critical,
+            warning,
+            disconnected,
+            0,
+            null);
+
+        Assert.Equal(expectedIndicator, projection.Indicator);
+        Assert.Contains(expectedText, projection.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CloseToTrayHint_DistinguishesActiveMonitoringFromWaiting()
+    {
+        var monitoring = TrayStatusProjector.CreateCloseToTrayHint(2);
+        var waiting = TrayStatusProjector.CreateCloseToTrayHint(0);
+
+        Assert.Contains("장비 2대", monitoring, StringComparison.Ordinal);
+        Assert.Contains("주기 감시는 계속", monitoring, StringComparison.Ordinal);
+        Assert.Contains("감시 대상이 없습니다", waiting, StringComparison.Ordinal);
+        Assert.Contains("트레이에서 대기", waiting, StringComparison.Ordinal);
+        Assert.DoesNotContain("감시는 계속", waiting, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    public void AlertPopupAutoClosePolicy_PreservesPopupDuringUserInteraction(
+        bool isMouseOver,
+        bool isKeyboardFocusWithin,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AlertPopupAutoClosePolicy.ShouldClose(isMouseOver, isKeyboardFocusWithin));
     }
 
     [Fact]

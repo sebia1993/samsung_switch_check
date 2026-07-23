@@ -1,11 +1,13 @@
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.Models;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
 
@@ -59,7 +61,15 @@ public sealed class ViewerConnectionTests
         using var certificate = CreateCertificate();
         var fixture = CreateClientFixture(
             certificate,
-            queryResponse: _ => JsonResponse(HttpStatusCode.OK, TelnetResultJson));
+            queryResponse: request =>
+            {
+                var isTest = request.RequestUri?.AbsolutePath == AgentApiRoutes.TelnetTestV4;
+                return JsonResponse(
+                    HttpStatusCode.OK,
+                    TelnetResultJson(
+                        isTest ? "test-1" : "execute-1",
+                        isTest ? [] : ["show port status"]));
+            });
         await using var client = fixture.Client;
 
         await client.TestTelnetAsync(Target(), CancellationToken.None);
@@ -133,6 +143,114 @@ public sealed class ViewerConnectionTests
         Assert.Equal("QUERY_COMMAND_BLOCKED", failure.ErrorCode);
         Assert.Contains(AgentConnectionState.Connected, states);
         Assert.DoesNotContain(AgentConnectionState.Offline, states);
+    }
+
+    [Fact]
+    public async Task TelnetResponseWithMismatchedRequestId_FailsClosed()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(
+            certificate,
+            queryResponse: _ => JsonResponse(
+                HttpStatusCode.OK,
+                TelnetResultJson("different-request", [])));
+        await using var client = fixture.Client;
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.TestTelnetAsync(Target(), CancellationToken.None));
+
+        Assert.Equal("AGENT_RESPONSE_INVALID", failure.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, failure.SuggestedConnectionState);
+    }
+
+    [Fact]
+    public async Task ExecuteTelnetAsync_RejectsDuplicateNormalizedCommandsBeforeSending()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(certificate);
+        await using var client = fixture.Client;
+        var request = new TelnetExecuteRequestDto(
+            "execute-1",
+            "192.0.2.10",
+            23,
+            "IES4224GP",
+            "operator",
+            "secret",
+            null,
+            "manual",
+            ["show  port status", "SHOW PORT STATUS"]);
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.ExecuteTelnetAsync(request, CancellationToken.None));
+
+        Assert.Equal("QUERY_COMMAND_BLOCKED", failure.ErrorCode);
+        Assert.Equal(0, fixture.ControlHandler.RequestCount);
+        Assert.Equal(0, fixture.QueryHandler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ExecuteTelnetAsync_AcceptsEightMaximumSizedCommandOutputs()
+    {
+        using var certificate = CreateCertificate();
+        var commands = Enumerable.Range(1, 8).Select(index => $"show item {index}").ToArray();
+        var fixture = CreateClientFixture(
+            certificate,
+            queryResponse: _ => JsonResponse(
+                HttpStatusCode.OK,
+                TelnetResultJson("execute-bulk", commands, new string('x', 65_536))));
+        await using var client = fixture.Client;
+        var request = new TelnetExecuteRequestDto(
+            "execute-bulk",
+            "192.0.2.10",
+            23,
+            "IES4224GP",
+            "operator",
+            "secret",
+            null,
+            "manual",
+            commands);
+
+        var result = await client.ExecuteTelnetAsync(request, CancellationToken.None);
+
+        Assert.Equal(8, result.Commands.Count);
+        Assert.All(result.Commands, item => Assert.Equal(65_536, Encoding.UTF8.GetByteCount(item.Output)));
+    }
+
+    [Fact]
+    public async Task StartAsync_RejectsOversizedIdentityResponse()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ => JsonResponse(
+                HttpStatusCode.OK,
+                new string('x', HttpAgentClient.MaximumIdentityResponseBytes + 1)));
+        await using var client = fixture.Client;
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.StartAsync(CancellationToken.None));
+
+        Assert.Equal("AGENT_RESPONSE_INVALID", failure.ErrorCode);
+    }
+
+    [Fact]
+    public async Task BoundedResponseReader_RejectsUnknownLengthStreamPastLimit()
+    {
+        using var content = new StreamContent(new MemoryStream(new byte[65]));
+        content.Headers.ContentLength = null;
+
+        var failure = await Assert.ThrowsAsync<InvalidDataException>(
+            () => HttpAgentClient.ReadBoundedUtf8Async(content, 64, CancellationToken.None));
+
+        Assert.Equal("AGENT_RESPONSE_TOO_LARGE", failure.Message);
+    }
+
+    [Fact]
+    public void TelnetResponseBudget_CoversEightWorstCaseEscapedOutputs()
+    {
+        Assert.True(
+            HttpAgentClient.MaximumTelnetResponseBytes
+            > 8 * 65_536 * 6);
     }
 
     [Theory]
@@ -229,7 +347,7 @@ public sealed class ViewerConnectionTests
         var control = new RecordingHandler(
             controlResponse ?? (_ => JsonResponse(HttpStatusCode.OK, IdentityJson(certificate))));
         var query = new RecordingHandler(
-            queryResponse ?? (_ => JsonResponse(HttpStatusCode.OK, TelnetResultJson)));
+            queryResponse ?? (_ => JsonResponse(HttpStatusCode.OK, TelnetResultJson("test-1", []))));
         return new ClientFixture(
             new HttpAgentClient(settings, control, query, validator),
             control,
@@ -253,19 +371,30 @@ public sealed class ViewerConnectionTests
         }
         """;
 
-    private const string TelnetResultJson = """
+    private static string TelnetResultJson(
+        string requestId,
+        IReadOnlyList<string> commands,
+        string output = "ok") =>
+        JsonSerializer.Serialize(new
         {
-          "apiVersion": 4,
-          "requestId": "request-test",
-          "success": true,
-          "privilege": "user",
-          "promptTerminator": "#",
-          "startedUtc": "2026-07-23T00:00:00Z",
-          "completedUtc": "2026-07-23T00:00:01Z",
-          "durationMs": 1000,
-          "commands": []
-        }
-        """;
+            apiVersion = 4,
+            requestId,
+            success = true,
+            privilege = "user",
+            promptTerminator = "#",
+            startedUtc = "2026-07-23T00:00:00Z",
+            completedUtc = "2026-07-23T00:00:01Z",
+            durationMs = 1000,
+            sessionCount = 1,
+            reconnectCount = 0,
+            commands = commands.Select(command => new
+            {
+                command,
+                output,
+                truncated = false,
+                collectedUtc = "2026-07-23T00:00:01Z"
+            })
+        });
 
     private static X509Certificate2 CreateCertificate()
     {
