@@ -34,12 +34,12 @@ jobs:
 
       - name: Build unsigned POC packages
         shell: powershell
-        run: .\scripts\build-release.ps1 -Version 0.9.8-poc -SkipTests
+        run: .\scripts\build-release.ps1 -Version 0.9.9-poc -SkipTests
 
       - name: Upload immutable candidate artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: samsung-switch-watch-0.9.8-poc-${{ github.sha }}
+          name: samsung-switch-watch-0.9.9-poc-${{ github.sha }}
           path: artifacts/release/*
           if-no-files-found: error
           retention-days: 14
@@ -57,11 +57,11 @@ jobs:
       - name: Download candidate artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: samsung-switch-watch-0.9.8-poc-${{ github.sha }}
+          name: samsung-switch-watch-0.9.9-poc-${{ github.sha }}
           path: artifacts/release
 
       - name: Verify post-download hashes and package contract
         shell: powershell
         env:
           SSW_EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
-        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version 0.9.8-poc -ExpectedSourceCommit $env:SSW_EXPECTED_SOURCE_COMMIT
+        run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version 0.9.9-poc -ExpectedSourceCommit $env:SSW_EXPECTED_SOURCE_COMMIT
