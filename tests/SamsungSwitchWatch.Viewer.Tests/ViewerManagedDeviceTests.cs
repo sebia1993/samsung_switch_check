@@ -130,12 +130,32 @@ public sealed class ViewerManagedDeviceTests
         var persistence = new TestManagedDevicePersistence { Content = content };
         var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
 
-        var loaded = store.Load();
+        var result = store.LoadWithStatus();
 
-        Assert.Empty(loaded);
+        Assert.Empty(result.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.Corrupt, result.Status);
         Assert.Equal(ManagedDeviceLoadStatus.Corrupt, store.LastLoadStatus);
         Assert.Equal(1, persistence.QuarantineCount);
         Assert.Null(persistence.Content);
+    }
+
+    [Fact]
+    public void DeviceStore_LoadWithStatusDistinguishesMissingFromValidEmptyStore()
+    {
+        var persistence = new TestManagedDevicePersistence();
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        var missing = store.LoadWithStatus();
+        persistence.Content = """{"SchemaVersion":1,"Devices":[]}""";
+        var valid = store.LoadWithStatus();
+
+        Assert.Empty(missing.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.Missing, missing.Status);
+        Assert.Empty(valid.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.Ok, valid.Status);
     }
 
     [Theory]
@@ -151,8 +171,10 @@ public sealed class ViewerManagedDeviceTests
         };
         var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
 
-        Assert.Empty(store.Load());
+        var result = store.LoadWithStatus();
 
+        Assert.Empty(result.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, result.Status);
         Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
         Assert.Equal(0, persistence.QuarantineCount);
         Assert.Equal(original, persistence.Content);
@@ -176,7 +198,7 @@ public sealed class ViewerManagedDeviceTests
                 deviceStore: devices);
             try
             {
-                viewModel.ReloadManagedDevices();
+                await viewModel.InitializeAsync();
 
                 Assert.Empty(viewModel.Devices);
                 Assert.Contains("VIEWER_DEVICE_STORE_CORRUPT", viewModel.OperationMessage, StringComparison.Ordinal);
@@ -215,7 +237,7 @@ public sealed class ViewerManagedDeviceTests
                 deviceStore: devices);
             try
             {
-                viewModel.ReloadManagedDevices();
+                await viewModel.InitializeAsync();
 
                 Assert.Empty(viewModel.Devices);
                 Assert.Contains("VIEWER_DEVICE_STORE_UNAVAILABLE", viewModel.OperationMessage, StringComparison.Ordinal);
@@ -249,6 +271,267 @@ public sealed class ViewerManagedDeviceTests
         Assert.Equal(previous, persistence.Content);
         persistence.WriteException = null;
         Assert.Equal("ACCESS-SW-01", Assert.Single(store.Load()).DisplayName);
+    }
+
+    [Fact]
+    public async Task Dashboard_PreservesExistingDevicesWhenARefreshCannotReadTheStore()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var saved = devices.Save(Draft("pw", null));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()),
+                deviceStore: devices);
+            try
+            {
+                viewModel.ReloadManagedDevices(saved.Id);
+                var original = Assert.Single(viewModel.Devices);
+                persistence.ReadException =
+                    new IOException("private path host=192.0.2.10 password=secret");
+
+                viewModel.ReloadManagedDevices(saved.Id);
+
+                Assert.Same(original, Assert.Single(viewModel.Devices));
+                Assert.Same(original, viewModel.SelectedDevice);
+                Assert.Contains(
+                    "VIEWER_DEVICE_STORE_UNAVAILABLE",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "192.0.2.10",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "secret",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+            }
+            finally
+            {
+                persistence.ReadException = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task Dashboard_ClientSwitchPreservesDevicesAndStoreWarningOnReadFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var saved = devices.Save(Draft("pw", null));
+            var client = new StatelessFakeClient();
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(client),
+                deviceStore: devices);
+            try
+            {
+                await viewModel.InitializeAsync();
+                var original = Assert.Single(viewModel.Devices);
+                viewModel.SelectedDevice = original;
+                persistence.ReadException =
+                    new IOException("private path host=192.0.2.10 password=secret");
+
+                await viewModel.SwitchClientAsync(
+                    new ViewerSettings { DemoMode = true });
+
+                Assert.Same(original, Assert.Single(viewModel.Devices));
+                Assert.Same(original, viewModel.SelectedDevice);
+                Assert.Equal(saved.Id, original.Id);
+                Assert.Contains(
+                    "VIEWER_DEVICE_STORE_UNAVAILABLE",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "Agent 연결 설정을 저장했습니다.",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+            }
+            finally
+            {
+                persistence.ReadException = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task Dashboard_ManualRefreshPreservesDevicesAndStoreWarningOnReadFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            _ = devices.Save(Draft("pw", null));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()),
+                deviceStore: devices);
+            try
+            {
+                await viewModel.InitializeAsync();
+                var original = Assert.Single(viewModel.Devices);
+                viewModel.SelectedDevice = original;
+                persistence.ReadException =
+                    new IOException("private path host=192.0.2.10 password=secret");
+
+                viewModel.RefreshCommand.Execute(null);
+                await WaitUntilAsync(() =>
+                    !viewModel.IsBusy
+                    && viewModel.OperationMessage.Contains(
+                        "VIEWER_DEVICE_STORE_UNAVAILABLE",
+                        StringComparison.Ordinal));
+
+                Assert.Same(original, Assert.Single(viewModel.Devices));
+                Assert.Same(original, viewModel.SelectedDevice);
+                Assert.DoesNotContain(
+                    "목록을 새로고침했습니다.",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+            }
+            finally
+            {
+                persistence.ReadException = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task Dashboard_GetManagedDevicesWithoutAStorePreservesTheEmptyListContract()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()));
+            try
+            {
+                Assert.Empty(viewModel.GetManagedDevices());
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task SaveManagedDevice_MonitoringCleanupFailureKeepsCommittedDeviceAndReportsWarning()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var deviceStore = new ManagedDeviceStore(
+                Path.Combine(folder, "devices.json"),
+                new TestProtector());
+            var draft = Draft("pw", null);
+            draft.ConnectionVerified = true;
+            draft.MonitoringEnabled = false;
+            draft.LastConnectionTestUtc = DateTimeOffset.UtcNow;
+            draft.LastConnectionTestCode = "OK";
+            var saved = deviceStore.Save(draft);
+            var monitoringPersistence = new TestMonitoringPersistence();
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"),
+                monitoringPersistence);
+            monitoringStore.RecordCapability(
+                saved.Id,
+                new CollectorCapabilityDto(
+                    "interface_status",
+                    true,
+                    "Supported"));
+            var diagnostics = new List<(string Stage, string ErrorCode)>();
+            var settingsStore =
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                settingsStore,
+                clientFactory: null,
+                synchronizationContext: null,
+                deviceStore,
+                monitoringStore,
+                new ViewerSettingsSaveCoordinator(settingsStore),
+                (stage, errorCode) => diagnostics.Add((stage, errorCode)),
+                static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+            try
+            {
+                var edit = deviceStore.CreateEditDraft(saved.Id);
+                edit.DisplayName = "ACCESS-SW-SAVED";
+                monitoringPersistence.WriteException =
+                    new IOException("private path host=192.0.2.10 password=secret");
+
+                var result = viewModel.SaveManagedDevice(edit, out var warningCode);
+
+                Assert.Equal("ACCESS-SW-SAVED", result.DisplayName);
+                Assert.Equal(
+                    "ACCESS-SW-SAVED",
+                    Assert.Single(deviceStore.Load()).DisplayName);
+                Assert.Equal(
+                    "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                    warningCode);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    ("device-management-save", "VIEWER_MONITOR_STATE_WRITE_FAILED"),
+                    diagnostics);
+                Assert.Single(monitoringStore.LoadCapabilities(saved.Id));
+                Assert.DoesNotContain(
+                    diagnostics,
+                    entry => entry.Stage.Contains("192.0.2.10", StringComparison.Ordinal)
+                             || entry.ErrorCode.Contains("secret", StringComparison.Ordinal));
+            }
+            finally
+            {
+                monitoringPersistence.WriteException = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
     }
 
     [Fact]
@@ -1343,7 +1626,7 @@ public sealed class ViewerManagedDeviceTests
     private sealed class TestManagedDevicePersistence : IManagedDevicePersistence
     {
         public string? Content { get; set; }
-        public Exception? ReadException { get; init; }
+        public Exception? ReadException { get; set; }
         public Exception? WriteException { get; set; }
         public Exception? QuarantineException { get; init; }
         public int WriteCount { get; private set; }

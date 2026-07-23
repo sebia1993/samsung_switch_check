@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.6-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.7-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.6-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.6-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.7-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.7-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -276,6 +276,9 @@ Agent 신원 불일치가 발생합니다.
 | `COMMAND_TIMEOUT` | 장비 출력 또는 프롬프트 복귀 시간 초과 |
 | `OUTPUT_LIMIT_EXCEEDED` | 장비 출력이 세션 처리 안전 한도를 초과함 |
 | `PROMPT_PARSE_FAILED` | 장비 프롬프트를 안전하게 판별하지 못함 |
+| `VIEWER_DEVICE_STORE_UNAVAILABLE` | 장비 목록 파일을 읽지 못함. 기존 목록을 유지하고 사용자 폴더 권한과 파일 잠금 확인 |
+| `VIEWER_DEVICE_STORE_WRITE_FAILED` | 장비 설정 파일 저장 실패. 사용자 폴더 권한, 파일 잠금과 디스크 여유 공간 확인 |
+| `VIEWER_MONITOR_STATE_WRITE_FAILED` | 장비 설정 저장은 완료될 수 있음. 중복 등록하지 말고 감시 이력 파일 권한·잠금·디스크 확인 |
 
 정상 명령 출력이 64KiB 응답 상한에서 잘리면 오류 코드 대신 Viewer의 `잘림` 표시를
 확인합니다. 실제 IP, ID, 비밀번호, 호스트명과 원문 출력은 진단 파일에 추가하지 마십시오.

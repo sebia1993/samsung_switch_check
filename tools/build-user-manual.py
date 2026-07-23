@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.6-poc"
+VERSION = "0.9.7-poc"
 DOCUMENT_DATE = "2026-07-24"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -500,7 +500,16 @@ def add_steps(doc, items):
         set_run_font(run)
 
 
-def add_table(doc, headers, rows, widths_dxa):
+def add_table(
+    doc,
+    headers,
+    rows,
+    widths_dxa,
+    *,
+    header_size=9,
+    body_size=9,
+    body_line=1.12,
+):
     table = doc.add_table(rows=1, cols=len(headers))
     set_table_geometry(table, widths_dxa)
     set_table_borders(table)
@@ -513,7 +522,7 @@ def add_table(doc, headers, rows, widths_dxa):
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         set_paragraph_spacing(paragraph, after=0, line=1.1)
         run = paragraph.add_run(header)
-        set_run_font(run, size=9, color=NAVY, bold=True)
+        set_run_font(run, size=header_size, color=NAVY, bold=True)
 
     for row_index, values in enumerate(rows):
         cells = table.add_row().cells
@@ -525,9 +534,9 @@ def add_table(doc, headers, rows, widths_dxa):
             paragraph.alignment = (
                 WD_ALIGN_PARAGRAPH.CENTER if index == 0 and len(headers) > 2 else WD_ALIGN_PARAGRAPH.LEFT
             )
-            set_paragraph_spacing(paragraph, after=0, line=1.12)
+            set_paragraph_spacing(paragraph, after=0, line=body_line)
             run = paragraph.add_run(str(value))
-            set_run_font(run, size=9)
+            set_run_font(run, size=body_size)
         set_table_geometry(table, widths_dxa)
 
     spacer = doc.add_paragraph()
@@ -993,11 +1002,15 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("OUTPUT_LIMIT_EXCEEDED", "세션 처리 안전 한도 초과. 더 좁은 show 명령 사용"),
             ("VIEWER_DEVICE_STORE_CORRUPT", "손상 파일은 자동 격리됨. 장비 관리에서 장비를 다시 등록"),
             ("VIEWER_DEVICE_STORE_UNAVAILABLE", "Viewer 사용자 폴더의 파일 권한과 다른 프로세스의 잠금 확인"),
+            ("VIEWER_DEVICE_STORE_WRITE_FAILED", "입력은 유지됨. Viewer 사용자 폴더 권한·잠금·디스크 확인 후 다시 저장"),
             ("VIEWER_SETTINGS_WRITE_FAILED", "Agent 연결은 유지됨. Viewer 사용자 폴더 권한과 디스크 여유 공간 확인"),
-            ("VIEWER_MONITOR_STATE_WRITE_FAILED", "감시 이력이 저장되지 않음. 사용자 폴더 권한·잠금·디스크 확인"),
+            ("VIEWER_MONITOR_STATE_WRITE_FAILED", "장비 설정은 저장될 수 있음. 중복 등록하지 말고 감시 이력 파일 권한·잠금·디스크 확인"),
             ("VIEWER_MONITOR_CYCLE_FAILED", "다음 주기 재시도를 기다리고 반복되면 Viewer 진단 로그 확인"),
         ],
         [3600, 5760],
+        header_size=8.5,
+        body_size=8.25,
+        body_line=1.0,
     )
     add_heading(doc, "현장 진단 파일", 2, heading_num_id)
     add_code_block(

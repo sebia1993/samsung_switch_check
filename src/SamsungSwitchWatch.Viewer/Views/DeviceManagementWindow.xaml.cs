@@ -19,6 +19,7 @@ public partial class DeviceManagementWindow : Window
     private string? _lastTestCode;
     private DateTimeOffset? _lastTestUtc;
     private bool _busy;
+    private bool _suppressSelectionChange;
 
     public DeviceManagementWindow(DashboardViewModel dashboard)
     {
@@ -26,14 +27,8 @@ public partial class DeviceManagementWindow : Window
         _dashboard = dashboard;
         ModelComboBox.ItemsSource = SupportedSwitchModels.All;
         DeviceList.ItemsSource = _devices;
-        Loaded += (_, _) =>
-        {
-            FitToWorkingArea();
-            Reload();
-            if (_devices.Count == 0) BeginNewDevice();
-            else DeviceList.SelectedIndex = 0;
-        };
-        Closed += (_, _) => _dashboard.ReloadManagedDevices(_editingId);
+        Loaded += (_, _) => InitializeWindow();
+        Closed += (_, _) => RefreshDashboardAfterClose();
     }
 
     private void FitToWorkingArea()
@@ -42,11 +37,48 @@ public partial class DeviceManagementWindow : Window
         Height = Math.Min(Height, MaxHeight);
     }
 
-    private void Reload(string? preferredId = null)
+    private void InitializeWindow()
+    {
+        try
+        {
+            FitToWorkingArea();
+            Reload();
+            if (_devices.Count == 0) BeginNewDevice();
+            else DeviceList.SelectedIndex = 0;
+        }
+        catch (Exception exception)
+        {
+            if (_devices.Count == 0) BeginNewDevice();
+            ShowOperationFailure(
+                "device-management-load",
+                exception,
+                DeviceManagementOperation.Load);
+        }
+    }
+
+    private void RefreshDashboardAfterClose()
+    {
+        try
+        {
+            _dashboard.ReloadManagedDevices(_editingId);
+        }
+        catch (Exception exception)
+        {
+            var code = DeviceManagementFailureMapper.ToErrorCode(
+                exception,
+                DeviceManagementOperation.Close);
+            _dashboard.ReportDeviceManagementFailure(
+                "device-management-close",
+                code);
+        }
+    }
+
+    internal void Reload(string? preferredId = null)
     {
         var selectedId = preferredId ?? _editingId;
+        var loaded = _dashboard.GetManagedDevices().ToArray();
         _devices.Clear();
-        foreach (var item in _dashboard.GetManagedDevices()) _devices.Add(item);
+        foreach (var item in loaded) _devices.Add(item);
         DeviceCountText.Text = $"{_devices.Count}대";
         if (!string.IsNullOrWhiteSpace(selectedId))
         {
@@ -94,9 +126,25 @@ public partial class DeviceManagementWindow : Window
 
     private void DeviceList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_suppressSelectionChange) return;
         if (DeviceList.SelectedItem is not ManagedDeviceProfile profile) return;
+        var previousId = _editingId;
+        ManagedDeviceDraft editDraft;
+        try
+        {
+            editDraft = _dashboard.GetManagedDeviceDraft(profile.Id);
+        }
+        catch (Exception exception)
+        {
+            RestoreSelection(previousId);
+            ShowOperationFailure(
+                "device-management-load",
+                exception,
+                DeviceManagementOperation.Load);
+            return;
+        }
+
         _editingId = profile.Id;
-        var editDraft = _dashboard.GetManagedDeviceDraft(profile.Id);
         _successfulTestSignature = null;
         _failedTestSignature = null;
         _lastTestCode = profile.LastConnectionTestCode;
@@ -122,6 +170,21 @@ public partial class DeviceManagementWindow : Window
             ? $"마지막 접속 시험 성공 · {profile.LastConnectionTestUtc?.LocalDateTime:yyyy-MM-dd HH:mm:ss}"
             : $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}";
         DeleteButton.IsEnabled = true;
+    }
+
+    private void RestoreSelection(string? previousId)
+    {
+        _suppressSelectionChange = true;
+        try
+        {
+            DeviceList.SelectedItem = string.IsNullOrWhiteSpace(previousId)
+                ? null
+                : _devices.FirstOrDefault(item => item.Id == previousId);
+        }
+        finally
+        {
+            _suppressSelectionChange = false;
+        }
     }
 
     private async void TestConnection_Click(object sender, RoutedEventArgs e)
@@ -188,54 +251,98 @@ public partial class DeviceManagementWindow : Window
             return;
         }
 
-        var testMatches = _successfulTestSignature is not null
-                          && FixedTimeEquals(_successfulTestSignature, BuildConnectionSignature(draft));
-        var failedTestMatches = _failedTestSignature is not null
-                                && FixedTimeEquals(_failedTestSignature, BuildConnectionSignature(draft));
-        if (testMatches)
-        {
-            draft.ConnectionVerified = true;
-            draft.LastConnectionTestUtc = _lastTestUtc;
-            draft.LastConnectionTestCode = _lastTestCode;
-        }
-        else if (failedTestMatches)
-        {
-            draft.ConnectionVerified = false;
-            draft.LastConnectionTestUtc = _lastTestUtc;
-            draft.LastConnectionTestCode = _lastTestCode;
-            draft.MonitoringEnabled = false;
-        }
-        else if (_editingId is not null)
-        {
-            var existing = _devices.FirstOrDefault(item => item.Id == _editingId);
-            var existingUsername = existing is null
-                ? string.Empty
-                : _dashboard.GetManagedDeviceDraft(existing.Id).Username;
-            var connectionChanged = existing is null
-                                    || !existing.Host.Equals(draft.Host.Trim(), StringComparison.Ordinal)
-                                    || !existing.Model.Equals(draft.Model.Trim(), StringComparison.OrdinalIgnoreCase)
-                                    || !existingUsername.Equals(draft.Username.Trim(), StringComparison.Ordinal)
-                                    || !string.IsNullOrEmpty(draft.Password)
-                                    || !string.IsNullOrEmpty(draft.EnablePassword)
-                                    || draft.ClearEnablePassword;
-            draft.ConnectionVerified = !connectionChanged && existing?.ConnectionVerified == true;
-            draft.LastConnectionTestUtc = existing?.LastConnectionTestUtc;
-            draft.LastConnectionTestCode = existing?.LastConnectionTestCode;
-        }
-        draft.MonitoringEnabled = draft.ConnectionVerified && MonitoringCheckBox.IsChecked == true;
-
         try
         {
-            var saved = _dashboard.SaveManagedDevice(draft);
+            var testMatches = _successfulTestSignature is not null
+                              && FixedTimeEquals(_successfulTestSignature, BuildConnectionSignature(draft));
+            var failedTestMatches = _failedTestSignature is not null
+                                    && FixedTimeEquals(_failedTestSignature, BuildConnectionSignature(draft));
+            if (testMatches)
+            {
+                draft.ConnectionVerified = true;
+                draft.LastConnectionTestUtc = _lastTestUtc;
+                draft.LastConnectionTestCode = _lastTestCode;
+            }
+            else if (failedTestMatches)
+            {
+                draft.ConnectionVerified = false;
+                draft.LastConnectionTestUtc = _lastTestUtc;
+                draft.LastConnectionTestCode = _lastTestCode;
+                draft.MonitoringEnabled = false;
+            }
+            else if (_editingId is not null)
+            {
+                var existing = _devices.FirstOrDefault(item => item.Id == _editingId);
+                string existingUsername;
+                try
+                {
+                    existingUsername = existing is null
+                        ? string.Empty
+                        : _dashboard.GetManagedDeviceDraft(existing.Id).Username;
+                }
+                catch (Exception exception)
+                {
+                    ShowOperationFailure(
+                        "device-management-load",
+                        exception,
+                        DeviceManagementOperation.Load);
+                    return;
+                }
+                var connectionChanged = existing is null
+                                        || !existing.Host.Equals(draft.Host.Trim(), StringComparison.Ordinal)
+                                        || !existing.Model.Equals(draft.Model.Trim(), StringComparison.OrdinalIgnoreCase)
+                                        || !existingUsername.Equals(draft.Username.Trim(), StringComparison.Ordinal)
+                                        || !string.IsNullOrEmpty(draft.Password)
+                                        || !string.IsNullOrEmpty(draft.EnablePassword)
+                                        || draft.ClearEnablePassword;
+                draft.ConnectionVerified = !connectionChanged && existing?.ConnectionVerified == true;
+                draft.LastConnectionTestUtc = existing?.LastConnectionTestUtc;
+                draft.LastConnectionTestCode = existing?.LastConnectionTestCode;
+            }
+            draft.MonitoringEnabled = draft.ConnectionVerified && MonitoringCheckBox.IsChecked == true;
+
+            var saved = _dashboard.SaveManagedDevice(draft, out var warningCode);
             _editingId = saved.Id;
-            Reload(saved.Id);
-            ShowResult(saved.ConnectionVerified
-                ? "장비를 저장했습니다."
-                : "장비를 저장했습니다. 접속 시험 전까지 주기 감시는 꺼집니다.", true);
+            try
+            {
+                Reload(saved.Id);
+            }
+            catch (Exception exception)
+            {
+                var code = DeviceManagementFailureMapper.ToErrorCode(
+                    exception,
+                    DeviceManagementOperation.Load);
+                _dashboard.ReportDeviceManagementFailure(
+                    "device-management-load",
+                    code);
+                ShowResult(
+                    $"장비는 저장했지만 목록을 다시 불러오지 못했습니다. "
+                    + $"{ViewerConnectionMessages.ForCode(code)} ({code})",
+                    false);
+                return;
+            }
+
+            if (warningCode is not null)
+            {
+                ShowResult(
+                    $"장비를 저장했습니다. "
+                    + $"{ViewerConnectionMessages.ForCode(warningCode)} ({warningCode})",
+                    false);
+                return;
+            }
+
+            ShowResult(
+                saved.ConnectionVerified
+                    ? "장비를 저장했습니다."
+                    : "장비를 저장했습니다. 접속 시험 전까지 주기 감시는 꺼집니다.",
+                true);
         }
         catch (Exception exception)
         {
-            ShowResult(exception is InvalidDataException ? exception.Message : "장비를 저장하지 못했습니다.", false);
+            ShowOperationFailure(
+                "device-management-save",
+                exception,
+                DeviceManagementOperation.Save);
         }
     }
 
@@ -253,9 +360,34 @@ public partial class DeviceManagementWindow : Window
         {
             return;
         }
-        _dashboard.DeleteManagedDevice(profile.Id);
-        Reload();
-        BeginNewDevice();
+        DeleteConfirmed(profile);
+    }
+
+    internal bool DeleteConfirmed(ManagedDeviceProfile profile)
+    {
+        try
+        {
+            if (!_dashboard.DeleteManagedDevice(profile.Id))
+            {
+                ShowOperationFailure(
+                    "device-management-delete",
+                    new KeyNotFoundException("VIEWER_DEVICE_NOT_FOUND"),
+                    DeviceManagementOperation.Delete);
+                return false;
+            }
+
+            Reload();
+            BeginNewDevice();
+            return true;
+        }
+        catch (Exception exception)
+        {
+            ShowOperationFailure(
+                "device-management-delete",
+                exception,
+                DeviceManagementOperation.Delete);
+            return false;
+        }
     }
 
     private ManagedDeviceDraft BuildDraft() => new()
@@ -327,6 +459,25 @@ public partial class DeviceManagementWindow : Window
         ResultText.Foreground = success
             ? System.Windows.Media.Brushes.DarkGreen
             : System.Windows.Media.Brushes.Firebrick;
+    }
+
+    private void ShowOperationFailure(
+        string stage,
+        Exception exception,
+        DeviceManagementOperation operation)
+    {
+        if (DeviceManagementFailureMapper.TryGetValidationMessage(
+                exception,
+                out var validationMessage))
+        {
+            ShowResult(validationMessage, false);
+            return;
+        }
+
+        var code = DeviceManagementFailureMapper.ToErrorCode(exception, operation);
+        var message = $"{ViewerConnectionMessages.ForCode(code)} ({code})";
+        _dashboard.ReportDeviceManagementFailure(stage, code);
+        ShowResult(message, false);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
