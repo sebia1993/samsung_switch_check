@@ -48,7 +48,7 @@ DPAPI LocalMachine만으로는 같은 컴퓨터의 다른 사용자가 파일을
 readiness 실패 시 이전 자료를 복구한 뒤 폐쇄형 ACL을 다시 적용합니다. 성공 시 설치
 트랜잭션용 복제본만 제거합니다.
 
-v0.7에서 v0.8로 이관할 때 기존 Agent 장비 목록 설정 사본, 자격 증명과 SQLite 원문·이력
+v0.7에서 v0.9로 이관할 때 기존 Agent 장비 목록 설정 사본, 자격 증명과 SQLite 원문·이력
 자료는 자동 삭제하지 않습니다. `legacy-v0.7-backup-*` 폴더로 이동한 뒤 루트와 모든 하위
 항목의 ACL을 SYSTEM과
 Administrators 전용으로 다시 구성합니다. Agent 서비스 SID는 이 백업 ACL에 포함하지

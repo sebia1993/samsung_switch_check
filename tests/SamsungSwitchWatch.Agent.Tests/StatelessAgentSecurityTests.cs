@@ -1,5 +1,9 @@
 using System.Text;
 using System.Net;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using SamsungSwitchWatch.Agent.Api;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Execution;
@@ -76,6 +80,86 @@ public sealed class StatelessAgentSecurityTests
         await first.DisposeAsync();
         await using var afterRelease =
             await admission.EnterAsync("client-3", firstTarget, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Admission_PrunesExpiredRateWindowsWithoutWeakeningActiveClientLimit()
+    {
+        var clock = new ManualTimeProvider(
+            new DateTimeOffset(2026, 7, 23, 0, 0, 0, TimeSpan.Zero));
+        var admission = new TelnetExecutionAdmission(new AgentOptions
+        {
+            AllowedTargetCidrs = ["10.0.0.0/8"],
+            MaxConcurrentExecutions = 1,
+            RateLimitPerMinute = 2
+        }, clock);
+        var target = IPAddress.Parse("10.40.0.10");
+
+        await using (await admission.EnterAsync(
+                         "idle-client",
+                         target,
+                         CancellationToken.None))
+        {
+        }
+        clock.Advance(TimeSpan.FromSeconds(30));
+        await using (await admission.EnterAsync(
+                         "active-client",
+                         target,
+                         CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(2, admission.TrackedRateWindowCount);
+
+        clock.Advance(TimeSpan.FromSeconds(31));
+        await using (await admission.EnterAsync(
+                         "active-client",
+                         target,
+                         CancellationToken.None))
+        {
+        }
+
+        Assert.Equal(1, admission.TrackedRateWindowCount);
+        var limited = await Assert.ThrowsAsync<AgentOperationException>(async () =>
+            await admission.EnterAsync("active-client", target, CancellationToken.None));
+        Assert.Equal(AgentErrorCodes.QueryRateLimited, limited.Code);
+    }
+
+    [Fact]
+    public async Task UnexpectedFailureLog_ContainsOnlySanitizedOperationalMetadata()
+    {
+        var logger = new CapturingLogger<ErrorHandlingMiddleware>();
+        var middleware = new ErrorHandlingMiddleware(
+            _ => throw new InvalidOperationException(
+                "192.0.2.10 operator-private login-private show running-config private-output"),
+            logger);
+        using var services = new ServiceCollection().AddLogging().BuildServiceProvider();
+        var context = new DefaultHttpContext
+        {
+            TraceIdentifier = "trace-123",
+            RequestServices = services
+        };
+        context.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.10");
+        context.Request.Path = "/api/v4/telnet/execute";
+        context.Request.QueryString = new QueryString(
+            "?username=operator-private&password=login-private");
+        context.Response.Body = new MemoryStream();
+
+        await middleware.InvokeAsync(context);
+
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Error, entry.Level);
+        Assert.Null(entry.Exception);
+        Assert.Equal("telnet-execute", entry.Properties["Stage"]);
+        Assert.Equal(AgentErrorCodes.InternalError, entry.Properties["Code"]);
+        Assert.Equal("trace-123", entry.Properties["CorrelationId"]);
+        Assert.True(Convert.ToInt64(entry.Properties["DurationMs"]) >= 0);
+        var rendered = entry.Message;
+        Assert.DoesNotContain("192.0.2.10", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-private", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("login-private", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("show running-config", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-output", rendered, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,4 +293,47 @@ public sealed class StatelessAgentSecurityTests
         Directory.CreateDirectory(folder);
         return folder;
     }
+
+    private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = utcNow;
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan elapsed) => _utcNow += elapsed;
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<CapturedLog> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var properties = state is IEnumerable<KeyValuePair<string, object?>> values
+                ? values
+                    .Where(item => !item.Key.Equals("{OriginalFormat}", StringComparison.Ordinal))
+                    .ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal)
+                : new Dictionary<string, object?>(StringComparer.Ordinal);
+            Entries.Add(new CapturedLog(
+                logLevel,
+                formatter(state, exception),
+                exception,
+                properties));
+        }
+    }
+
+    private sealed record CapturedLog(
+        LogLevel Level,
+        string Message,
+        Exception? Exception,
+        IReadOnlyDictionary<string, object?> Properties);
 }

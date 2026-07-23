@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.8.0-poc',
+    [string]$Version = '0.9.0-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -81,7 +81,12 @@ $agentScripts = @(
     'uninstall-agent.ps1',
     'diagnose-agent.ps1'
 )
-$viewerScripts = @('common.ps1', 'install-viewer.ps1', 'uninstall-viewer.ps1')
+$viewerScripts = @(
+    'Install-or-Update-Viewer.cmd',
+    'common.ps1',
+    'install-viewer.ps1',
+    'uninstall-viewer.ps1'
+)
 $userManualPdf = Join-Path $repoRoot 'docs\SamsungSwitchWatch_User_Manual_KO.pdf'
 if (-not (Test-Path -LiteralPath $userManualPdf -PathType Leaf)) {
     throw "최종 PDF 사용설명서가 없습니다: $userManualPdf"

@@ -29,7 +29,7 @@ public sealed class AgentOptions
 
     // Configuration binding ignores v0.7 polling, device, credential, and
     // retention keys during an in-place upgrade. They are intentionally not
-    // represented here so no legacy state can enter the v0.8 runtime.
+    // represented here so no legacy state can enter the v0.9 runtime.
 }
 
 public sealed class TelnetSessionOptions

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 
@@ -252,10 +253,10 @@ public sealed class AgentContractMapperTests
         Assert.Equal(AgentConnectionState.Connected, snapshot.ConnectionState);
         var device = Assert.Single(snapshot.Devices);
         Assert.Equal("ACCESS-SW-01", device.Name);
-        Assert.Equal(DeviceHealth.Critical, device.Health);
-        Assert.Equal("활성 장애 이벤트 1건", device.Summary);
-        Assert.Contains(device.Metrics!, metric =>
-            metric.Label == "활성 장애" && metric.Value == "1건" && metric.Health == DeviceHealth.Critical);
+        Assert.Equal(DeviceHealth.Normal, device.Health);
+        Assert.Equal("등록된 모든 점검 정상", device.Summary);
+        Assert.DoesNotContain(device.Metrics!, metric => metric.Label == "활성 장애");
+        Assert.Contains("활성 장애 1건", snapshot.CollectorSummary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -435,5 +436,143 @@ public sealed class AgentContractMapperTests
 
         Assert.Equal(2, result.SessionCount);
         Assert.Equal(1, result.ReconnectCount);
+    }
+
+    [Fact]
+    public void MapTelnetExecutionResultV4_ValidatesRequestAndNormalizedCommandMapping()
+    {
+        var json = TelnetResultJson(
+            "request-1",
+            true,
+            [Command("show port status"), Command("show system")]);
+
+        var result = AgentContractMapper.MapTelnetExecutionResultV4(
+            json,
+            "request-1",
+            ["  show   port   status  ", "show system"],
+            65_536);
+
+        Assert.Equal(["show port status", "show system"], result.Commands.Select(item => item.Command));
+    }
+
+    [Fact]
+    public void MapTelnetExecutionResultV4_RejectsFailureAndMismatchedRequestId()
+    {
+        var failed = TelnetResultJson(
+            "request-1",
+            false,
+            [Command("show port status")]);
+        var mismatched = TelnetResultJson(
+            "different-request",
+            true,
+            [Command("show port status")]);
+
+        Assert.Throws<JsonException>(() => AgentContractMapper.MapTelnetExecutionResultV4(
+            failed,
+            "request-1",
+            ["show port status"],
+            65_536));
+        Assert.Throws<JsonException>(() => AgentContractMapper.MapTelnetExecutionResultV4(
+            mismatched,
+            "request-1",
+            ["show port status"],
+            65_536));
+    }
+
+    [Fact]
+    public void MapTelnetExecutionResultV4_RejectsMissingExtraDuplicateAndReorderedOutputs()
+    {
+        var expected = new[] { "show port status", "show system" };
+        var invalid = new[]
+        {
+            TelnetResultJson("request-1", true, [Command("show port status")]),
+            TelnetResultJson(
+                "request-1",
+                true,
+                [Command("show port status"), Command("show system"), Command("show version")]),
+            TelnetResultJson(
+                "request-1",
+                true,
+                [Command("show port status"), Command("show port status")]),
+            TelnetResultJson(
+                "request-1",
+                true,
+                [Command("show system"), Command("show port status")])
+        };
+
+        foreach (var json in invalid)
+        {
+            Assert.Throws<JsonException>(() => AgentContractMapper.MapTelnetExecutionResultV4(
+                json,
+                "request-1",
+                expected,
+                65_536));
+        }
+    }
+
+    [Fact]
+    public void MapTelnetExecutionResultV4_RejectsMissingFieldsAndOversizedCommandOutput()
+    {
+        var missingOutput = Command("show port status");
+        missingOutput.Remove("output");
+        var missingTruncated = Command("show port status");
+        missingTruncated.Remove("truncated");
+        var missingCollectedUtc = Command("show port status");
+        missingCollectedUtc.Remove("collectedUtc");
+        var invalid = new[]
+        {
+            TelnetResultJson("request-1", true, [missingOutput]),
+            TelnetResultJson("request-1", true, [missingTruncated]),
+            TelnetResultJson("request-1", true, [missingCollectedUtc]),
+            TelnetResultJson(
+                "request-1",
+                true,
+                [Command("show port status", new string('x', 65_537))]),
+            TelnetResultJson("request-1", true, null, includeCommands: false)
+        };
+
+        foreach (var json in invalid)
+        {
+            Assert.Throws<JsonException>(() => AgentContractMapper.MapTelnetExecutionResultV4(
+                json,
+                "request-1",
+                ["show port status"],
+                65_536));
+        }
+    }
+
+    private static Dictionary<string, object?> Command(string command, string output = "ok") => new()
+    {
+        ["command"] = command,
+        ["output"] = output,
+        ["truncated"] = false,
+        ["collectedUtc"] = "2026-07-23T01:00:01Z"
+    };
+
+    private static string TelnetResultJson(
+        string requestId,
+        bool success,
+        IReadOnlyList<Dictionary<string, object?>>? commands,
+        bool includeCommands = true)
+    {
+        var result = new Dictionary<string, object?>
+        {
+            ["apiVersion"] = 4,
+            ["requestId"] = requestId,
+            ["success"] = success,
+            ["privilege"] = "privileged",
+            ["promptTerminator"] = "#",
+            ["startedUtc"] = "2026-07-23T01:00:00Z",
+            ["completedUtc"] = "2026-07-23T01:00:01Z",
+            ["durationMs"] = 1000,
+            ["sessionCount"] = 1,
+            ["reconnectCount"] = 0
+        };
+        if (includeCommands)
+        {
+            result["commands"] = commands ?? [];
+        }
+
+        return JsonSerializer.Serialize(result);
     }
 }

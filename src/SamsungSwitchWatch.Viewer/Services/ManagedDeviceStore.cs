@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using SamsungSwitchWatch.Viewer.Models;
@@ -6,30 +8,56 @@ namespace SamsungSwitchWatch.Viewer.Services;
 
 public class ManagedDeviceStore
 {
+    private const int CurrentSchemaVersion = 1;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly object _sync = new();
     private readonly string _path;
     private readonly IViewerSecretProtector _protector;
+    private readonly IManagedDevicePersistence _persistence;
 
     public ManagedDeviceStore(string? path = null, IViewerSecretProtector? protector = null)
+        : this(path, protector, PhysicalManagedDevicePersistence.Instance)
+    {
+    }
+
+    internal ManagedDeviceStore(
+        string? path,
+        IViewerSecretProtector? protector,
+        IManagedDevicePersistence persistence)
     {
         _path = path ?? System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SamsungSwitchWatch",
             "viewer-devices.json");
         _protector = protector ?? new CurrentUserSecretProtector();
+        _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
     }
 
     public string Path => _path;
+    public ManagedDeviceLoadStatus LastLoadStatus { get; private set; } = ManagedDeviceLoadStatus.Ok;
 
     public IReadOnlyList<ManagedDeviceProfile> Load()
     {
         lock (_sync)
         {
-            return LoadUnsafe()
-                .Select(item => item.Copy())
-                .OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase)
-                .ToArray();
+            try
+            {
+                return LoadUnsafe(allowMigrationWriteFailure: true)
+                    .Select(item => item.Copy())
+                    .OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+                    .ToArray();
+            }
+            catch (DeviceStoreCorruptException)
+            {
+                return [];
+            }
+            catch (Exception exception) when (IsStorageException(exception))
+            {
+                // A locked, read-only, or temporarily unavailable file is not
+                // corrupt. Preserve it and expose a non-normal load state.
+                LastLoadStatus = ManagedDeviceLoadStatus.StorageUnavailable;
+                return [];
+            }
         }
     }
 
@@ -137,7 +165,7 @@ public class ManagedDeviceStore
                         ? null
                         : _protector.Unprotect(profile.ProtectedEnablePassword));
             }
-            catch (Exception exception) when (exception is not OutOfMemoryException)
+            catch (Exception exception) when (IsCredentialProtectionException(exception))
             {
                 throw new InvalidDataException("VIEWER_CREDENTIAL_CORRUPT", exception);
             }
@@ -218,7 +246,7 @@ public class ManagedDeviceStore
             {
                 username = IsCredentialCorrupt(profile) ? string.Empty : ReadUsername(profile);
             }
-            catch
+            catch (Exception exception) when (IsCredentialProtectionException(exception))
             {
                 username = string.Empty;
             }
@@ -255,25 +283,34 @@ public class ManagedDeviceStore
         }
     }
 
-    private IReadOnlyList<ManagedDeviceProfile> LoadUnsafe()
+    private IReadOnlyList<ManagedDeviceProfile> LoadUnsafe(bool allowMigrationWriteFailure = false)
     {
-        if (!File.Exists(_path)) return [];
+        var storedJson = _persistence.ReadIfExists(_path);
+        if (storedJson is null)
+        {
+            LastLoadStatus = ManagedDeviceLoadStatus.Missing;
+            return [];
+        }
+
         DeviceStoreEnvelope? envelope;
         try
         {
             envelope = JsonSerializer.Deserialize<DeviceStoreEnvelope>(
-                File.ReadAllText(_path, Encoding.UTF8), JsonOptions);
+                storedJson, JsonOptions);
+            ValidateEnvelope(envelope);
         }
         catch (Exception exception) when (
             exception is JsonException
             or NotSupportedException
-            or DecoderFallbackException)
+            or DecoderFallbackException
+            or DeviceStoreFormatException)
         {
-            QuarantineCorruptFile();
-            return [];
+            TryQuarantineCorruptFile();
+            LastLoadStatus = ManagedDeviceLoadStatus.Corrupt;
+            throw new DeviceStoreCorruptException(exception);
         }
 
-        var devices = envelope?.Devices ?? [];
+        var devices = envelope!.Devices!;
         var migrated = false;
         foreach (var item in devices)
         {
@@ -285,9 +322,9 @@ public class ManagedDeviceStore
                 migrated = true;
             }
         }
-        var valid = devices.Where(IsStructurallyValid).ToArray();
+
         var credentialStateChanged = false;
-        foreach (var item in valid)
+        foreach (var item in devices)
         {
             if (CanDecryptCredentials(item)) continue;
             if (!IsCredentialCorrupt(item)
@@ -302,46 +339,85 @@ public class ManagedDeviceStore
                 credentialStateChanged = true;
             }
         }
-        if (migrated || credentialStateChanged) SaveUnsafe(valid);
-        return valid;
+
+        if (migrated || credentialStateChanged)
+        {
+            try
+            {
+                SaveUnsafe(devices);
+            }
+            catch (Exception exception) when (
+                allowMigrationWriteFailure && IsStorageException(exception))
+            {
+                // Keep the validated in-memory data available for this session,
+                // but do not report the migration as successfully persisted.
+                LastLoadStatus = ManagedDeviceLoadStatus.StorageUnavailable;
+                return devices;
+            }
+        }
+
+        LastLoadStatus = ManagedDeviceLoadStatus.Ok;
+        return devices;
     }
 
     private void SaveUnsafe(IEnumerable<ManagedDeviceProfile> devices)
     {
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(_path)!);
-        var temporaryPath = _path + $".{Guid.NewGuid():N}.tmp";
-        try
+        var envelope = new DeviceStoreEnvelope
         {
-            var envelope = new DeviceStoreEnvelope
-            {
-                SchemaVersion = 1,
-                Devices = devices.OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToList()
-            };
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(envelope, JsonOptions), new UTF8Encoding(false));
-            File.Move(temporaryPath, _path, true);
-        }
-        finally
-        {
-            try { File.Delete(temporaryPath); } catch { }
-        }
+            SchemaVersion = CurrentSchemaVersion,
+            Devices = devices.OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToList()
+        };
+        _persistence.WriteAtomically(_path, JsonSerializer.Serialize(envelope, JsonOptions));
     }
 
-    private void QuarantineCorruptFile()
+    private void TryQuarantineCorruptFile()
     {
-        if (!File.Exists(_path)) return;
+        var quarantine = _path + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}";
         try
         {
-            File.Move(_path, _path + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}", false);
+            _persistence.Quarantine(_path, quarantine);
         }
-        catch { }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            // Keep the corrupt source in place if it cannot be moved. It must
+            // never be deleted or treated as a normal empty device list.
+        }
     }
 
-    private static bool IsStructurallyValid(ManagedDeviceProfile item) =>
-        !string.IsNullOrWhiteSpace(item.Id)
+    private static void ValidateEnvelope(DeviceStoreEnvelope? envelope)
+    {
+        if (envelope is null
+            || envelope.SchemaVersion != CurrentSchemaVersion
+            || envelope.Devices is null)
+        {
+            throw new DeviceStoreFormatException();
+        }
+
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var hosts = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in envelope.Devices)
+        {
+            if (!IsStructurallyValid(item)
+                || !ids.Add(item.Id)
+                || !hosts.Add(item.Host))
+            {
+                throw new DeviceStoreFormatException();
+            }
+        }
+    }
+
+    private static bool IsStructurallyValid(ManagedDeviceProfile? item) =>
+        item is not null
+        && !string.IsNullOrWhiteSpace(item.Id)
+        && item.Id.Length <= 128
         && !string.IsNullOrWhiteSpace(item.DisplayName)
+        && item.DisplayName.Trim().Length <= 80
         && SupportedSwitchModels.Contains(item.Model)
+        && IPAddress.TryParse(item.Host, out var address)
+        && address.AddressFamily == AddressFamily.InterNetwork
         && item.Port == 23
-        && !string.IsNullOrWhiteSpace(item.ProtectedUsername)
+        && (!string.IsNullOrWhiteSpace(item.ProtectedUsername)
+            || !string.IsNullOrWhiteSpace(item.LegacyUsername))
         && !string.IsNullOrWhiteSpace(item.ProtectedPassword);
 
     private string ReadUsername(ManagedDeviceProfile profile)
@@ -369,7 +445,7 @@ public class ManagedDeviceStore
             }
             return true;
         }
-        catch (Exception exception) when (exception is not OutOfMemoryException)
+        catch (Exception exception) when (IsCredentialProtectionException(exception))
         {
             return false;
         }
@@ -380,9 +456,101 @@ public class ManagedDeviceStore
             "VIEWER_CREDENTIAL_CORRUPT",
             StringComparison.Ordinal) == true;
 
+    private static bool IsStorageException(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException;
+
+    private static bool IsCredentialProtectionException(Exception exception) =>
+        exception is InvalidDataException
+            or FormatException
+            or ArgumentException
+            or System.ComponentModel.Win32Exception
+            or PlatformNotSupportedException;
+
     private sealed class DeviceStoreEnvelope
     {
-        public int SchemaVersion { get; set; } = 1;
-        public List<ManagedDeviceProfile> Devices { get; set; } = [];
+        public int SchemaVersion { get; set; }
+        public List<ManagedDeviceProfile>? Devices { get; set; }
     }
+
+    private sealed class DeviceStoreFormatException : Exception
+    {
+    }
+
+    private sealed class DeviceStoreCorruptException(Exception innerException)
+        : Exception("VIEWER_DEVICE_STORE_CORRUPT", innerException)
+    {
+    }
+}
+
+public enum ManagedDeviceLoadStatus
+{
+    Ok,
+    Missing,
+    Corrupt,
+    StorageUnavailable
+}
+
+internal interface IManagedDevicePersistence
+{
+    string? ReadIfExists(string path);
+    void WriteAtomically(string path, string content);
+    void Quarantine(string path, string destination);
+}
+
+internal sealed class PhysicalManagedDevicePersistence : IManagedDevicePersistence
+{
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    public static PhysicalManagedDevicePersistence Instance { get; } = new();
+
+    private PhysicalManagedDevicePersistence()
+    {
+    }
+
+    public string? ReadIfExists(string path)
+    {
+        try
+        {
+            return File.ReadAllText(path, StrictUtf8);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    public void WriteAtomically(string path, string content)
+    {
+        var directory = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))
+                        ?? throw new InvalidOperationException("VIEWER_DEVICE_PATH_INVALID");
+        Directory.CreateDirectory(directory);
+        var temporaryPath = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
+            File.Move(temporaryPath, path, true);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup only; do not mask the primary write result.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // See IOException comment above.
+            }
+        }
+    }
+
+    public void Quarantine(string path, string destination) =>
+        File.Move(path, destination, false);
 }

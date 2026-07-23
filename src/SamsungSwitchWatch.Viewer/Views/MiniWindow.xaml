@@ -42,7 +42,8 @@
                     </TextBlock>
                     <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="{StaticResource MutedTextBrush}">
                         <Run Text="장애 " /><Run Text="{Binding CriticalCount, Mode=OneWay}" /><Run Text="대 · 접속 끊김 " />
-                        <Run Text="{Binding DisconnectedCount, Mode=OneWay}" /><Run Text="대 · " />
+                        <Run Text="{Binding DisconnectedCount, Mode=OneWay}" /><Run Text="대 · 미감시 " />
+                        <Run Text="{Binding UnmonitoredCount, Mode=OneWay}" /><Run Text="대 · " />
                         <Run Text="{Binding MiniCurrentStatusText, Mode=OneWay}" />
                     </TextBlock>
                 </StackPanel>

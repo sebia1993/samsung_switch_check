@@ -119,7 +119,7 @@ public sealed record TelnetInteractiveResult(
 }
 
 /// <summary>
-/// A sanitized partial-result failure. It contains registered command IDs and
+/// A sanitized partial-result failure. It contains internal command IDs and
 /// completed command output only; endpoint and credential values are excluded.
 /// </summary>
 public sealed class TelnetExecutionException : SwitchWatchException

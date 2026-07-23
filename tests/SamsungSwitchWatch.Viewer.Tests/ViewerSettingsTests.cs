@@ -160,6 +160,81 @@ public sealed class ViewerSettingsTests
         }
     }
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("[]")]
+    [InlineData("\"not-an-object\"")]
+    public void Store_InvalidRootIsQuarantinedInsteadOfBeingReportedAsNormal(string content)
+    {
+        var persistence = new TestSettingsPersistence { Content = content };
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+
+        var loaded = store.Load();
+
+        Assert.False(loaded.DemoMode);
+        Assert.Equal(ViewerSettingsLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void Store_ReadFailurePreservesOriginalAndDoesNotQuarantine(Type exceptionType)
+    {
+        const string original = """{"DemoMode":true}""";
+        var persistence = new TestSettingsPersistence
+        {
+            Content = original,
+            ReadException = (Exception)Activator.CreateInstance(exceptionType, "simulated storage failure")!
+        };
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+
+        var loaded = store.Load();
+
+        Assert.False(loaded.DemoMode);
+        Assert.Equal(ViewerSettingsLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public void Store_MigrationWriteFailureReturnsValidatedSettingsButReportsStorageUnavailable()
+    {
+        const string original = """{"AgentUri":"http://monitor.example.test:18443"}""";
+        var persistence = new TestSettingsPersistence
+        {
+            Content = original,
+            WriteException = new IOException("simulated atomic write failure")
+        };
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+
+        var loaded = store.Load();
+
+        Assert.Equal("https://monitor.example.test:18443", loaded.AgentUri);
+        Assert.Equal(ViewerSettingsLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.Equal(1, persistence.WriteCount);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public void Store_SaveFailureDoesNotReplacePreviouslyPersistedSettings()
+    {
+        var persistence = new TestSettingsPersistence();
+        var store = new ViewerSettingsStore("viewer-settings.json", persistence);
+        store.Save(new ViewerSettings { AgentUri = "https://first.example.test:18443" });
+        var previous = persistence.Content;
+        persistence.WriteException = new IOException("simulated atomic write failure");
+
+        Assert.Throws<IOException>(() =>
+            store.Save(new ViewerSettings { AgentUri = "https://second.example.test:18443" }));
+
+        Assert.Equal(previous, persistence.Content);
+        persistence.WriteException = null;
+        Assert.Equal("https://first.example.test:18443", store.Load().AgentUri);
+    }
+
     [Fact]
     public void StartupWindowPolicy_HonorsTrayStartUnlessConnectionNeedsAttention()
     {
@@ -177,5 +252,35 @@ public sealed class ViewerSettingsTests
     {
         var clean = ViewerSettingsSanitizer.Sanitize(new ViewerSettings { StartMinimizedToTray = true });
         Assert.True(clean.StartMinimizedToTray);
+    }
+
+    private sealed class TestSettingsPersistence : IViewerSettingsPersistence
+    {
+        public string? Content { get; set; }
+        public Exception? ReadException { get; init; }
+        public Exception? WriteException { get; set; }
+        public Exception? QuarantineException { get; init; }
+        public int WriteCount { get; private set; }
+        public int QuarantineCount { get; private set; }
+
+        public string? ReadIfExists(string path)
+        {
+            if (ReadException is not null) throw ReadException;
+            return Content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            WriteCount++;
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination)
+        {
+            QuarantineCount++;
+            if (QuarantineException is not null) throw QuarantineException;
+            Content = null;
+        }
     }
 }

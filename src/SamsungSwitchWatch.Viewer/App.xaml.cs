@@ -20,6 +20,8 @@ public partial class App : Application
     private DeviceManagementWindow? _deviceManagementDialog;
     private ManagedDeviceStore? _deviceStore;
     private ViewerMonitoringStore? _monitoringStore;
+    private readonly ViewerDiagnosticLog _diagnosticLog = new();
+    private string? _startupWarning;
     private readonly CancellationTokenSource _lifetime = new();
     private bool _exiting;
 
@@ -41,7 +43,20 @@ public partial class App : Application
         _settingsStore = new ViewerSettingsStore();
         var settings = _settingsStore.Load();
         _deviceStore = new ManagedDeviceStore();
-        _monitoringStore = new ViewerMonitoringStore();
+        try
+        {
+            _monitoringStore = new ViewerMonitoringStore();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _monitoringStore = null;
+            _diagnosticLog.Write(
+                "monitoring-store-startup",
+                "VIEWER_MONITOR_STATE_WRITE_FAILED");
+            _startupWarning =
+                $"감시 이력을 열 수 없어 주기 감시를 시작하지 않았습니다. "
+                + ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_WRITE_FAILED");
+        }
         _viewModel = new DashboardViewModel(
             settings,
             _settingsStore,
@@ -57,6 +72,7 @@ public partial class App : Application
         var needsConnection = _settingsStore.LastLoadStatus is ViewerSettingsLoadStatus.Missing
                 or ViewerSettingsLoadStatus.NeedsConnection
                 or ViewerSettingsLoadStatus.Corrupt
+                or ViewerSettingsLoadStatus.StorageUnavailable
                            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
         if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection))
         {
@@ -80,7 +96,15 @@ public partial class App : Application
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch
         {
+            _diagnosticLog.Write("app-initialize", "VIEWER_UNEXPECTED_ERROR");
             // Initialization failures are represented by the ViewModel's Offline/Stale state.
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(_startupWarning))
+            {
+                await Dispatcher.InvokeAsync(() => _viewModel.ReportOperation(_startupWarning));
+            }
         }
     }
 
@@ -301,6 +325,7 @@ public partial class App : Application
             return;
         }
         e.Handled = true;
+        _diagnosticLog.Write("dispatcher-unhandled", "VIEWER_UNEXPECTED_ERROR");
         MessageBox.Show("복구할 수 없는 화면 오류가 발생해 프로그램을 안전하게 종료합니다.", "Samsung Switch Watch", MessageBoxButton.OK, MessageBoxImage.Error);
         Dispatcher.BeginInvoke(ExitApplication);
     }

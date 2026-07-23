@@ -1,9 +1,11 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using SamsungSwitchWatch.Core.Profiles;
 using SamsungSwitchWatch.Viewer.Models;
 
 namespace SamsungSwitchWatch.Viewer.Services;
@@ -11,7 +13,15 @@ namespace SamsungSwitchWatch.Viewer.Services;
 public sealed class HttpAgentClient : IAgentClient
 {
     internal static readonly TimeSpan ReadOnlyQueryTimeout = TimeSpan.FromSeconds(510);
+    private static readonly TimeSpan ControlRequestTimeout = TimeSpan.FromSeconds(20);
+    internal const int MaximumIdentityResponseBytes = 32 * 1024;
+    internal const int MaximumErrorResponseBytes = 64 * 1024;
+    // Eight 64-KiB UTF-8 outputs still fit when every byte requires a six-byte
+    // JSON escape, with room left for the v4 envelope and command metadata.
+    internal const int MaximumTelnetResponseBytes = 4 * 1024 * 1024;
+    private const int MaximumBoundedResponseBytes = 16 * 1024 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private readonly ViewerSettings _settings;
     private readonly HttpClient _httpClient;
@@ -45,7 +55,7 @@ public sealed class HttpAgentClient : IAgentClient
         _httpClient = new HttpClient(controlHandler ?? CreatePinnedHttpHandler(_certificateValidator))
         {
             BaseAddress = new Uri(clean.AgentUri),
-            Timeout = TimeSpan.FromSeconds(20)
+            Timeout = ControlRequestTimeout
         };
         _queryHttpClient = new HttpClient(queryHandler ?? CreatePinnedHttpHandler(_certificateValidator))
         {
@@ -72,6 +82,9 @@ public sealed class HttpAgentClient : IAgentClient
         await _startGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            using var requestCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            requestCancellation.CancelAfter(ControlRequestTimeout);
             var currentState = (AgentConnectionState)Volatile.Read(ref _connectionState);
             if (currentState != AgentConnectionState.Connected)
             {
@@ -81,8 +94,16 @@ public sealed class HttpAgentClient : IAgentClient
             }
 
             using var response = await SendAsync(
-                _httpClient, HttpMethod.Get, AgentApiRoutes.IdentityV4, null, cancellationToken).ConfigureAwait(false);
-            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                _httpClient,
+                HttpMethod.Get,
+                AgentApiRoutes.IdentityV4,
+                null,
+                requestCancellation.Token).ConfigureAwait(false);
+            var json = await ReadBoundedUtf8Async(
+                    response.Content,
+                    MaximumIdentityResponseBytes,
+                    requestCancellation.Token)
+                .ConfigureAwait(false);
             var identity = AgentContractMapper.MapIdentityV4(json);
             if (!_certificateValidator.CompleteTrust(identity.CertificatePublicKeySha256))
             {
@@ -94,6 +115,15 @@ public sealed class HttpAgentClient : IAgentClient
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException exception)
+        {
+            var typed = new AgentClientException(
+                "AGENT_TIMEOUT",
+                AgentConnectionState.Offline,
+                exception);
+            PublishConnectionState(typed.SuggestedConnectionState);
+            throw typed;
         }
         catch (AgentClientException)
         {
@@ -123,7 +153,13 @@ public sealed class HttpAgentClient : IAgentClient
     {
         ValidateTarget(target.Host, target.Port, target.Model);
         await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
-        return await SendTelnetAsync(AgentApiRoutes.TelnetTestV4, target, cancellationToken).ConfigureAwait(false);
+        return await SendTelnetAsync(
+                AgentApiRoutes.TelnetTestV4,
+                target,
+                target.RequestId,
+                [],
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
@@ -131,13 +167,16 @@ public sealed class HttpAgentClient : IAgentClient
         CancellationToken cancellationToken)
     {
         ValidateTarget(request.Host, request.Port, request.Model);
-        if (request.Commands is not { Count: > 0 and <= 8 }
-            || request.Commands.Any(command => !ManagedDeviceValidator.IsSingleShowCommand(command)))
-        {
-            throw new AgentClientException("QUERY_COMMAND_BLOCKED", AgentConnectionState.Stale);
-        }
+        var normalizedCommands = NormalizeCommands(request.Commands);
+        var normalizedRequest = request with { Commands = normalizedCommands };
         await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
-        return await SendTelnetAsync(AgentApiRoutes.TelnetExecuteV4, request, cancellationToken).ConfigureAwait(false);
+        return await SendTelnetAsync(
+                AgentApiRoutes.TelnetExecuteV4,
+                normalizedRequest,
+                request.RequestId,
+                normalizedCommands,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<AgentSnapshotDto> GetSnapshotAsync(CancellationToken cancellationToken)
@@ -190,19 +229,56 @@ public sealed class HttpAgentClient : IAgentClient
     private async Task<TelnetExecutionResultDto> SendTelnetAsync(
         string route,
         object body,
+        string expectedRequestId,
+        IReadOnlyList<string> expectedCommands,
         CancellationToken cancellationToken)
     {
         var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(body, JsonOptions);
+        using var requestCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        requestCancellation.CancelAfter(ReadOnlyQueryTimeout);
         try
         {
             using var response = await SendAsync(
-                _queryHttpClient, HttpMethod.Post, route, jsonBytes, cancellationToken).ConfigureAwait(false);
-            var resultJson = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                _queryHttpClient,
+                HttpMethod.Post,
+                route,
+                jsonBytes,
+                requestCancellation.Token).ConfigureAwait(false);
             try
             {
-                return AgentContractMapper.MapTelnetExecutionResultV4(resultJson);
+                var resultJson = await ReadBoundedUtf8Async(
+                        response.Content,
+                        MaximumTelnetResponseBytes,
+                        requestCancellation.Token)
+                    .ConfigureAwait(false);
+                var maximumOutputBytes = Math.Min(
+                    _identity?.MaxOutputBytes ?? ReadOnlyQueryPolicy.MaximumOutputBytes,
+                    ReadOnlyQueryPolicy.MaximumOutputBytes);
+                return AgentContractMapper.MapTelnetExecutionResultV4(
+                    resultJson,
+                    expectedRequestId,
+                    expectedCommands,
+                    maximumOutputBytes);
             }
-            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException exception)
+            {
+                var typed = new AgentClientException(
+                    "AGENT_TIMEOUT",
+                    AgentConnectionState.Offline,
+                    exception);
+                PublishConnectionState(typed.SuggestedConnectionState);
+                throw typed;
+            }
+            catch (AgentClientException)
+            {
+                throw;
+            }
+            catch (Exception exception)
             {
                 var typed = AgentClientErrors.Translate(exception);
                 PublishConnectionState(typed.SuggestedConnectionState);
@@ -239,12 +315,28 @@ public sealed class HttpAgentClient : IAgentClient
                         CharSet = "utf-8"
                     };
             }
-            var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var response = await client.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken)
+                .ConfigureAwait(false);
             PublishConnectionState(AgentConnectionState.Connected);
             if (response.IsSuccessStatusCode) return response;
-            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            var typed = AgentClientErrors.FromStatus(response.StatusCode, body);
-            response.Dispose();
+            var statusCode = response.StatusCode;
+            string body;
+            try
+            {
+                body = await ReadBoundedUtf8Async(
+                        response.Content,
+                        MaximumErrorResponseBytes,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                response.Dispose();
+            }
+            var typed = AgentClientErrors.FromStatus(statusCode, body);
             throw typed;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -292,6 +384,84 @@ public sealed class HttpAgentClient : IAgentClient
         if (port != 23 || !ManagedDeviceValidator.TryValidate(draft, true, out _))
         {
             throw new AgentClientException("VIEWER_DEVICE_INVALID", AgentConnectionState.Stale);
+        }
+    }
+
+    private static IReadOnlyList<string> NormalizeCommands(IReadOnlyList<string>? commands)
+    {
+        if (commands is not { Count: > 0 and <= 8 })
+        {
+            throw new AgentClientException("QUERY_COMMAND_BLOCKED", AgentConnectionState.Stale);
+        }
+
+        var normalized = new string[commands.Count];
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < commands.Count; index++)
+        {
+            var validation = ReadOnlyQueryPolicy.Validate(commands[index]);
+            if (!validation.IsAllowed || !unique.Add(validation.NormalizedCommand!))
+            {
+                throw new AgentClientException("QUERY_COMMAND_BLOCKED", AgentConnectionState.Stale);
+            }
+
+            normalized[index] = validation.NormalizedCommand!;
+        }
+
+        return normalized;
+    }
+
+    internal static async Task<string> ReadBoundedUtf8Async(
+        HttpContent content,
+        int maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        if (maximumBytes is < 1 or > MaximumBoundedResponseBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        }
+        if (content.Headers.ContentLength is long contentLength
+            && contentLength > maximumBytes)
+        {
+            throw new InvalidDataException("AGENT_RESPONSE_TOO_LARGE");
+        }
+
+        var buffer = ArrayPool<byte>.Shared.Rent(checked(maximumBytes + 1));
+        var bytesRead = 0;
+        try
+        {
+            await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            while (bytesRead <= maximumBytes)
+            {
+                var read = await stream.ReadAsync(
+                        buffer.AsMemory(bytesRead, maximumBytes + 1 - bytesRead),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                bytesRead += read;
+                if (bytesRead > maximumBytes)
+                {
+                    throw new InvalidDataException("AGENT_RESPONSE_TOO_LARGE");
+                }
+            }
+
+            try
+            {
+                return StrictUtf8.GetString(buffer, 0, bytesRead);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidDataException("AGENT_RESPONSE_UTF8_INVALID", exception);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer.AsSpan(0, Math.Min(bytesRead, buffer.Length)));
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

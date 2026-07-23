@@ -236,15 +236,24 @@ public sealed class ViewerSettingsStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly string _settingsPath;
+    private readonly IViewerSettingsPersistence _persistence;
 
     public ViewerSettingsLoadStatus LastLoadStatus { get; private set; } = ViewerSettingsLoadStatus.Ok;
 
     public ViewerSettingsStore(string? settingsPath = null)
+        : this(settingsPath, PhysicalViewerSettingsPersistence.Instance)
+    {
+    }
+
+    internal ViewerSettingsStore(
+        string? settingsPath,
+        IViewerSettingsPersistence persistence)
     {
         _settingsPath = settingsPath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SamsungSwitchWatch",
             "viewer-settings.json");
+        _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
     }
 
     public string SettingsPath => _settingsPath;
@@ -253,34 +262,53 @@ public sealed class ViewerSettingsStore
     {
         try
         {
-            if (!File.Exists(_settingsPath))
+            var storedJson = _persistence.ReadIfExists(_settingsPath);
+            if (storedJson is null)
             {
                 LastLoadStatus = ViewerSettingsLoadStatus.Missing;
                 return new ViewerSettings();
             }
 
             // Legacy manually-entered fingerprint and token fields are ignored.
-            // v0.8 stores only automatic per-Agent trust pins.
-            var storedJson = File.ReadAllText(_settingsPath);
-            var settings = JsonSerializer.Deserialize<ViewerSettings>(storedJson, JsonOptions);
+            // v0.8 and later store only automatic per-Agent trust pins.
+            var settings = JsonSerializer.Deserialize<ViewerSettings>(storedJson, JsonOptions)
+                           ?? throw new ViewerSettingsFormatException();
             settings = ViewerSettingsSanitizer.Sanitize(settings);
             var migratedJson = JsonSerializer.Serialize(settings, JsonOptions);
             if (!string.Equals(storedJson, migratedJson, StringComparison.Ordinal))
             {
-                try { Save(settings); }
-                catch
+                try
+                {
+                    Save(settings);
+                }
+                catch (Exception exception) when (IsStorageException(exception))
                 {
                     // A read-only profile must still be able to monitor with the
-                    // in-memory migrated settings. The next writable save retries.
+                    // in-memory migrated settings. Report the failed persistence
+                    // instead of claiming that migration completed successfully.
+                    LastLoadStatus = ViewerSettingsLoadStatus.StorageUnavailable;
+                    return settings;
                 }
             }
             LastLoadStatus = ViewerSettingsLoadStatus.Ok;
             return settings;
         }
-        catch
+        catch (Exception exception) when (
+            exception is JsonException
+            or NotSupportedException
+            or DecoderFallbackException
+            or ViewerSettingsFormatException)
         {
             QuarantineCorruptSettings();
             LastLoadStatus = ViewerSettingsLoadStatus.Corrupt;
+            return new ViewerSettings();
+        }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            // An access or I/O failure is not evidence that the JSON is corrupt.
+            // Keep the original file in place and start with safe in-memory
+            // defaults so the connection screen can explain what needs attention.
+            LastLoadStatus = ViewerSettingsLoadStatus.StorageUnavailable;
             return new ViewerSettings();
         }
     }
@@ -288,24 +316,28 @@ public sealed class ViewerSettingsStore
     public void Save(ViewerSettings settings)
     {
         var clean = ViewerSettingsSanitizer.Sanitize(settings);
-        Directory.CreateDirectory(Path.GetDirectoryName(_settingsPath)!);
-        var temporaryPath = _settingsPath + $".{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(clean, JsonOptions), new UTF8Encoding(false));
-            File.Move(temporaryPath, _settingsPath, true);
-        }
-        finally
-        {
-            try { File.Delete(temporaryPath); } catch { }
-        }
+        _persistence.WriteAtomically(_settingsPath, JsonSerializer.Serialize(clean, JsonOptions));
     }
 
     private void QuarantineCorruptSettings()
     {
-        if (!File.Exists(_settingsPath)) return;
         var quarantine = _settingsPath + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}";
-        try { File.Move(_settingsPath, quarantine, false); } catch { }
+        try
+        {
+            _persistence.Quarantine(_settingsPath, quarantine);
+        }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            // The source is still known to contain invalid JSON. If the file is
+            // locked or read-only, leave it in place rather than deleting it.
+        }
+    }
+
+    private static bool IsStorageException(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException;
+
+    private sealed class ViewerSettingsFormatException : Exception
+    {
     }
 }
 
@@ -314,5 +346,72 @@ public enum ViewerSettingsLoadStatus
     Ok,
     Missing,
     NeedsConnection,
-    Corrupt
+    Corrupt,
+    StorageUnavailable
+}
+
+internal interface IViewerSettingsPersistence
+{
+    string? ReadIfExists(string path);
+    void WriteAtomically(string path, string content);
+    void Quarantine(string path, string destination);
+}
+
+internal sealed class PhysicalViewerSettingsPersistence : IViewerSettingsPersistence
+{
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    public static PhysicalViewerSettingsPersistence Instance { get; } = new();
+
+    private PhysicalViewerSettingsPersistence()
+    {
+    }
+
+    public string? ReadIfExists(string path)
+    {
+        try
+        {
+            return File.ReadAllText(path, StrictUtf8);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    public void WriteAtomically(string path, string content)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path))
+                        ?? throw new InvalidOperationException("VIEWER_SETTINGS_PATH_INVALID");
+        Directory.CreateDirectory(directory);
+        var temporaryPath = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temporaryPath, content, new UTF8Encoding(false));
+            File.Move(temporaryPath, path, true);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup only. The destination write result is
+                // already determined and the previous file remains intact.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // See IOException comment above.
+            }
+        }
+    }
+
+    public void Quarantine(string path, string destination) =>
+        File.Move(path, destination, false);
 }

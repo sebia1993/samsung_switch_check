@@ -233,7 +233,7 @@ public sealed class DemoAgentClient : IAgentClient
 
     private static IReadOnlyList<CollectorCapabilityDto> Capabilities(
         string portSelected = "show port status",
-        string logSelected = "show syslog tail num 100",
+        string logSelected = "show sylog tail num 100",
         string state = "Healthy",
         string? errorCode = null)
     {
@@ -246,8 +246,8 @@ public sealed class DemoAgentClient : IAgentClient
             ["show system"], healthy ? null : "show system"),
         new("interface_status", true, state, errorCode, "show port status", healthy ? portSelected : null,
             ["show port status", "show interfaces status"], healthy ? null : portSelected),
-        new("log_ram", true, state, errorCode, "show syslog tail num 100", healthy ? logSelected : null,
-            ["show syslog tail num 100", "show log ram"], healthy ? null : logSelected)
+        new("log_ram", true, state, errorCode, "show sylog tail num 100", healthy ? logSelected : null,
+            ["show sylog tail num 100", "show syslog tail num 100", "show log ram"], healthy ? null : logSelected)
     ];
     }
 

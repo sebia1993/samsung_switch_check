@@ -110,10 +110,16 @@ public sealed class ViewerMonitoringIntegrationTests
                     client.ExecuteRequests.Count >= 2
                     && viewModel.Devices.Single().Capabilities.Any(item =>
                         item.CommandId == "interface_status"
-                        && item.State == "Unsupported")
+                        && item.State == "Degraded"
+                        && item.ErrorCode == "COMMAND_UNSUPPORTED")
                     && viewModel.Devices.Single().Capabilities.Any(item =>
                         item.CommandId == "log_ram"
                         && item.SelectedCli == "show syslog tail num 100"));
+                await viewModel.RunMonitoringCycleAsync();
+                await WaitUntilAsync(() =>
+                    viewModel.Devices.Single().Capabilities.Any(item =>
+                        item.CommandId == "interface_status"
+                        && item.State == "Unsupported"));
 
                 var device = Assert.Single(viewModel.Devices);
                 Assert.Equal(DeviceHealth.Warning, device.Health);
@@ -123,10 +129,11 @@ public sealed class ViewerMonitoringIntegrationTests
                 Assert.True(log.Supported);
                 Assert.Equal("show syslog tail num 100", log.SelectedCli);
 
+                var requestCountBeforeReuse = client.ExecuteRequests.Count;
                 await viewModel.RunMonitoringCycleAsync();
 
                 var requests = client.ExecuteRequests.ToArray();
-                Assert.Equal(3, requests.Length);
+                Assert.Equal(requestCountBeforeReuse + 1, requests.Length);
                 Assert.Equal(["show syslog tail num 100"], requests[^1].Commands);
                 var stateJson = File.ReadAllText(Path.Combine(folder, "monitor.json"));
                 Assert.DoesNotContain("SHOW PORT STATUS", stateJson, StringComparison.Ordinal);
@@ -233,7 +240,9 @@ public sealed class ViewerMonitoringIntegrationTests
             try
             {
                 await viewModel.InitializeAsync();
-                await WaitUntilAsync(() => client.StartCount >= 2);
+                await WaitUntilAsync(() =>
+                    client.StartCount >= 2 &&
+                    viewModel.HttpConnectionState == AgentConnectionState.Offline);
 
                 Assert.Equal(0, client.ExecuteCount);
                 Assert.Equal(AgentConnectionState.Offline, viewModel.HttpConnectionState);
@@ -274,6 +283,55 @@ public sealed class ViewerMonitoringIntegrationTests
                 Assert.Equal(DeviceHealth.Normal, recovered.Health);
                 Assert.DoesNotContain("실패", recovered.Summary, StringComparison.Ordinal);
                 Assert.Contains(viewModel.RecentEvents, item => item.Recovered);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task PortLinkTransition_UpdatesHealthWithoutTreatingUnassignedPortAsCritical()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var client = new PortTransitionClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    client.ExecuteCount >= 1
+                    && viewModel.Devices.Single().Health == DeviceHealth.Normal);
+
+                client.LinkDown = true;
+                await viewModel.RunMonitoringCycleAsync();
+
+                var warning = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, warning.Health);
+                Assert.Contains("포트 상태 변경", warning.Summary, StringComparison.Ordinal);
+                var active = Assert.Single(viewModel.RecentEvents, item =>
+                    item.Kind == "포트 상태" && !item.Recovered);
+                Assert.Contains("영향 대상은 지정되지 않았습니다", active.Detail, StringComparison.Ordinal);
+
+                await viewModel.RunMonitoringCycleAsync();
+                Assert.Single(viewModel.RecentEvents, item =>
+                    item.Kind == "포트 상태" && !item.Recovered);
+
+                client.LinkDown = false;
+                await viewModel.RunMonitoringCycleAsync();
+
+                Assert.Equal(DeviceHealth.Normal, Assert.Single(viewModel.Devices).Health);
+                Assert.Contains(viewModel.RecentEvents, item =>
+                    item.Kind == "복구"
+                    && item.Title.Contains("Port 1", StringComparison.Ordinal));
             }
             finally
             {
@@ -528,10 +586,26 @@ public sealed class ViewerMonitoringIntegrationTests
                 command,
                 command.Contains("log", StringComparison.OrdinalIgnoreCase)
                     || command.Contains("sylog", StringComparison.OrdinalIgnoreCase)
-                    ? "log-a"
-                    : "Port 1 Up",
+                    ? Syslog((1, "link state stable"))
+                    : PortStatus(("1", "Up")),
                 false,
                 DateTimeOffset.UtcNow)).ToArray();
+
+        protected static string PortStatus(params (string PortId, string Link)[] ports)
+        {
+            var lines = new List<string> { "Port Admin Link Speed Duplex" };
+            lines.AddRange(ports.Select(port =>
+                $"{port.PortId} Enabled {port.Link} 1000M Full"));
+            return string.Join("\r\n", lines);
+        }
+
+        protected static string Syslog(params (int Sequence, string Message)[] entries) =>
+            string.Join(
+                "\r\n",
+                entries.Select(entry =>
+                    $"[{entry.Sequence}] 00:00:{entry.Sequence:00} 2026-07-23\r\n"
+                    + $"\"{entry.Message}\"\r\n"
+                    + "level: 6, module: 6, function: 1, and event no.: 1"));
     }
 
     private sealed class CapabilityClient : StatelessClientBase
@@ -546,10 +620,11 @@ public sealed class ViewerMonitoringIntegrationTests
             var outputs = request.Commands.Select(command => new TelnetCommandOutputDto(
                 command,
                 command.Equals("show port status", StringComparison.OrdinalIgnoreCase)
+                || command.Equals("show interfaces status", StringComparison.OrdinalIgnoreCase)
                     ? "% Invalid input detected"
                     : command.Equals("show sylog tail num 100", StringComparison.OrdinalIgnoreCase)
                         ? "% Invalid command"
-                        : "2026-07-23 invalid password event",
+                        : Syslog((1, "invalid password event")),
                 false,
                 DateTimeOffset.UtcNow)).ToArray();
             return Task.FromResult(Result(request.RequestId, outputs));
@@ -672,6 +747,31 @@ public sealed class ViewerMonitoringIntegrationTests
                 throw new AgentClientException("TCP_TIMEOUT", AgentConnectionState.Stale);
             }
             return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+        }
+    }
+
+    private sealed class PortTransitionClient : StatelessClientBase
+    {
+        private int _executeCount;
+
+        public int ExecuteCount => Volatile.Read(ref _executeCount);
+
+        public bool LinkDown { get; set; }
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _executeCount);
+            var outputs = request.Commands.Select(command => new TelnetCommandOutputDto(
+                command,
+                command.Contains("log", StringComparison.OrdinalIgnoreCase)
+                || command.Contains("sylog", StringComparison.OrdinalIgnoreCase)
+                    ? Syslog((1, "link state observed"))
+                    : PortStatus(("1", LinkDown ? "Down" : "Up")),
+                false,
+                DateTimeOffset.UtcNow)).ToArray();
+            return Task.FromResult(Result(request.RequestId, outputs));
         }
     }
 

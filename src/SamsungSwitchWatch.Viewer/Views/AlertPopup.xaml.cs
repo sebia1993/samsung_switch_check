@@ -17,7 +17,8 @@ public partial class AlertPopup : Window
         _openRequested = openRequested;
         DataContext = item;
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(7) };
-        _timer.Tick += (_, _) => ClosePopup();
+        _timer.Tick += Timer_Tick;
+        Closed += AlertPopup_Closed;
         Loaded += (_, _) =>
         {
             var work = SystemParameters.WorkArea;
@@ -36,9 +37,30 @@ public partial class AlertPopup : Window
 
     private void Close_Click(object sender, RoutedEventArgs e) => ClosePopup();
 
+    private void Timer_Tick(object? sender, EventArgs e)
+    {
+        if (AlertPopupAutoClosePolicy.ShouldClose(IsMouseOver, IsKeyboardFocusWithin))
+        {
+            ClosePopup();
+        }
+    }
+
+    private void AlertPopup_Closed(object? sender, EventArgs e)
+    {
+        _timer.Stop();
+        _timer.Tick -= Timer_Tick;
+        Closed -= AlertPopup_Closed;
+    }
+
     private void ClosePopup()
     {
         _timer.Stop();
         Close();
     }
+}
+
+internal static class AlertPopupAutoClosePolicy
+{
+    public static bool ShouldClose(bool isMouseOver, bool isKeyboardFocusWithin) =>
+        !isMouseOver && !isKeyboardFocusWithin;
 }

@@ -3,6 +3,8 @@ using System.Net.Security;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
@@ -76,6 +78,7 @@ public sealed class ViewerManagedDeviceTests
 
             var profile = Assert.Single(store.Load());
 
+            Assert.Equal(ManagedDeviceLoadStatus.Ok, store.LastLoadStatus);
             Assert.Equal("legacy-operator", store.CreateEditDraft(profile.Id).Username);
             var migrated = File.ReadAllText(path);
             Assert.DoesNotContain("legacy-operator", migrated, StringComparison.Ordinal);
@@ -86,6 +89,166 @@ public sealed class ViewerManagedDeviceTests
         {
             Directory.Delete(folder, true);
         }
+    }
+
+    public static TheoryData<string> InvalidDeviceStoreDocuments => new()
+    {
+        "null",
+        """{"SchemaVersion":2,"Devices":[]}""",
+        """{"SchemaVersion":1,"Devices":null}""",
+        """
+        {
+          "SchemaVersion":1,
+          "Devices":[
+            {
+              "Id":"valid",
+              "DisplayName":"ACCESS-SW-VALID",
+              "Model":"IES4224GP",
+              "Host":"192.0.2.20",
+              "Port":23,
+              "ProtectedUsername":"cHJvdGVjdGVkOm9wZXJhdG9y",
+              "ProtectedPassword":"cHJvdGVjdGVkOnB3"
+            },
+            {
+              "Id":"invalid",
+              "DisplayName":"ACCESS-SW-INVALID",
+              "Model":"IES4224GP",
+              "Host":"",
+              "Port":23,
+              "ProtectedUsername":"cHJvdGVjdGVkOm9wZXJhdG9y",
+              "ProtectedPassword":"cHJvdGVjdGVkOnB3"
+            }
+          ]
+        }
+        """
+    };
+
+    [Theory]
+    [MemberData(nameof(InvalidDeviceStoreDocuments))]
+    public void DeviceStore_InvalidEnvelopeIsQuarantinedWithoutPartialDeviceLoad(string content)
+    {
+        var persistence = new TestManagedDevicePersistence { Content = content };
+        var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
+
+        var loaded = store.Load();
+
+        Assert.Empty(loaded);
+        Assert.Equal(ManagedDeviceLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void DeviceStore_ReadFailurePreservesOriginalAndDoesNotQuarantine(Type exceptionType)
+    {
+        const string original = """{"SchemaVersion":1,"Devices":[]}""";
+        var persistence = new TestManagedDevicePersistence
+        {
+            Content = original,
+            ReadException = (Exception)Activator.CreateInstance(exceptionType, "simulated storage failure")!
+        };
+        var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
+
+        Assert.Empty(store.Load());
+
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public async Task Dashboard_ShowsDeviceStoreCorruptionInsteadOfAnOrdinaryEmptyList()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence { Content = "null" };
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()),
+                deviceStore: devices);
+            try
+            {
+                viewModel.ReloadManagedDevices();
+
+                Assert.Empty(viewModel.Devices);
+                Assert.Contains("VIEWER_DEVICE_STORE_CORRUPT", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains("다시 등록", viewModel.OperationMessage, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task Dashboard_ShowsDeviceStoreIoFailureWithoutCallingItCorrupt()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence
+            {
+                Content = """{"SchemaVersion":1,"Devices":[]}""",
+                ReadException = new IOException("simulated storage failure")
+            };
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()),
+                deviceStore: devices);
+            try
+            {
+                viewModel.ReloadManagedDevices();
+
+                Assert.Empty(viewModel.Devices);
+                Assert.Contains("VIEWER_DEVICE_STORE_UNAVAILABLE", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.DoesNotContain("VIEWER_DEVICE_STORE_CORRUPT", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Equal(0, persistence.QuarantineCount);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void DeviceStore_SaveFailureDoesNotReplacePreviouslyPersistedDevices()
+    {
+        var persistence = new TestManagedDevicePersistence();
+        var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
+        var saved = store.Save(Draft("pw", null));
+        var previous = persistence.Content;
+        var edit = store.CreateEditDraft(saved.Id);
+        edit.DisplayName = "ACCESS-SW-CHANGED";
+        persistence.WriteException = new IOException("simulated atomic write failure");
+
+        Assert.Throws<IOException>(() => store.Save(edit));
+
+        Assert.Equal(previous, persistence.Content);
+        persistence.WriteException = null;
+        Assert.Equal("ACCESS-SW-01", Assert.Single(store.Load()).DisplayName);
     }
 
     [Fact]
@@ -150,14 +313,29 @@ public sealed class ViewerManagedDeviceTests
             Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
             Assert.Empty(store.RecordFailure(device, "TCP_TIMEOUT"));
 
-            var recovered = store.RecordOutput(device, "show port status", "Port 1 Up");
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"))));
+            Assert.Equal("TCP_TIMEOUT", store.GetActiveFailureCode(device.Id));
+            Assert.False(Assert.Single(store.LoadEvents()).Recovered);
+            var recovered = store.RecordSuccess(device);
             Assert.Equal(2, recovered.Count);
             Assert.All(recovered, item => Assert.True(item.Recovered));
             Assert.Equal(DeviceHealth.Normal, recovered[^1].Severity);
 
-            Assert.Empty(store.RecordOutput(device, "show sylog tail num 100", "line-a\r\nline-b"));
-            Assert.Empty(store.RecordOutput(device, "show sylog tail num 100", "line-b\r\nline-a"));
-            var newLog = store.RecordOutput(device, "show sylog tail num 100", "line-c\r\nline-b\r\nline-a");
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((2, "line-b"), (1, "line-a"))));
+            var newLog = store.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((3, "line-c"), (2, "line-b"), (1, "line-a")));
             Assert.Single(newLog);
             Assert.Equal("새 로그", newLog[0].Kind);
 
@@ -172,6 +350,377 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
+    public void MonitoringStore_FailureCodeChangeUpdatesOneActiveIncidentUntilSuccess()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var store = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
+            var device = Profile();
+
+            var initial = Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
+            var changed = Assert.Single(store.RecordFailure(device, "TELNET_SESSION_CLOSED"));
+
+            Assert.Equal(initial.AgentEventId, changed.AgentEventId);
+            Assert.Equal(initial.Sequence, changed.Sequence);
+            Assert.Equal("TELNET_SESSION_CLOSED", changed.Detail);
+            Assert.False(changed.Recovered);
+            Assert.Equal("TELNET_SESSION_CLOSED", store.GetActiveFailureCode(device.Id));
+            var persistedActive = Assert.Single(store.LoadEvents());
+            Assert.Equal(initial.AgentEventId, persistedActive.AgentEventId);
+            Assert.False(persistedActive.Recovered);
+
+            var recovery = store.RecordSuccess(device);
+
+            Assert.Equal(2, recovery.Count);
+            Assert.All(recovery, item => Assert.True(item.Recovered));
+            Assert.Null(store.GetActiveFailureCode(device.Id));
+            Assert.Equal(2, store.LoadEvents().Count);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void MonitoringStore_GapRebaselinesLegacyStateWithoutReportingStaleChange(int schemaVersion)
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            File.WriteAllText(path, $$"""
+            {
+              "SchemaVersion": {{schemaVersion}},
+              "NextSequence": 0,
+              "LastStoppedUtc": "2000-01-01T00:00:00+00:00",
+              "Baselines": {
+                "sw-01\nSHOW PORT STATUS": {
+                  "OutputHash": "legacy-hash",
+                  "LineHashes": []
+                }
+              },
+              "Events": []
+            }
+            """);
+            var store = new ViewerMonitoringStore(path);
+            var device = Profile();
+
+            var gap = Assert.Single(store.BeginSession([device]));
+            Assert.Equal("감시 공백", gap.Kind);
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"))));
+            var currentChange = Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+
+            Assert.Equal("포트 상태", currentChange.Kind);
+            Assert.Contains("\"SchemaVersion\": 3", File.ReadAllText(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_InterfaceLifecycleIsSemanticDeduplicatedAndRecoverable()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var store = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
+            var device = Profile();
+
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up"))));
+            var opened = Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Down"))));
+
+            Assert.Equal(DeviceHealth.Warning, opened.Severity);
+            Assert.Equal("포트 상태", opened.Kind);
+            Assert.Equal("Port 24 Link Down", opened.Title);
+            Assert.Contains("영향 대상은 지정되지 않았습니다", opened.Detail, StringComparison.Ordinal);
+            Assert.True(opened.IsActiveCondition);
+            Assert.Equal(1, store.GetActiveInterfaceConditionCount(device.Id));
+
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Down"))));
+            Assert.Single(store.LoadEvents());
+
+            var recovered = store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up")));
+
+            Assert.Equal(2, recovered.Count);
+            Assert.All(recovered, item => Assert.True(item.Recovered));
+            Assert.Equal("복구", recovered[^1].Kind);
+            Assert.Equal(0, store.GetActiveInterfaceConditionCount(device.Id));
+            Assert.Equal(2, store.LoadEvents().Count);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_InitialDownAndPortSetChangesDoNotCreateFalseEvents()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var device = Profile();
+            var initialDownStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "initial-down.json"));
+
+            Assert.Empty(initialDownStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+            Assert.Empty(initialDownStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+            Assert.Empty(initialDownStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"))));
+            Assert.Equal(0, initialDownStore.GetActiveInterfaceConditionCount(device.Id));
+
+            var changingSetStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "changing-set.json"));
+            Assert.Empty(changingSetStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"), ("2", "Up"))));
+            Assert.Empty(changingSetStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"), ("3", "Down"))));
+            Assert.Empty(changingSetStore.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"), ("2", "Up"), ("3", "Down"))));
+
+            Assert.Empty(changingSetStore.LoadEvents());
+            Assert.Equal(0, changingSetStore.GetActiveInterfaceConditionCount(device.Id));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_ParserFailureDoesNotAdvanceInterfaceOrLogBaselines()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var store = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
+            var device = Profile();
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Up"))));
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show syslog tail num 100",
+                Syslog((1, "line-a"))));
+
+            var rejectedInterface = store.TryRecordParsedOutput(
+                device,
+                "show port status",
+                "unrecognized interface response");
+            var rejectedLog = store.TryRecordParsedOutput(
+                device,
+                "show syslog tail num 100",
+                "unrecognized log response");
+
+            Assert.False(rejectedInterface.Accepted);
+            Assert.False(rejectedLog.Accepted);
+            Assert.NotNull(rejectedInterface.ErrorCode);
+            Assert.NotNull(rejectedLog.ErrorCode);
+            Assert.Empty(store.LoadEvents());
+
+            Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+            var log = Assert.Single(store.RecordOutput(
+                device,
+                "show syslog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
+            Assert.Equal("새 시스템 로그 1건", log.Title);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_GapPreservesActiveInterfaceConditionAndRecoversFromFreshBaseline()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            var device = Profile();
+            var store = new ViewerMonitoringStore(path);
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up"))));
+            Assert.Single(store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Down"))));
+            store.EndSession();
+
+            var state = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            state["LastStoppedUtc"] = "2000-01-01T00:00:00+00:00";
+            state["LastHeartbeatUtc"] = "2000-01-01T00:00:00+00:00";
+            File.WriteAllText(path, state.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+            var restarted = new ViewerMonitoringStore(path);
+            Assert.Single(restarted.BeginSession([device]));
+            Assert.Equal(1, restarted.GetActiveInterfaceConditionCount(device.Id));
+            Assert.Empty(restarted.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Down"))));
+            Assert.Equal(1, restarted.GetActiveInterfaceConditionCount(device.Id));
+
+            var recovered = restarted.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("24", "Up")));
+
+            Assert.Equal(2, recovered.Count);
+            Assert.Equal(0, restarted.GetActiveInterfaceConditionCount(device.Id));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_NullCollectionIsQuarantinedAsCorruptState()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            File.WriteAllText(path, """
+            {
+              "SchemaVersion": 2,
+              "Baselines": null,
+              "ActiveFailures": {},
+              "Capabilities": {},
+              "Events": []
+            }
+            """);
+
+            var store = new ViewerMonitoringStore(path);
+
+            Assert.Empty(store.LoadEvents());
+            Assert.False(File.Exists(path));
+            Assert.Single(Directory.GetFiles(folder, "monitor.json.corrupt-*"));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void MonitoringStore_ReadIoFailurePropagatesWithoutQuarantining()
+    {
+        var persistence = new TestMonitoringPersistence
+        {
+            ReadException = new UnauthorizedAccessException("simulated access denial")
+        };
+
+        Assert.Throws<UnauthorizedAccessException>(
+            () => new ViewerMonitoringStore("monitor.json", persistence));
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+    }
+
+    [Fact]
+    public void MonitoringStore_SaveFailureRollsBackFailureAndSequence()
+    {
+        var persistence = new TestMonitoringPersistence
+        {
+            WriteException = new IOException("simulated write failure")
+        };
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+        var device = Profile();
+
+        Assert.Throws<IOException>(() => store.RecordFailure(device, "TCP_TIMEOUT"));
+        Assert.Null(store.GetActiveFailureCode(device.Id));
+        Assert.Empty(store.LoadEvents());
+
+        persistence.WriteException = null;
+        var created = Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
+
+        Assert.Equal(1, created.Sequence);
+        Assert.Equal("TCP_TIMEOUT", store.GetActiveFailureCode(device.Id));
+    }
+
+    [Fact]
+    public void MonitoringStore_SaveFailureDoesNotAdvanceOutputBaseline()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+        var device = Profile();
+        Assert.Empty(store.RecordOutput(
+            device,
+            "show port status",
+            PortStatus(("1", "Up"))));
+        var persistedBaseline = persistence.Content;
+
+        persistence.WriteException = new IOException("simulated write failure");
+        Assert.Throws<IOException>(
+            () => store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+
+        Assert.Equal(persistedBaseline, persistence.Content);
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(0, store.GetActiveInterfaceConditionCount(device.Id));
+
+        persistence.WriteException = null;
+        var created = Assert.Single(
+            store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+        Assert.Equal(1, created.Sequence);
+    }
+
+    [Fact]
     public void MonitoringStore_SyslogDiffHandlesSubsetDuplicatesReorderingAndAdditions()
     {
         var folder = TemporaryFolder();
@@ -180,15 +729,24 @@ public sealed class ViewerManagedDeviceTests
             var device = Profile();
 
             var subsetStore = Store("subset");
-            Assert.Empty(subsetStore.RecordOutput(device, "show sylog tail num 100", "line-a\r\nline-b"));
-            Assert.Empty(subsetStore.RecordOutput(device, "show sylog tail num 100", "line-b"));
+            Assert.Empty(subsetStore.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
+            Assert.Empty(subsetStore.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((2, "line-b"))));
 
             var duplicateStore = Store("duplicate");
-            Assert.Empty(duplicateStore.RecordOutput(device, "show sylog tail num 100", "line-a\r\nline-b"));
+            Assert.Empty(duplicateStore.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
             var duplicate = duplicateStore.RecordOutput(
                 device,
                 "show sylog tail num 100",
-                "line-a\r\nline-b\r\nline-b");
+                Syslog((1, "line-a"), (2, "line-b"), (2, "line-b")));
             var duplicateEvent = Assert.Single(duplicate);
             Assert.Equal("새 로그", duplicateEvent.Kind);
             Assert.Equal("새 시스템 로그 1건", duplicateEvent.Title);
@@ -197,21 +755,35 @@ public sealed class ViewerManagedDeviceTests
             Assert.Empty(reorderStore.RecordOutput(
                 device,
                 "show sylog tail num 100",
-                "line-a\r\nline-b\r\nline-c"));
+                Syslog((1, "line-a"), (2, "line-b"), (3, "line-c"))));
             Assert.Empty(reorderStore.RecordOutput(
                 device,
                 "show sylog tail num 100",
-                "line-c\r\nline-a\r\nline-b"));
+                Syslog((3, "line-c"), (1, "line-a"), (2, "line-b"))));
 
             var additionStore = Store("addition");
-            Assert.Empty(additionStore.RecordOutput(device, "show sylog tail num 100", "line-a\r\nline-b"));
+            Assert.Empty(additionStore.RecordOutput(
+                device,
+                "show sylog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
             var additions = additionStore.RecordOutput(
                 device,
                 "show sylog tail num 100",
-                "line-c\r\nline-b\r\nline-d\r\nline-a");
+                Syslog((3, "line-c"), (2, "line-b"), (4, "line-d"), (1, "line-a")));
             var additionEvent = Assert.Single(additions);
             Assert.Equal("새 로그", additionEvent.Kind);
             Assert.Equal("새 시스템 로그 2건", additionEvent.Title);
+
+            var fallbackStore = Store("show-log-ram");
+            Assert.Empty(fallbackStore.RecordOutput(
+                device,
+                "show log ram",
+                Syslog((1, "line-a"))));
+            var fallbackAddition = Assert.Single(fallbackStore.RecordOutput(
+                device,
+                "show log ram",
+                Syslog((1, "line-a"), (2, "line-b"))));
+            Assert.Equal("새 시스템 로그 1건", fallbackAddition.Title);
 
             ViewerMonitoringStore Store(string name) =>
                 new(Path.Combine(folder, $"monitor-{name}.json"));
@@ -231,27 +803,33 @@ public sealed class ViewerManagedDeviceTests
             var store = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
             var device = Profile();
 
-            Assert.Empty(store.RecordOutput(device, "show syslog tail num 100", "line-a\r\nline-b"));
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show syslog tail num 100",
+                Syslog((1, "line-a"), (2, "line-b"))));
             var rotation = Assert.Single(store.RecordOutput(
                 device,
                 "show syslog tail num 100",
-                "line-c\r\nline-d"));
+                Syslog((3, "line-c"), (4, "line-d"))));
             Assert.Equal("로그 상태", rotation.Kind);
             Assert.Equal("로그 버퍼 순환 또는 초기화 감지", rotation.Title);
 
             var afterRotation = store.RecordOutput(
                 device,
                 "show syslog tail num 100",
-                "line-e\r\nline-c\r\nline-d");
+                Syslog((5, "line-e"), (3, "line-c"), (4, "line-d")));
             var item = Assert.Single(afterRotation);
             Assert.Equal("새 시스템 로그 1건", item.Title);
 
             var cleared = Assert.Single(store.RecordOutput(
                 device,
                 "show syslog tail num 100",
-                string.Empty));
+                "No syslog entries."));
             Assert.Equal("로그 상태", cleared.Kind);
-            Assert.Empty(store.RecordOutput(device, "show syslog tail num 100", "line-f"));
+            Assert.Empty(store.RecordOutput(
+                device,
+                "show syslog tail num 100",
+                Syslog((6, "line-f"))));
         }
         finally
         {
@@ -283,6 +861,8 @@ public sealed class ViewerManagedDeviceTests
           "startedUtc":"2026-07-23T01:00:00Z",
           "completedUtc":"2026-07-23T01:00:01Z",
           "durationMs":1000,
+          "sessionCount":1,
+          "reconnectCount":0,
           "commands":[{
             "command":"show running-config",
             "output":"raw-result",
@@ -508,6 +1088,22 @@ public sealed class ViewerManagedDeviceTests
         MonitoringEnabled = true
     };
 
+    private static string PortStatus(params (string PortId, string Link)[] ports)
+    {
+        var lines = new List<string> { "Port Admin Link Speed Duplex" };
+        lines.AddRange(ports.Select(port =>
+            $"{port.PortId} Enabled {port.Link} 1000M Full"));
+        return string.Join("\r\n", lines);
+    }
+
+    private static string Syslog(params (int Sequence, string Message)[] entries) =>
+        string.Join(
+            "\r\n",
+            entries.Select(entry =>
+                $"[{entry.Sequence}] 00:00:{entry.Sequence:00} 2026-07-23\r\n" +
+                $"\"{entry.Message}\"\r\n" +
+                "level: 6, module: 6, function: 1, and event no.: 1"));
+
     private static string TemporaryFolder()
     {
         var path = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerManaged", Guid.NewGuid().ToString("N"));
@@ -530,6 +1126,64 @@ public sealed class ViewerManagedDeviceTests
         {
             var decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(protectedText));
             return decoded["protected:".Length..];
+        }
+    }
+
+    private sealed class TestManagedDevicePersistence : IManagedDevicePersistence
+    {
+        public string? Content { get; set; }
+        public Exception? ReadException { get; init; }
+        public Exception? WriteException { get; set; }
+        public Exception? QuarantineException { get; init; }
+        public int WriteCount { get; private set; }
+        public int QuarantineCount { get; private set; }
+
+        public string? ReadIfExists(string path)
+        {
+            if (ReadException is not null) throw ReadException;
+            return Content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            WriteCount++;
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination)
+        {
+            QuarantineCount++;
+            if (QuarantineException is not null) throw QuarantineException;
+            Content = null;
+        }
+    }
+
+    private sealed class TestMonitoringPersistence : IViewerMonitoringPersistence
+    {
+        public string? Content { get; private set; }
+        public Exception? ReadException { get; init; }
+        public Exception? WriteException { get; set; }
+        public int WriteCount { get; private set; }
+        public int QuarantineCount { get; private set; }
+
+        public string? ReadIfExists(string path)
+        {
+            if (ReadException is not null) throw ReadException;
+            return Content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            WriteCount++;
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination)
+        {
+            QuarantineCount++;
+            Content = null;
         }
     }
 

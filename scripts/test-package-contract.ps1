@@ -127,6 +127,7 @@ try {
                 'PresentationNative_cor3.dll',
                 'vcruntime140_cor3.dll',
                 'wpfgfx_cor3.dll',
+                'Install-or-Update-Viewer.cmd',
                 'common.ps1',
                 'install-viewer.ps1',
                 'uninstall-viewer.ps1',

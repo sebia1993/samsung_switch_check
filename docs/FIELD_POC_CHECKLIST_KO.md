@@ -1,4 +1,4 @@
-# Samsung Switch Watch v0.8 현장 POC 체크리스트
+# Samsung Switch Watch v0.9 현장 POC 체크리스트
 
 실제 IP, ID, 비밀번호, 호스트명, MAC, 시리얼과 원문 출력은 이 문서에 기록하지 않습니다.
 결과는 `통과`, `실패`, `미검증`과 sanitized 오류 코드만 남깁니다.
@@ -104,9 +104,9 @@
 
 ## 8. 업데이트와 rollback
 
-- [ ] v0.7 설치에서 v0.8 설치기가 업데이트 모드 자동 감지
+- [ ] v0.7 또는 v0.8 설치에서 v0.9 설치기가 업데이트 모드 자동 감지
 - [ ] 기존 Viewer 방화벽 주소와 장비 주소를 최소 `/32` CIDR로 이관
-- [ ] v0.8 재업데이트 시 관리 CIDR 재입력 없이 보존
+- [ ] v0.9 재업데이트 시 관리 CIDR 재입력 없이 보존
 - [ ] 업데이트 전후 Agent HTTPS 신원 동일
 - [ ] 업데이트 전후 ProgramData ACL 동일
 - [ ] v0.7 자격 증명·SQLite 자료가 `legacy-v0.7-backup-*`으로 이동해 자동 삭제되지 않음

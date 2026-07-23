@@ -493,6 +493,38 @@ public sealed class TelnetClientTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ReportsPartialResultsWhenReconnectAlsoCloses()
+    {
+        var first = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show port status\r\nsensitive-output\r\nACCESS-SW-01#"));
+        var second = new ScriptedTransport();
+        var client = CreateResilientClient(
+            new SequenceTransportFactory(first, second),
+            TimeSpan.FromSeconds(5),
+            retryCount: 1);
+
+        var exception = await Assert.ThrowsAsync<TelnetExecutionException>(() => client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("private-user", "private-password"),
+            Ies4224GpProfile.Create().Telnet,
+            ["show port status", "show sylog tail num 100"]));
+
+        Assert.Equal(ErrorCodes.TelnetSessionClosed, exception.Error.Code);
+        Assert.Equal("show port status", Assert.Single(exception.CompletedOutputs).Command);
+        Assert.Equal(["command-2"], exception.RemainingCommandIds);
+        Assert.Equal(2, exception.SessionCount);
+        Assert.Equal(1, exception.ReconnectCount);
+        Assert.DoesNotContain("192.0.2.10", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private-user", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private-password", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("sensitive-output", exception.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("show port status", exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_DoesNotRetryRemoteCloseDuringAuthentication()
     {
         var first = new ScriptedTransport(
