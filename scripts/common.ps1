@@ -105,6 +105,144 @@ function Get-SswCurrentUserSid {
     return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 }
 
+function Get-SswDeploymentMutexName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Agent', 'Viewer')]
+        [string]$Product
+    )
+
+    # v1은 앱 릴리스 번호가 아니라 구·신 설치기가 함께 써야 하는 영구 잠금 프로토콜 식별자입니다.
+    if ($Product -eq 'Agent') {
+        return 'Global\SamsungSwitchWatch.Agent.Deployment.v1'
+    }
+    return "Global\SamsungSwitchWatch.Viewer.Deployment.$(Get-SswCurrentUserSid).v1"
+}
+
+function New-SswDeploymentMutexSecurity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Agent', 'Viewer', 'Test')]
+        [string]$Product
+    )
+
+    $systemSid = 'S-1-5-18'
+    $allowedSids = if ($Product -eq 'Agent') {
+        @($systemSid, 'S-1-5-32-544')
+    }
+    else {
+        @($systemSid, (Get-SswCurrentUserSid))
+    }
+    $security = New-Object Security.AccessControl.MutexSecurity
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sidValue in $allowedSids) {
+        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+        $security.AddAccessRule((New-Object Security.AccessControl.MutexAccessRule(
+            $sid,
+            [Security.AccessControl.MutexRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow)))
+    }
+    return $security
+}
+
+function Enter-SswNamedDeploymentLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Product
+    )
+
+    if ($Name -notmatch '^(?:Global|Local)\\SamsungSwitchWatch\.[A-Za-z0-9.-]{1,180}$' -or
+        $Product -notin @('Agent', 'Viewer', 'Test')) {
+        throw 'DEPLOYMENT_LOCK_INVALID: 배포 잠금 이름이 안전한 제품 범위를 벗어났습니다.'
+    }
+    if ($Product -ne 'Test') {
+        $expectedName = Get-SswDeploymentMutexName -Product $Product
+        if (-not $Name.Equals($expectedName, [StringComparison]::Ordinal)) {
+            throw 'DEPLOYMENT_LOCK_INVALID: 제품과 배포 잠금 이름이 일치하지 않습니다.'
+        }
+    }
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        try {
+            $createdNew = $false
+            $security = New-SswDeploymentMutexSecurity -Product $Product
+            $mutex = [Threading.Mutex]::new($false, $Name, [ref]$createdNew, $security)
+        }
+        catch {
+            throw 'DEPLOYMENT_LOCK_UNAVAILABLE: 설치·제거 잠금을 만들거나 열 수 없습니다.'
+        }
+
+        try {
+            $acquired = $mutex.WaitOne(0)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $acquired = $true
+            throw 'DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED: 이전 설치·제거 작업의 비정상 종료를 감지해 자동 변경을 중단했습니다.'
+        }
+        catch {
+            throw 'DEPLOYMENT_LOCK_UNAVAILABLE: 설치·제거 잠금 상태를 확인할 수 없습니다.'
+        }
+
+        if (-not $acquired) {
+            throw "DEPLOYMENT_ALREADY_RUNNING: $Product 설치 또는 제거 작업이 이미 실행 중입니다."
+        }
+
+        return [pscustomobject]@{
+            Name = $Name
+            Product = $Product
+            Mutex = $mutex
+        }
+    }
+    catch {
+        if ($mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
+            try { $mutex.Dispose() } catch { }
+        }
+        throw
+    }
+}
+
+function Enter-SswDeploymentLock {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Agent', 'Viewer')]
+        [string]$Product
+    )
+
+    $name = Get-SswDeploymentMutexName -Product $Product
+    return Enter-SswNamedDeploymentLock -Name $name -Product $Product
+}
+
+function Exit-SswDeploymentLock {
+    param(
+        [AllowNull()][object]$Lock
+    )
+
+    if ($null -eq $Lock) { return }
+    $mutex = $null
+    try {
+        $mutex = $Lock.Mutex
+        if ($mutex) { $mutex.ReleaseMutex() }
+    }
+    catch {
+        Write-Warning 'DEPLOYMENT_LOCK_RELEASE_FAILED: 설치·제거 잠금을 정상 해제하지 못했습니다.' `
+            -WarningAction Continue
+    }
+    finally {
+        if ($mutex) {
+            try { $mutex.Dispose() }
+            catch {
+                Write-Warning 'DEPLOYMENT_LOCK_DISPOSE_FAILED: 설치·제거 잠금 핸들을 정리하지 못했습니다.' `
+                    -WarningAction Continue
+            }
+        }
+    }
+}
+
 function ConvertTo-SswIdentitySid {
     param([Parameter(Mandatory = $true)][string]$Identity)
 

@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.11-poc"
-DOCUMENT_DATE = "2026-07-24"
+VERSION = "0.9.12-poc"
+DOCUMENT_DATE = "2026-07-26"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -989,6 +989,9 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         ["표시 코드/증상", "확인 순서"],
         [
+            ("DEPLOYMENT_ALREADY_RUNNING", "먼저 시작한 같은 제품의 설치·제거가 끝난 뒤 다시 실행"),
+            ("DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED", "변경 전에 중단됨. 자동 복구가 아니므로 서비스·설치 폴더 상태 확인 후 다시 실행"),
+            ("DEPLOYMENT_LOCK_UNAVAILABLE", "Agent 관리자 권한 또는 Viewer 동일 사용자 확인 → 보안 프로그램·정책 점검"),
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
@@ -1067,16 +1070,9 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             "show port status와 syslog 명령이 모델별로 동작하는지 확인",
             "show running-config 결과가 파일/이벤트 내보내기에 남지 않는지 확인",
             "Viewer 종료 후 재실행 시 감시 공백이 표시되는지 확인",
-            "업링크 Down과 복구 이벤트, 중복 팝업 억제를 모의 출력으로 확인",
+            "익명 모의 출력으로 업링크 Down·복구·중복 팝업 억제를 확인하고 실제 모델은 사내 관리망에서 읽기 전용 검증",
         ],
         bullet_num_id,
-    )
-    add_callout(
-        doc,
-        "현장 검증",
-        "이 설명서의 화면은 익명화된 데모 데이터로 생성했습니다. 세 모델과 실제 펌웨어의 명령 지원 여부는 "
-        "회사 관리망에서 읽기 전용으로 단계적으로 검증해야 합니다.",
-        "info",
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

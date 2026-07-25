@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.11-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.12-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.11-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.11-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -31,6 +31,10 @@ GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키�
 Viewer PC ── HTTPS/TCP 18443 ──> Agent PC
 Agent PC  ── Telnet/TCP 23 ────> 허용된 삼성 스위치
 ```
+
+Agent 설치·업데이트·제거는 전체 PC에서 하나씩만 실행되며, Viewer 설치·업데이트·제거는
+같은 Windows 사용자에서 하나씩만 실행됩니다. 먼저 시작한 작업이 끝나기 전에 다른 작업을
+실행하면 대기하거나 파일을 동시에 변경하지 않고 즉시 중단합니다.
 
 ## 3. Agent 신규 설치 또는 업데이트
 
@@ -266,6 +270,9 @@ Agent 신원 불일치가 발생합니다.
 
 | 코드 | 의미 |
 |---|---|
+| `DEPLOYMENT_ALREADY_RUNNING` | 같은 제품의 설치 또는 제거가 진행 중임. 먼저 실행한 작업이 끝난 뒤 다시 실행 |
+| `DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED` | 이전 설치·제거 프로세스의 비정상 종료가 감지되어 이번 실행은 변경 전에 중단됨. 서비스·설치 폴더 상태를 확인한 뒤 다시 실행 |
+| `DEPLOYMENT_LOCK_UNAVAILABLE` | 배포 잠금을 열 수 없음. Agent는 관리자 권한, Viewer는 설치한 동일 Windows 계정인지 확인하고 보안 프로그램·정책 차단 여부 점검 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
@@ -282,3 +289,8 @@ Agent 신원 불일치가 발생합니다.
 
 정상 명령 출력이 64KiB 응답 상한에서 잘리면 오류 코드 대신 Viewer의 `잘림` 표시를
 확인합니다. 실제 IP, ID, 비밀번호, 호스트명과 원문 출력은 진단 파일에 추가하지 마십시오.
+
+`DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED`는 직전 프로세스의 잠금 중단을 감지한 경우 한 번
+fail-closed로 멈추는 보호입니다. 재부팅 뒤 남은 부분 설치를 자동으로 복구하는 기능은
+아니므로 오류가 반복되거나 서비스·설치 폴더 상태가 불명확하면 임의 삭제하지 말고 관리자가
+작업 journal과 설치 상태를 확인해야 합니다.

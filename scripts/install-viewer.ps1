@@ -42,6 +42,8 @@ if ($Preflight) {
     return
 }
 
+$deploymentLock = Enter-SswDeploymentLock -Product 'Viewer'
+try {
 $installParent = Split-Path $install -Parent
 $transactionId = [Guid]::NewGuid().ToString('N')
 $staging = "$install.__staging_$transactionId"
@@ -165,4 +167,8 @@ catch {
         -Stage 'rollback-completed' -Status 'failed' -Version ([string]$sourceManifest.version) -ErrorCodes $rollbackErrors
     if ($rollbackErrors.Count -gt 0) { Write-Warning ("일부 자동 복구 단계가 실패했습니다: {0}" -f ($rollbackErrors -join ', ')) }
     throw $failure
+}
+}
+finally {
+    Exit-SswDeploymentLock -Lock $deploymentLock
 }
