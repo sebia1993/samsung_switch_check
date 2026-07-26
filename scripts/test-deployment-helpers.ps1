@@ -94,20 +94,42 @@ Assert-ContainsAll -Name 'Restricted ProgramData ACL' -Text $common -Needles @(
     '$invalidChildRule'
 )
 $backupAclStart = $common.IndexOf('function Set-SswInstallerBackupAcl')
-$backupAclEnd = $common.IndexOf('function Write-SswOperationJournal', $backupAclStart)
+$backupAclEnd = $common.IndexOf('function Initialize-SswAgentOperationsRoot', $backupAclStart)
 Assert-DeploymentTest -Condition ($backupAclStart -ge 0 -and $backupAclEnd -gt $backupAclStart) `
     -Message 'Installer backup ACL function block was not found.'
 $backupAclBlock = $common.Substring($backupAclStart, $backupAclEnd - $backupAclStart)
 Assert-ContainsAll -Name 'Installer backup ACL' -Text $backupAclBlock -Needles @(
-    '$descendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)',
+    '[switch]$ValidateExistingOwner',
+    '$ownerTrustCache = @{}',
+    '$ownerTrustCache.ContainsKey($ownerSid)',
+    'Test-SswTrustedAdministrativeOwnerSid -Sid $ownerSid',
+    '$pendingDirectories = New-Object Collections.Generic.Queue[string]',
+    '$pendingDirectories.Enqueue($resolved)',
+    'Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop',
     '$childAcl.SetAccessRuleProtection($true, $false)',
     '$childAcl.PurgeAccessRules($identity)',
     '$childAcl.SetAccessRuleProtection($false, $false)',
     '$allowedSids = @($systemSid.Value, $administratorsSid.Value)',
+    '$acl.SetOwner($administratorsSid)',
+    '$childAcl.SetOwner($administratorsSid)',
+    '$verifiedDescendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)',
     '$invalidChildRule'
 )
 Assert-DeploymentTest -Condition ($backupAclBlock -notmatch '(?i)ServiceSid|agentSid|S-1-5-80-') `
     -Message 'Installer backup ACL must not grant the Agent service SID.'
+$rootAclWriteIndex = $backupAclBlock.IndexOf('Set-Acl -LiteralPath $resolved -AclObject $acl')
+$childQueueIndex = $backupAclBlock.IndexOf('$pendingDirectories.Enqueue($resolved)')
+$finalTreeIndex = $backupAclBlock.IndexOf('$verifiedDescendants = @(')
+Assert-DeploymentTest -Condition (
+    $rootAclWriteIndex -ge 0 -and
+    $childQueueIndex -gt $rootAclWriteIndex -and
+    $finalTreeIndex -gt $childQueueIndex
+) -Message 'Installer backup ACL must secure the root before enumerating children and then re-enumerate for final verification.'
+Assert-DeploymentTest -Condition (
+    (Test-SswTrustedAdministrativeOwnerSid -Sid 'S-1-5-18') -and
+    (Test-SswTrustedAdministrativeOwnerSid -Sid 'S-1-5-32-544') -and
+    -not (Test-SswTrustedAdministrativeOwnerSid -Sid 'S-1-1-0')
+) -Message 'Operations owner migration must accept SYSTEM/Administrators and reject Everyone.'
 $dataAclIndex = $install.IndexOf(
     'Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid -ServiceRights Modify')
 $legacyArchiveAclIndex = $install.IndexOf('Set-SswInstallerBackupAcl -Path $legacyArchive', $dataAclIndex)
@@ -295,6 +317,26 @@ Assert-ContainsAll -Name 'Deployment lock helper' -Text $common -Needles @(
     'S-1-5-18',
     'S-1-5-32-544'
 )
+Assert-ContainsAll -Name 'Agent durable deployment journal guard' -Text $common -Needles @(
+    'function Test-SswTrustedAdministrativeOwnerSid',
+    '$currentIdentity.User.Value -eq $normalizedSid',
+    'WindowsBuiltInRole]::Administrator',
+    'function Initialize-SswAgentOperationsRoot',
+    'function Read-SswAgentDeploymentJournal',
+    'function Assert-SswAgentDeploymentJournalsReady',
+    'agent-install-or-update.json',
+    'agent-uninstall.json',
+    'AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID',
+    'AGENT_DEPLOYMENT_JOURNAL_INVALID',
+    'AGENT_DEPLOYMENT_RECOVERY_REQUIRED',
+    '$journalItem.Length -gt 65536',
+    '[IO.FileShare]::Read',
+    'Set-SswInstallerBackupAcl -Path $root -ValidateExistingOwner'
+)
+Assert-DeploymentTest -Condition (
+    -not $common.Contains('System.DirectoryServices.AccountManagement') -and
+    -not $common.Contains('.GetMembers(')
+) -Message 'Operations owner migration must not perform unbounded local or domain directory expansion.'
 $agentMutexSecurity = New-SswDeploymentMutexSecurity -Product 'Agent'
 $agentMutexRules = @($agentMutexSecurity.GetAccessRules(
     $true,
@@ -386,6 +428,26 @@ $agentLockIndex = $install.IndexOf("Enter-SswDeploymentLock -Product 'Agent'")
 Assert-DeploymentTest -Condition (
     $agentStateReadIndex -gt $agentLockIndex
 ) -Message 'Agent installed state must be read only after the deployment lock is held.'
+$agentJournalGuardIndex = $install.IndexOf(
+    'Assert-SswAgentDeploymentJournalsReady -OperationsRoot $operationsRoot')
+$agentJournalTrustIndex = $install.IndexOf(
+    'Initialize-SswAgentOperationsRoot -OperationsRoot $operationsRoot')
+Assert-DeploymentTest -Condition (
+    $agentJournalTrustIndex -gt $agentLockIndex -and
+    $agentJournalGuardIndex -gt $agentJournalTrustIndex -and
+    $agentStateReadIndex -gt $agentJournalGuardIndex
+) -Message 'Agent installer must secure the trust root and check both journals after locking and before reading mutable installed state.'
+$agentUninstallLockIndex = $uninstall.IndexOf("Enter-SswDeploymentLock -Product 'Agent'")
+$agentUninstallJournalGuardIndex = $uninstall.IndexOf(
+    'Assert-SswAgentDeploymentJournalsReady -OperationsRoot $operationsRoot')
+$agentUninstallJournalTrustIndex = $uninstall.IndexOf(
+    'Initialize-SswAgentOperationsRoot -OperationsRoot $operationsRoot')
+$agentUninstallStateReadIndex = $uninstall.IndexOf('$configPath = Join-Path $install')
+Assert-DeploymentTest -Condition (
+    $agentUninstallJournalTrustIndex -gt $agentUninstallLockIndex -and
+    $agentUninstallJournalGuardIndex -gt $agentUninstallJournalTrustIndex -and
+    $agentUninstallStateReadIndex -gt $agentUninstallJournalGuardIndex
+) -Message 'Agent uninstaller must secure the trust root and check both journals after locking and before reading mutable installed state.'
 
 $lockTestId = [Guid]::NewGuid().ToString('N')
 $lockTestFolderName = [string]::Concat(

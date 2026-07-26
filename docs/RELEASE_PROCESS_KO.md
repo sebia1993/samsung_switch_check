@@ -4,23 +4,23 @@
 
 - 대상: Windows x64
 - 런타임: .NET 10 self-contained, single-file, trimming 비활성
-- 현재 버전: `0.9.12-poc`
-- 태그: annotated tag `v0.9.12-poc`
+- 현재 버전: `0.9.13-poc`
+- 태그: annotated tag `v0.9.13-poc`
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP, 정확히 두 개
 - 기존 Release와 Asset은 교체하지 않는 immutable 방식
 
 공개 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip
 ```
 
 Actions 내부 검증 산출물:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -59,7 +59,7 @@ git ls-files AGENTS.md
 ## 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.12-poc
+.\scripts\build-release.ps1 -Version 0.9.13-poc
 ```
 
 스크립트는 다음을 수행합니다.
@@ -75,7 +75,7 @@ git ls-files AGENTS.md
 로컬 진단 목적으로만 더러운 작업 트리를 허용할 수 있습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.12-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.9.13-poc -AllowDirty
 ```
 
 `sourceDirty=true` 산출물은 공식 Release에 사용하지 않습니다.
@@ -143,16 +143,25 @@ Viewer ZIP 루트에는 `Install-or-Update-Viewer.cmd`, `install-viewer.ps1`,
 Windows 사용자 범위에 설치되므로 CMD 진입점은 UAC를 요청하지 않습니다.
 
 abandoned mutex 감지는 해당 커널 객체가 남아 있을 때 이전 프로세스 중단을 한 번
-fail-closed로 보고하는 보조 보호입니다. 프로세스 종료·재부팅 뒤의 부분 설치 상태를
-영구 기록하거나 자동 복구하는 계약으로 해석하지 않습니다.
+fail-closed로 보고합니다. Agent 설치기와 제거기는 별도로 두 영구 journal을 잠금 직후
+교차 검사하며, 재부팅 뒤 남은 `running` 기록, rollback 오류와 손상 기록을 감지하면
+설치 상태를 읽거나 변경하기 전에 중단합니다. 이 검사는 불완전한 백업을 추측해
+rollback·roll-forward하거나 임시 자료를 정리하는 자동 복구 계약이 아닙니다. journal과
+transaction·legacy 백업은 관리자 판단 전까지 보존해야 합니다.
+기존 작업 기록 루트의 관리자 소유권과 reparse 여부를 검증한 뒤 루트 ACL을 먼저 잠급니다.
+그 안에서 각 하위 항목의 기존 관리자 소유권과 reparse 여부를 부모부터 순서대로 검증·이관하고,
+전체 ACL 이관 뒤 허용된 journal·transaction 항목만 있는지 다시 검사합니다. 최종 소유자는
+로컬 Administrators, ACL은 SYSTEM·Administrators 전용입니다. 신뢰 경계 검증에 실패하면
+`AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`로 중단하고, 64KiB를 초과한 journal은 파싱하지
+않습니다.
 
 ## GitHub 게시
 
 `.github/workflows/release.yml`은 `v*` 태그 push에서만 게시합니다.
 
 ```powershell
-git tag -a v0.9.12-poc -m "Samsung Switch Watch v0.9.12-poc"
-git push origin v0.9.12-poc
+git tag -a v0.9.13-poc -m "Samsung Switch Watch v0.9.13-poc"
+git push origin v0.9.13-poc
 ```
 
 워크플로는 다음 조건을 fail-closed로 확인합니다.
@@ -185,10 +194,10 @@ Agent 업데이트가 실패하면 설치기가 이전 버전을 자동 복구�
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.9.12-poc'
+$tag = 'v0.9.13-poc'
 $assets = @(
-  'SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip'
 )
 
 gh release verify $tag --repo $repo
