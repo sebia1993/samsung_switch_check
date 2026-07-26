@@ -357,9 +357,11 @@ try {
         [IO.File]::WriteAllText((Join-Path $legacyBackup 'old-agent.keep'), 'backup')
 
         $currentOwner = [Security.Principal.WindowsIdentity]::GetCurrent().User
-        foreach ($legacyItem in @(
-                (Get-Item -LiteralPath $testRoot -Force),
-                (Get-ChildItem -LiteralPath $testRoot -Recurse -Force))) {
+        $legacyItems = @(
+            Get-Item -LiteralPath $testRoot -Force
+            Get-ChildItem -LiteralPath $testRoot -Recurse -Force
+        )
+        foreach ($legacyItem in $legacyItems) {
             $legacyAcl = Get-Acl -LiteralPath $legacyItem.FullName
             $legacyAcl.SetOwner($currentOwner)
             Set-Acl -LiteralPath $legacyItem.FullName -AclObject $legacyAcl
@@ -373,9 +375,11 @@ try {
         Assert-JournalTest -Condition (
             (Get-TestTreeFingerprint -Path $fixtureRoot) -ceq $integrationBefore
         ) -Message 'Initialize then guard must preserve journal, transaction, staging, and backup content.'
-        foreach ($securedItem in @(
-                (Get-Item -LiteralPath $testRoot -Force),
-                (Get-ChildItem -LiteralPath $testRoot -Recurse -Force))) {
+        $securedItems = @(
+            Get-Item -LiteralPath $testRoot -Force
+            Get-ChildItem -LiteralPath $testRoot -Recurse -Force
+        )
+        foreach ($securedItem in $securedItems) {
             Assert-JournalTest -Condition (
                 (ConvertTo-SswIdentitySid -Identity (Get-Acl -LiteralPath $securedItem.FullName).Owner) -eq
                 'S-1-5-32-544'
