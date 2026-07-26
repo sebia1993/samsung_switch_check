@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.12-poc"
+VERSION = "0.9.13-poc"
 DOCUMENT_DATE = "2026-07-26"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -992,6 +992,9 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("DEPLOYMENT_ALREADY_RUNNING", "먼저 시작한 같은 제품의 설치·제거가 끝난 뒤 다시 실행"),
             ("DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED", "변경 전에 중단됨. 자동 복구가 아니므로 서비스·설치 폴더 상태 확인 후 다시 실행"),
             ("DEPLOYMENT_LOCK_UNAVAILABLE", "Agent 관리자 권한 또는 Viewer 동일 사용자 확인 → 보안 프로그램·정책 점검"),
+            ("AGENT_DEPLOYMENT_RECOVERY_REQUIRED", "이전 Agent 설치·제거 미완료 또는 rollback 오류. journal·백업을 보존하고 관리자 확인"),
+            ("AGENT_DEPLOYMENT_JOURNAL_INVALID", "Agent 작업 기록 손상 또는 미지원 형식. 기록을 삭제해 우회하지 말고 관리자 확인"),
+            ("AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID", "작업 기록 폴더 소유자·ACL·파일 구성이 안전하지 않음. 관리자와 보안 정책 확인"),
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
@@ -1010,10 +1013,20 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("VIEWER_MONITOR_STATE_WRITE_FAILED", "장비 설정은 저장될 수 있음. 중복 등록하지 말고 감시 이력 파일 권한·잠금·디스크 확인"),
             ("VIEWER_MONITOR_CYCLE_FAILED", "다음 주기 재시도를 기다리고 반복되면 Viewer 진단 로그 확인"),
         ],
-        [3600, 5760],
+        [4000, 5360],
         header_size=8.5,
         body_size=8.25,
         body_line=1.0,
+    )
+    add_callout(
+        doc,
+        "Agent 중단 기록 보존",
+        "%ProgramData%\\SamsungSwitchWatch-Operations, .__staging_*, .__backup_*와 legacy 백업은 "
+        "자동 복구 자료가 아니라 관리자 판단 증거입니다. 작업 기록 루트는 부모부터 "
+        "Administrators 소유와 SYSTEM·Administrators 전용 ACL로 이관하며, 64KiB를 넘는 "
+        "journal은 파싱하지 않습니다. 이전 기록이 현재 실행한 관리자와 다른 계정 소유면 "
+        "자동 이관하지 않습니다. 오류가 표시되면 삭제·이동·이름 변경하지 마세요.",
+        "danger",
     )
     add_heading(doc, "현장 진단 파일", 2, heading_num_id)
     add_code_block(

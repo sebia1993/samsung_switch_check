@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.12-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.13-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -35,6 +35,12 @@ Agent PC  ── Telnet/TCP 23 ────> 허용된 삼성 스위치
 Agent 설치·업데이트·제거는 전체 PC에서 하나씩만 실행되며, Viewer 설치·업데이트·제거는
 같은 Windows 사용자에서 하나씩만 실행됩니다. 먼저 시작한 작업이 끝나기 전에 다른 작업을
 실행하면 대기하거나 파일을 동시에 변경하지 않고 즉시 중단합니다.
+
+Agent 설치기와 제거기는 잠금을 획득한 직후 두 Agent 작업 journal을 모두 검사합니다.
+재부팅 뒤에도 미완료 작업, rollback 오류 또는 손상된 기록이 남아 있으면 서비스, Program
+Files, ProgramData와 방화벽을 더 변경하기 전에 중단합니다. 이것은 부분 설치를 추측해
+복원하는 자동 복구가 아닙니다. 작업 기록 폴더와 하위 파일은 로컬 Administrators가 소유하고
+SYSTEM·Administrators만 접근하도록 제한합니다. journal은 64KiB를 넘으면 읽지 않습니다.
 
 ## 3. Agent 신규 설치 또는 업데이트
 
@@ -97,7 +103,9 @@ Agent ZIP 폴더에서 관리자 PowerShell을 열어 설치기를 직접 실행
   -AllowedTargetCidrs 10.40.0.0/16
 ```
 
-시스템 변경 없이 입력과 패키지만 검사하려면 `-Preflight`를 추가합니다.
+Agent 프로그램·데이터·서비스·방화벽을 변경하지 않고 입력과 패키지만 검사하려면
+`-Preflight`를 추가합니다. 보안상 작업 journal 폴더가 없거나 이전 ACL이면 이 폴더 생성과
+SYSTEM·Administrators 전용 ACL 초기화는 수행될 수 있습니다.
 
 ```powershell
 .\install-agent.ps1 `
@@ -273,6 +281,9 @@ Agent 신원 불일치가 발생합니다.
 | `DEPLOYMENT_ALREADY_RUNNING` | 같은 제품의 설치 또는 제거가 진행 중임. 먼저 실행한 작업이 끝난 뒤 다시 실행 |
 | `DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED` | 이전 설치·제거 프로세스의 비정상 종료가 감지되어 이번 실행은 변경 전에 중단됨. 서비스·설치 폴더 상태를 확인한 뒤 다시 실행 |
 | `DEPLOYMENT_LOCK_UNAVAILABLE` | 배포 잠금을 열 수 없음. Agent는 관리자 권한, Viewer는 설치한 동일 Windows 계정인지 확인하고 보안 프로그램·정책 차단 여부 점검 |
+| `AGENT_DEPLOYMENT_RECOVERY_REQUIRED` | 이전 Agent 설치·제거가 완료되지 않았거나 rollback 오류가 남음. 자동 복구가 아니므로 journal과 백업을 보존하고 관리자 상태 확인 후 다음 조치 결정 |
+| `AGENT_DEPLOYMENT_JOURNAL_INVALID` | Agent 작업 기록이 손상됐거나 지원되지 않는 형식임. 기록을 삭제해 우회하지 말고 백업과 함께 보존하여 관리자 확인 |
+| `AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID` | 작업 기록 폴더의 소유자·ACL·파일 구성이 안전하지 않음. 폴더를 임의로 새로 만들거나 삭제하지 말고 관리자와 보안 정책 확인 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
@@ -294,3 +305,14 @@ Agent 신원 불일치가 발생합니다.
 fail-closed로 멈추는 보호입니다. 재부팅 뒤 남은 부분 설치를 자동으로 복구하는 기능은
 아니므로 오류가 반복되거나 서비스·설치 폴더 상태가 불명확하면 임의 삭제하지 말고 관리자가
 작업 journal과 설치 상태를 확인해야 합니다.
+
+위 `AGENT_DEPLOYMENT_*` 코드가 표시되면
+`%ProgramData%\SamsungSwitchWatch-Operations`, `.__staging_*`, `.__backup_*`,
+transaction 백업, Agent 데이터와 `legacy-*-backup-*`을 삭제·이동·이름 변경하지 마십시오.
+서비스나 제품 방화벽 규칙도 임의로 다시 만들지 마십시오. 해당 자료는 중단 지점과 안전한
+복구 방향을 판단하는 증거입니다.
+
+이전 작업 기록이 현재 실행한 관리자와 다른 계정 소유라면 자동 이관하지 않습니다. 폐쇄망에서
+장기 대기를 만들 수 있는 로컬·도메인 그룹 조회로 다른 owner의 권한을 추측하지 않으므로
+`AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`가 표시될 수 있습니다. 기록을 삭제해 우회하지 말고
+사내 Windows 관리자에게 소유권과 ACL 확인을 요청하십시오.

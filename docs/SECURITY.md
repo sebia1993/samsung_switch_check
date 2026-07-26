@@ -48,6 +48,17 @@ DPAPI LocalMachine만으로는 같은 컴퓨터의 다른 사용자가 파일을
 readiness 실패 시 이전 자료를 복구한 뒤 폐쇄형 ACL을 다시 적용합니다. 성공 시 설치
 트랜잭션용 복제본만 제거합니다.
 
+Agent 설치·제거 journal은 `%ProgramData%\SamsungSwitchWatch-Operations`에 저장합니다.
+설치기와 제거기는 기존 루트의 관리자 소유권과 reparse 여부를 확인한 뒤 루트 ACL을 먼저
+잠급니다. 이후 부모부터 각 하위 항목을 검증·이관하고, 전체 재열거에서 허용 이름·소유권·ACL과
+reparse point를 다시 확인합니다. 최종 소유자는 로컬 Administrators, ACL은
+SYSTEM·Administrators 전용입니다. 두 journal은 시스템 전역 배포 잠금을 획득한 상태에서만
+읽고 쓰며, 64KiB를 넘거나 형식·상태 조합이 잘못되면 자동 변경을 중단합니다. 미완료 기록은
+복구 증거이므로 자동 삭제하지 않습니다.
+기존 개별 owner는 현재 실행 중인 관리자일 때만 자동 이관합니다. 폐쇄망에서 제한 없이
+지연될 수 있는 로컬·도메인 그룹 조회는 수행하지 않으며, 다른 계정 owner는 관리자 권한을
+추측하지 않고 `AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`로 중단합니다.
+
 v0.7에서 v0.9로 이관할 때 기존 Agent 장비 목록 설정 사본, 자격 증명과 SQLite 원문·이력
 자료는 자동 삭제하지 않습니다. `legacy-v0.7-backup-*` 폴더로 이동한 뒤 루트와 모든 하위
 항목의 ACL을 SYSTEM과

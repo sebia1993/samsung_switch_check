@@ -258,6 +258,33 @@ function ConvertTo-SswIdentitySid {
     }
 }
 
+function Test-SswTrustedAdministrativeOwnerSid {
+    param([Parameter(Mandatory = $true)][string]$Sid)
+
+    $normalizedSid = ConvertTo-SswIdentitySid -Identity $Sid
+    if ($normalizedSid -in @('S-1-5-18', 'S-1-5-32-544')) { return $true }
+
+    $currentIdentity = $null
+    try {
+        $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        if ($currentIdentity.User -and $currentIdentity.User.Value -eq $normalizedSid) {
+            $currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+            if ($currentPrincipal.IsInRole(
+                    [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+                return $true
+            }
+        }
+    }
+    finally {
+        if ($currentIdentity -is [IDisposable]) { $currentIdentity.Dispose() }
+    }
+    # Do not expand local or domain groups for a different account. Directory
+    # lookups have no dependable timeout in this Windows PowerShell path and can
+    # stall an offline company PC. A different owner therefore requires explicit
+    # administrator review instead of inferred trust.
+    return $false
+}
+
 function Assert-SswBackgroundAgentReceipt {
     param(
         [Parameter(Mandatory = $true)][object]$Receipt,
@@ -547,20 +574,16 @@ function Invoke-SswLocalLivenessProbe {
 }
 
 function Set-SswInstallerBackupAcl {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$ValidateExistingOwner
+    )
 
     $resolved = [IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw "백업 폴더가 없습니다: $resolved" }
     $rootItem = Get-Item -LiteralPath $resolved -Force
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "junction 또는 symlink 백업 폴더는 사용하지 않습니다: $resolved"
-    }
-    $descendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
-    $reparsePoint = $descendants | Where-Object {
-        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-    } | Select-Object -First 1
-    if ($reparsePoint) {
-        throw "junction 또는 symlink가 포함된 백업 트리는 사용하지 않습니다: $($reparsePoint.FullName)"
     }
 
     $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -569,8 +592,22 @@ function Set-SswInstallerBackupAcl {
     $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $propagation = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
+    $ownerTrustCache = @{}
+    $testExistingOwner = {
+        param([Parameter(Mandatory = $true)][string]$Owner)
+        $ownerSid = ConvertTo-SswIdentitySid -Identity $Owner
+        if (-not $ownerTrustCache.ContainsKey($ownerSid)) {
+            $ownerTrustCache[$ownerSid] = Test-SswTrustedAdministrativeOwnerSid -Sid $ownerSid
+        }
+        return [bool]$ownerTrustCache[$ownerSid]
+    }
 
     $acl = Get-Acl -LiteralPath $resolved
+    if ($ValidateExistingOwner -and
+        -not (& $testExistingOwner $acl.Owner)) {
+        throw "백업 폴더 소유자가 로컬 Administrators 구성원이 아닙니다: $resolved"
+    }
+    $acl.SetOwner($administratorsSid)
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($identity in @($acl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
         $acl.PurgeAccessRules($identity)
@@ -581,17 +618,41 @@ function Set-SswInstallerBackupAcl {
     }
     Set-Acl -LiteralPath $resolved -AclObject $acl
 
-    foreach ($item in $descendants | Sort-Object { $_.FullName.Length }) {
-        $childAcl = Get-Acl -LiteralPath $item.FullName
-        $childAcl.SetAccessRuleProtection($true, $false)
-        foreach ($identity in @($childAcl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
-            $childAcl.PurgeAccessRules($identity)
+    # Parents are secured before their children are enumerated. An unprivileged
+    # process therefore cannot add a new child after that parent has been inspected.
+    $pendingDirectories = New-Object Collections.Generic.Queue[string]
+    $pendingDirectories.Enqueue($resolved)
+    while ($pendingDirectories.Count -gt 0) {
+        $parent = $pendingDirectories.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "junction 또는 symlink가 포함된 백업 트리는 사용하지 않습니다: $($item.FullName)"
+            }
+
+            $childAcl = Get-Acl -LiteralPath $item.FullName
+            if ($ValidateExistingOwner -and
+                -not (& $testExistingOwner $childAcl.Owner)) {
+                throw "하위 백업 항목 소유자가 로컬 Administrators 구성원이 아닙니다: $($item.FullName)"
+            }
+            $childAcl.SetOwner($administratorsSid)
+            $childAcl.SetAccessRuleProtection($true, $false)
+            foreach ($identity in @($childAcl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
+                $childAcl.PurgeAccessRules($identity)
+            }
+            $childAcl.SetAccessRuleProtection($false, $false)
+            Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
+
+            if ($item.PSIsContainer) {
+                $pendingDirectories.Enqueue($item.FullName)
+            }
         }
-        $childAcl.SetAccessRuleProtection($false, $false)
-        Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
     }
 
     $verified = Get-Acl -LiteralPath $resolved
+    if ($verified.Owner -and
+        (ConvertTo-SswIdentitySid -Identity $verified.Owner) -ne $administratorsSid.Value) {
+        throw "백업 폴더 소유자가 로컬 Administrators가 아닙니다: $resolved"
+    }
     $unexpected = @($verified.Access | Where-Object {
         $_.IsInherited -or $_.AccessControlType -ne $allow -or
         $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
@@ -606,8 +667,16 @@ function Set-SswInstallerBackupAcl {
             throw "필수 백업 폴더 권한을 확인하지 못했습니다: $requiredSid"
         }
     }
-    foreach ($item in $descendants) {
+    $verifiedDescendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
+    foreach ($item in $verifiedDescendants) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "ACL 적용 후 junction 또는 symlink가 발견되었습니다: $($item.FullName)"
+        }
         $childAcl = Get-Acl -LiteralPath $item.FullName
+        if ($childAcl.Owner -and
+            (ConvertTo-SswIdentitySid -Identity $childAcl.Owner) -ne $administratorsSid.Value) {
+            throw "하위 백업 항목 소유자가 로컬 Administrators가 아닙니다: $($item.FullName)"
+        }
         $invalidChildRule = $childAcl.Access | Where-Object {
             -not $_.IsInherited -or $_.AccessControlType -ne $allow -or
             $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
@@ -615,6 +684,59 @@ function Set-SswInstallerBackupAcl {
         if ($invalidChildRule) {
             throw "하위 백업 항목에 허용되지 않은 명시적 권한이 남아 있습니다: $($item.FullName)"
         }
+    }
+}
+
+function Initialize-SswAgentOperationsRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$OperationsRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($OperationsRoot)
+    try {
+        if (Test-Path -LiteralPath $root) {
+            if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+                throw 'The Agent operations root is not a directory.'
+            }
+            Assert-SswNoReparsePoint -Parent (Split-Path $root -Parent) -Child $root
+        }
+        else {
+            New-Item -ItemType Directory -Path $root | Out-Null
+        }
+
+        Set-SswInstallerBackupAcl -Path $root -ValidateExistingOwner
+
+        # Inventory is checked only after the parent-first ACL migration has
+        # finished, so a concurrent standard user cannot insert a trusted-looking
+        # journal between validation and normalization.
+        $topLevelItems = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop)
+        foreach ($item in $topLevelItems) {
+            $isExpectedJournal = -not $item.PSIsContainer -and
+                $item.Name -in @('agent-install-or-update.json', 'agent-uninstall.json')
+            $isExpectedJournalArtifact = -not $item.PSIsContainer -and
+                $item.Name -match '^agent-(?:install-or-update|uninstall)\.json\.[0-9a-f]{32}\.(?:tmp|bak)$'
+            $isTransactionsDirectory = $item.PSIsContainer -and $item.Name -ceq 'transactions'
+            if (-not ($isExpectedJournal -or $isExpectedJournalArtifact -or
+                    $isTransactionsDirectory)) {
+                throw "Unexpected Agent operations artifact: $($item.Name)"
+            }
+        }
+
+        $transactionsRoot = Join-Path $root 'transactions'
+        if (Test-Path -LiteralPath $transactionsRoot) {
+            if (-not (Test-Path -LiteralPath $transactionsRoot -PathType Container)) {
+                throw 'The Agent transactions path is not a directory.'
+            }
+            foreach ($transaction in @(Get-ChildItem -LiteralPath $transactionsRoot -Force)) {
+                if (-not $transaction.PSIsContainer -or
+                    $transaction.Name -notmatch '^[0-9a-f]{32}$') {
+                    throw "Unexpected Agent transaction artifact: $($transaction.Name)"
+                }
+            }
+        }
+    }
+    catch {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID: Agent 작업 기록 폴더의 소유권, ACL 또는 파일 구성을 신뢰할 수 없어 자동 변경을 중단했습니다. 폴더와 백업을 삭제하지 말고 관리자에게 확인을 요청하세요.'
     }
 }
 
@@ -674,6 +796,181 @@ function Write-SswOperationJournal {
         # journal 교체가 이미 성공한 뒤의 임시 백업 정리 실패는 완료된 작업을 실패로 바꾸지 않습니다.
         Remove-SswOperationJournalArtifactBestEffort -Path $temporary
         Remove-SswOperationJournalArtifactBestEffort -Path $replaceBackup
+    }
+}
+
+function Read-SswAgentDeploymentJournal {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('agent-install-or-update', 'agent-uninstall')]
+        [string]$ExpectedOperation
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록 경로가 일반 파일이 아닙니다. 작업 기록과 백업을 삭제하지 말고 관리자에게 확인을 요청하세요.'
+    }
+
+    $journalItem = Get-Item -LiteralPath $Path -Force
+    if ($journalItem.Length -gt 65536) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록이 허용 크기 64KiB를 초과했습니다. 자동 변경을 중단했습니다.'
+    }
+
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [IO.File]::Open(
+            [IO.Path]::GetFullPath($Path),
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read)
+        if ($stream.Length -gt 65536) {
+            throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록이 허용 크기 64KiB를 초과했습니다. 자동 변경을 중단했습니다.'
+        }
+        $reader = New-Object IO.StreamReader(
+            $stream,
+            (New-Object Text.UTF8Encoding($false, $true)),
+            $true)
+        $journalText = $reader.ReadToEnd()
+        $journal = $journalText | ConvertFrom-Json
+    }
+    catch {
+        if ($_.Exception.Message -like 'AGENT_DEPLOYMENT_JOURNAL_INVALID:*') { throw }
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록을 읽을 수 없거나 JSON 형식이 손상되었습니다. 작업 기록과 백업을 삭제하지 말고 관리자에게 확인을 요청하세요.'
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
+    if ($null -eq $journal -or $journal -is [Array]) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록의 최상위 형식이 올바르지 않습니다. 작업 기록과 백업을 삭제하지 말고 관리자에게 확인을 요청하세요.'
+    }
+
+    $requiredProperties = @(
+        'formatVersion',
+        'product',
+        'operation',
+        'transactionId',
+        'stage',
+        'status',
+        'updatedUtc',
+        'errorCodes'
+    )
+    $availableProperties = @($journal.PSObject.Properties.Name)
+    foreach ($requiredProperty in $requiredProperties) {
+        if ($requiredProperty -notin $availableProperties) {
+            throw "AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록에 필수 항목이 없습니다: $requiredProperty. 작업 기록과 백업을 삭제하지 말고 관리자에게 확인을 요청하세요."
+        }
+    }
+
+    $formatVersion = 0
+    if (-not [int]::TryParse(
+        [string]$journal.formatVersion,
+        [Globalization.NumberStyles]::Integer,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$formatVersion) -or $formatVersion -ne 1) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: 지원하지 않는 Agent 작업 기록 버전입니다. 이전 설치 상태를 자동으로 추측하지 말고 관리자에게 확인을 요청하세요.'
+    }
+    if ([string]$journal.product -cne 'SamsungSwitchWatch' -or
+        [string]$journal.operation -cne $ExpectedOperation) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록의 제품 또는 작업 종류가 예상값과 다릅니다. 자동 변경을 중단했습니다.'
+    }
+    if ([string]$journal.transactionId -notmatch '^[0-9a-f]{32}$') {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록의 transaction ID가 올바르지 않습니다. 자동 변경을 중단했습니다.'
+    }
+
+    $updatedUtc = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+        [string]$journal.updatedUtc,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$updatedUtc)) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록 시간이 올바르지 않습니다. 자동 변경을 중단했습니다.'
+    }
+
+    if ($null -eq $journal.errorCodes -or $journal.errorCodes -isnot [Array]) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록의 오류 코드 목록이 배열이 아닙니다. 자동 변경을 중단했습니다.'
+    }
+    $errorCodes = @($journal.errorCodes)
+    foreach ($errorCode in $errorCodes) {
+        if ($null -eq $errorCode -or [string]$errorCode -notmatch '^[A-Z0-9_]{1,64}$') {
+            throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록의 오류 코드 형식이 올바르지 않습니다. 자동 변경을 중단했습니다.'
+        }
+    }
+
+    $stage = [string]$journal.stage
+    $status = [string]$journal.status
+    $requiresRecovery = $false
+    if ($ExpectedOperation -eq 'agent-install-or-update') {
+        if ($stage -eq 'prepared' -and $status -eq 'running' -and $errorCodes.Count -eq 0) {
+            $requiresRecovery = $true
+        }
+        elseif ($stage -eq 'completed' -and $status -eq 'succeeded' -and $errorCodes.Count -eq 0) {
+        }
+        elseif ($stage -eq 'rollback-completed' -and $status -eq 'failed') {
+            $requiresRecovery = $errorCodes.Count -gt 0
+        }
+        else {
+            throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 설치 작업 기록의 단계와 상태 조합이 올바르지 않습니다. 자동 변경을 중단했습니다.'
+        }
+    }
+    else {
+        if ($stage -eq 'prepared' -and $status -eq 'running' -and $errorCodes.Count -eq 0) {
+            $requiresRecovery = $true
+        }
+        elseif ($stage -eq 'completed' -and $status -eq 'succeeded' -and $errorCodes.Count -eq 0) {
+        }
+        elseif ($stage -eq 'completed' -and $status -eq 'failed' -and $errorCodes.Count -gt 0) {
+            $requiresRecovery = $true
+        }
+        else {
+            throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 제거 작업 기록의 단계와 상태 조합이 올바르지 않습니다. 자동 변경을 중단했습니다.'
+        }
+    }
+
+    return [pscustomobject]@{
+        Path = [IO.Path]::GetFullPath($Path)
+        Operation = $ExpectedOperation
+        TransactionId = [string]$journal.transactionId
+        Stage = $stage
+        Status = $status
+        ErrorCodes = $errorCodes
+        UpdatedUtc = $updatedUtc
+        RequiresRecovery = $requiresRecovery
+    }
+}
+
+function Assert-SswAgentDeploymentJournalsReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$OperationsRoot
+    )
+
+    $root = [IO.Path]::GetFullPath($OperationsRoot)
+    if (-not (Test-Path -LiteralPath $root)) { return }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        throw 'AGENT_DEPLOYMENT_JOURNAL_INVALID: Agent 작업 기록 폴더 경로가 디렉터리가 아닙니다. 자동 변경을 중단했습니다.'
+    }
+    Assert-SswNoReparsePoint -Parent (Split-Path $root -Parent) -Child $root
+
+    $journalSpecifications = @(
+        [pscustomobject]@{
+            FileName = 'agent-install-or-update.json'
+            Operation = 'agent-install-or-update'
+        },
+        [pscustomobject]@{
+            FileName = 'agent-uninstall.json'
+            Operation = 'agent-uninstall'
+        }
+    )
+    foreach ($specification in $journalSpecifications) {
+        $journalPath = Join-Path $root $specification.FileName
+        Assert-SswChildPath -Parent $root -Child $journalPath
+        $state = Read-SswAgentDeploymentJournal -Path $journalPath `
+            -ExpectedOperation $specification.Operation
+        if ($state -and $state.RequiresRecovery) {
+            throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 이전 Agent 설치 또는 제거 작업이 정상적으로 완료되지 않았습니다 ($($specification.FileName)). 파일, 서비스, 방화벽, 작업 기록 또는 백업을 임의로 삭제하지 말고 관리자 확인 후 다시 실행하세요."
+        }
     }
 }
 

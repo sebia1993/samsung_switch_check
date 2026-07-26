@@ -20,6 +20,8 @@ $sourceManifestPath = Join-Path $source 'BUILD-MANIFEST.json'
 $installedExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
 $installedConfigPath = Join-Path $install 'appsettings.Production.json'
 $receiptPath = Join-Path $data 'install-receipt.json'
+$operationsRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
+$journalPath = Join-Path $operationsRoot 'agent-install-or-update.json'
 $legacyBackgroundTaskName = Get-SswAgentBackgroundTaskName
 $legacyBackgroundTaskDescription = 'Owned by SamsungSwitchWatch current-user background installer v1'
 $legacyBackgroundInstall = [IO.Path]::GetFullPath(
@@ -368,6 +370,11 @@ if ((Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvaria
 
 $deploymentLock = Enter-SswDeploymentLock -Product 'Agent'
 try {
+$operationsRoot = [IO.Path]::GetFullPath($operationsRoot)
+Assert-SswProductPath -Path $operationsRoot -BaseRoot $env:ProgramData `
+    -ProductRelativeRoot 'SamsungSwitchWatch-Operations'
+Initialize-SswAgentOperationsRoot -OperationsRoot $operationsRoot
+Assert-SswAgentDeploymentJournalsReady -OperationsRoot $operationsRoot
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $isUpdate = $null -ne $existingService
 $existingConfig = $null
@@ -470,18 +477,16 @@ Write-Host "  Viewer 관리망 : $($clientCidrs -join ', ')"
 Write-Host "  스위치 대상망 : $($targetCidrs -join ', ')"
 Write-Host "  보존 데이터   : $data"
 if ($Preflight) {
-    Write-SswStep 'Preflight passed; no files, services, or firewall rules were changed.'
+    Write-SswStep 'Preflight passed; no Agent program, data, service, or firewall state was changed. The operations journal ACL may have been initialized.'
     return
 }
 
 $transactionId = [Guid]::NewGuid().ToString('N')
 $installParent = Split-Path $install -Parent
-$operationsRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
 $transactionRoot = Join-Path $operationsRoot "transactions\$transactionId"
 $staging = "$install.__staging_$transactionId"
 $programBackup = "$install.__backup_$transactionId"
 $dataSnapshot = Join-Path $transactionRoot 'data'
-$journalPath = Join-Path $operationsRoot 'agent-install-or-update.json'
 $serviceCreated = $false
 $installSwapped = $false
 $dataExisted = Test-Path -LiteralPath $data -PathType Container

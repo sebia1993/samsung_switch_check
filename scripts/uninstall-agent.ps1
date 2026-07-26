@@ -10,11 +10,17 @@ Assert-SswAdministrator
 $serviceName = Get-SswAgentServiceName
 $install = [IO.Path]::GetFullPath($InstallDirectory)
 $data = [IO.Path]::GetFullPath($DataDirectory)
+$operationsRoot = [IO.Path]::GetFullPath(
+    (Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'))
 Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
 Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+Assert-SswProductPath -Path $operationsRoot -BaseRoot $env:ProgramData `
+    -ProductRelativeRoot 'SamsungSwitchWatch-Operations'
 
 $deploymentLock = Enter-SswDeploymentLock -Product 'Agent'
 try {
+Initialize-SswAgentOperationsRoot -OperationsRoot $operationsRoot
+Assert-SswAgentDeploymentJournalsReady -OperationsRoot $operationsRoot
 $configPath = Join-Path $install 'appsettings.Production.json'
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     try { $configuration = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json }
@@ -43,7 +49,7 @@ if ($RemoveData) {
 
 Assert-SswAgentFirewallNameSafety
 $transactionId = [Guid]::NewGuid().ToString('N')
-$journalPath = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations\agent-uninstall.json'
+$journalPath = Join-Path $operationsRoot 'agent-uninstall.json'
 Write-SswOperationJournal -Path $journalPath -Operation 'agent-uninstall' -TransactionId $transactionId `
     -Stage 'prepared' -Status 'running'
 
