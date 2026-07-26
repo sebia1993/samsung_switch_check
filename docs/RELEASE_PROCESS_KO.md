@@ -4,23 +4,23 @@
 
 - 대상: Windows x64
 - 런타임: .NET 10 self-contained, single-file, trimming 비활성
-- 현재 버전: `0.9.11-poc`
-- 태그: annotated tag `v0.9.11-poc`
+- 현재 버전: `0.9.12-poc`
+- 태그: annotated tag `v0.9.12-poc`
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP, 정확히 두 개
 - 기존 Release와 Asset은 교체하지 않는 immutable 방식
 
 공개 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.11-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.11-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip
 ```
 
 Actions 내부 검증 산출물:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.11-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.11-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -59,7 +59,7 @@ git ls-files AGENTS.md
 ## 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.11-poc
+.\scripts\build-release.ps1 -Version 0.9.12-poc
 ```
 
 스크립트는 다음을 수행합니다.
@@ -75,7 +75,7 @@ git ls-files AGENTS.md
 로컬 진단 목적으로만 더러운 작업 트리를 허용할 수 있습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.11-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.9.12-poc -AllowDirty
 ```
 
 `sourceDirty=true` 산출물은 공식 Release에 사용하지 않습니다.
@@ -120,6 +120,13 @@ NuGet 잠금 부산물을 제거합니다. 그 뒤 위 운영 스크립트와 �
 → 설치 영수증 확정 → 설치 트랜잭션용 백업 제거
 ```
 
+Agent 설치와 제거는 `Global\SamsungSwitchWatch.Agent.Deployment.v1` 잠금을 공유합니다.
+Viewer 설치와 제거는 같은 Windows 사용자 SID가 포함된 전역 잠금을 공유합니다. 두 잠금은
+`WaitOne(0)`으로 즉시 판정하며, 이미 실행 중인 작업을 기다리거나 겹쳐서 변경하지 않습니다.
+잠금 ACL은 Agent의 경우 SYSTEM·Administrators, Viewer의 경우 SYSTEM·현재 사용자로
+제한합니다. `.v1`은 앱 버전이 아니라 이후 설치기와도 공유해야 하는 잠금 프로토콜
+식별자이므로 릴리스마다 바꾸지 않습니다.
+
 readiness 실패 시 프로그램, ProgramData의 HTTPS 신원, CIDR 설정, 제품 방화벽과 이전 서비스
 실행 상태를 복구해야 합니다. 이전 예약 작업을 건드린 경우 작업 XML, 실행 상태, 원래 파일
 위치와 ACL도 복구해야 합니다.
@@ -135,13 +142,17 @@ Viewer ZIP 루트에는 `Install-or-Update-Viewer.cmd`, `install-viewer.ps1`,
 더블클릭하고, 고급 관리자는 PowerShell 설치 옵션을 직접 사용합니다. Viewer는 현재
 Windows 사용자 범위에 설치되므로 CMD 진입점은 UAC를 요청하지 않습니다.
 
+abandoned mutex 감지는 해당 커널 객체가 남아 있을 때 이전 프로세스 중단을 한 번
+fail-closed로 보고하는 보조 보호입니다. 프로세스 종료·재부팅 뒤의 부분 설치 상태를
+영구 기록하거나 자동 복구하는 계약으로 해석하지 않습니다.
+
 ## GitHub 게시
 
 `.github/workflows/release.yml`은 `v*` 태그 push에서만 게시합니다.
 
 ```powershell
-git tag -a v0.9.11-poc -m "Samsung Switch Watch v0.9.11-poc"
-git push origin v0.9.11-poc
+git tag -a v0.9.12-poc -m "Samsung Switch Watch v0.9.12-poc"
+git push origin v0.9.12-poc
 ```
 
 워크플로는 다음 조건을 fail-closed로 확인합니다.
@@ -174,10 +185,10 @@ Agent 업데이트가 실패하면 설치기가 이전 버전을 자동 복구�
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.9.11-poc'
+$tag = 'v0.9.12-poc'
 $assets = @(
-  'SamsungSwitchWatch-Agent-0.9.11-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.9.11-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip'
 )
 
 gh release verify $tag --repo $repo

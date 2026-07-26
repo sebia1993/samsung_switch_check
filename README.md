@@ -3,7 +3,7 @@
 삼성 `IES4224GP`, `IES4028XP`, `IES4226XP` 스위치에 Telnet으로 접속해 조회 명령을
 실행하고, 결과와 변경점을 운영자 PC에서 확인하는 Windows 전용 도구입니다.
 
-현재 버전은 `v0.9.11-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
+현재 버전은 `v0.9.12-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ```text
@@ -47,8 +47,8 @@ show syslog tail num 100
 
 GitHub Release의 Assets에서 아래 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.11-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.11-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.12-poc-win-x64.zip`
 
 두 ZIP에는 바로 열어 볼 수 있는 `SamsungSwitchWatch_User_Manual_KO.pdf`가 포함됩니다.
 편집용 DOCX는 배포 ZIP에 넣지 않습니다.
@@ -62,6 +62,9 @@ UAC를 승인한 뒤 다음 두 범위를 입력합니다.
 설치기는 신규 설치와 기존 서비스를 자동 판별합니다. 업데이트라면 기존 CIDR 설정과
 `%ProgramData%\SamsungSwitchWatch`의 HTTPS 신원 자료를 보존하고, 검증 실패 시 이전 버전으로
 복구합니다.
+
+Agent와 Viewer의 설치·업데이트·제거는 제품별 잠금으로 겹쳐 실행되지 않습니다. 다른 작업이
+진행 중이면 즉시 중단하고 먼저 시작한 작업이 끝난 뒤 다시 실행하도록 안내합니다.
 
 Viewer ZIP을 운영자 PC에 풀고 `Install-or-Update-Viewer.cmd`를 더블클릭합니다. 관리자
 권한은 필요하지 않으며 현재 Windows 사용자에게 설치되고 로그인 시 자동 시작됩니다.
@@ -97,7 +100,7 @@ dotnet restore .\SamsungSwitchWatch.sln --locked-mode
 릴리스 패키지는 깨끗한 Git 작업 트리에서 만듭니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.11-poc
+.\scripts\build-release.ps1 -Version 0.9.12-poc
 ```
 
 `artifacts\release` 내부에는 ZIP 2개와 내부 검증용 매니페스트·SBOM·해시 파일이 생깁니다.
@@ -125,6 +128,7 @@ GitHub Release의 사용자 정의 Assets에는 Agent ZIP과 Viewer ZIP, 정확�
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.9.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.12_POC_KO.md)
 - [0.9.11-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.11_POC_KO.md)
 - [0.9.10-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.10_POC_KO.md)
 - [0.9.9-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.9_POC_KO.md)

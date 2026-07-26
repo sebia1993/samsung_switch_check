@@ -9,6 +9,9 @@ $install = [IO.Path]::GetFullPath($InstallDirectory)
 Assert-SswProductPath -Path $install -BaseRoot $env:LOCALAPPDATA -ProductRelativeRoot 'Programs\SamsungSwitchWatch\Viewer'
 $settings = Join-Path $env:LOCALAPPDATA 'SamsungSwitchWatch'
 if ($RemoveSettings) { Assert-SswProductPath -Path $settings -BaseRoot $env:LOCALAPPDATA -ProductRelativeRoot 'SamsungSwitchWatch' }
+
+$deploymentLock = Enter-SswDeploymentLock -Product 'Viewer'
+try {
 $links = @(
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Samsung Switch Watch.lnk'),
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Samsung Switch Watch.lnk')
@@ -46,3 +49,7 @@ Write-SswOperationJournal -Path $journalPath -Operation 'viewer-uninstall' -Tran
     -Stage 'completed' -Status $status -ErrorCodes $errors
 if ($errors.Count -gt 0) { throw "일부 Viewer 제거 단계가 실패했습니다: $($errors -join ', ')" }
 Write-SswStep 'Viewer 제거 완료'
+}
+finally {
+    Exit-SswDeploymentLock -Lock $deploymentLock
+}

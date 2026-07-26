@@ -13,6 +13,8 @@ $data = [IO.Path]::GetFullPath($DataDirectory)
 Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
 Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
 
+$deploymentLock = Enter-SswDeploymentLock -Product 'Agent'
+try {
 $configPath = Join-Path $install 'appsettings.Production.json'
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     try { $configuration = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json }
@@ -84,3 +86,7 @@ Write-SswOperationJournal -Path $journalPath -Operation 'agent-uninstall' -Trans
     -Stage 'completed' -Status $status -ErrorCodes $errors
 if ($errors.Count -gt 0) { throw "Agent uninstall completed with errors: $($errors -join ', ')" }
 Write-SswStep 'Agent uninstall completed'
+}
+finally {
+    Exit-SswDeploymentLock -Lock $deploymentLock
+}

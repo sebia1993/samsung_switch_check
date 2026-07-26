@@ -20,8 +20,6 @@ $sourceManifestPath = Join-Path $source 'BUILD-MANIFEST.json'
 $installedExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
 $installedConfigPath = Join-Path $install 'appsettings.Production.json'
 $receiptPath = Join-Path $data 'install-receipt.json'
-$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-$isUpdate = $null -ne $existingService
 $legacyBackgroundTaskName = Get-SswAgentBackgroundTaskName
 $legacyBackgroundTaskDescription = 'Owned by SamsungSwitchWatch current-user background installer v1'
 $legacyBackgroundInstall = [IO.Path]::GetFullPath(
@@ -368,6 +366,10 @@ if ((Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256).Hash.ToLowerInvaria
     throw 'Agent executable hash does not match BUILD-MANIFEST.json.'
 }
 
+$deploymentLock = Enter-SswDeploymentLock -Product 'Agent'
+try {
+$existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+$isUpdate = $null -ne $existingService
 $existingConfig = $null
 $existingReceipt = $null
 $preservedClientCidrs = @()
@@ -864,4 +866,8 @@ catch {
         Write-Warning ("Rollback completed with errors: {0}" -f ($rollbackErrors -join ', '))
     }
     throw $failure
+}
+}
+finally {
+    Exit-SswDeploymentLock -Lock $deploymentLock
 }

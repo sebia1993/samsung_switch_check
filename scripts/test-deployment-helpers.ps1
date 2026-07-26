@@ -24,6 +24,7 @@ $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Install-or-Update
 $viewerLauncher = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Install-or-Update-Viewer.cmd') -Raw -Encoding UTF8
 $uninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-agent.ps1') -Raw -Encoding UTF8
 $viewerInstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-viewer.ps1') -Raw -Encoding UTF8
+$viewerUninstall = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-viewer.ps1') -Raw -Encoding UTF8
 $mockSmoke = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'smoke-mock-agent.ps1') -Raw -Encoding UTF8
 $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'build-release.ps1') -Raw -Encoding UTF8
 $common = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'common.ps1') -Raw -Encoding UTF8
@@ -278,6 +279,250 @@ Assert-DeploymentTest -Condition (
     $shortcutBackupValidationIndex -ge 0 -and
     $shortcutRemovalIndex -gt $shortcutBackupValidationIndex
 ) -Message 'Viewer rollback must validate every required shortcut backup before removing current links.'
+
+Write-SswStep 'Install and uninstall operations share fail-closed deployment locks'
+Assert-ContainsAll -Name 'Deployment lock helper' -Text $common -Needles @(
+    'function Get-SswDeploymentMutexName',
+    'function New-SswDeploymentMutexSecurity',
+    'function Enter-SswNamedDeploymentLock',
+    'function Enter-SswDeploymentLock',
+    'function Exit-SswDeploymentLock',
+    'Global\SamsungSwitchWatch.Agent.Deployment.v1',
+    'Global\SamsungSwitchWatch.Viewer.Deployment.',
+    'DEPLOYMENT_ALREADY_RUNNING',
+    'DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED',
+    '$acquired = $mutex.WaitOne(0)',
+    'S-1-5-18',
+    'S-1-5-32-544'
+)
+$agentMutexSecurity = New-SswDeploymentMutexSecurity -Product 'Agent'
+$agentMutexRules = @($agentMutexSecurity.GetAccessRules(
+    $true,
+    $false,
+    [Security.Principal.SecurityIdentifier]))
+$agentMutexSids = @($agentMutexRules | ForEach-Object {
+        $_.IdentityReference.Value
+    } | Sort-Object -Unique)
+Assert-DeploymentTest -Condition (
+    ($agentMutexSids -join ',') -eq 'S-1-5-18,S-1-5-32-544'
+) -Message 'Agent deployment mutex ACL must allow only SYSTEM and built-in Administrators.'
+Assert-DeploymentTest -Condition $agentMutexSecurity.AreAccessRulesProtected `
+    -Message 'Agent deployment mutex ACL inheritance must be disabled.'
+foreach ($rule in $agentMutexRules) {
+    Assert-DeploymentTest -Condition (
+        $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $rule.MutexRights -eq [Security.AccessControl.MutexRights]::FullControl -and
+        -not $rule.IsInherited
+    ) -Message 'Every Agent deployment mutex ACL rule must be explicit Allow FullControl.'
+}
+
+$viewerMutexSecurity = New-SswDeploymentMutexSecurity -Product 'Viewer'
+$viewerMutexRules = @($viewerMutexSecurity.GetAccessRules(
+    $true,
+    $false,
+    [Security.Principal.SecurityIdentifier]))
+$viewerMutexSids = @($viewerMutexRules | ForEach-Object {
+        $_.IdentityReference.Value
+    } | Sort-Object -Unique)
+$expectedViewerMutexSids = @('S-1-5-18', (Get-SswCurrentUserSid)) | Sort-Object -Unique
+Assert-DeploymentTest -Condition (
+    ($viewerMutexSids -join ',') -eq ($expectedViewerMutexSids -join ',')
+) -Message 'Viewer deployment mutex ACL must allow only SYSTEM and the current user SID.'
+Assert-DeploymentTest -Condition $viewerMutexSecurity.AreAccessRulesProtected `
+    -Message 'Viewer deployment mutex ACL inheritance must be disabled.'
+foreach ($rule in $viewerMutexRules) {
+    Assert-DeploymentTest -Condition (
+        $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $rule.MutexRights -eq [Security.AccessControl.MutexRights]::FullControl -and
+        -not $rule.IsInherited
+    ) -Message 'Every Viewer deployment mutex ACL rule must be explicit Allow FullControl.'
+}
+$mismatchedProductFailure = $null
+try {
+    $null = Enter-SswNamedDeploymentLock `
+        -Name (Get-SswDeploymentMutexName -Product 'Agent') -Product 'Viewer'
+}
+catch {
+    $mismatchedProductFailure = $_.Exception.Message
+}
+Assert-DeploymentTest -Condition (
+    [string]$mismatchedProductFailure -like 'DEPLOYMENT_LOCK_INVALID:*'
+) -Message 'A production deployment lock name must not be opened with another product ACL.'
+$deploymentScripts = @(
+    [pscustomobject]@{
+        Name = 'Agent installer'
+        Text = $install
+        Acquire = "Enter-SswDeploymentLock -Product 'Agent'"
+    },
+    [pscustomobject]@{
+        Name = 'Agent uninstaller'
+        Text = $uninstall
+        Acquire = "Enter-SswDeploymentLock -Product 'Agent'"
+    },
+    [pscustomobject]@{
+        Name = 'Viewer installer'
+        Text = $viewerInstall
+        Acquire = "Enter-SswDeploymentLock -Product 'Viewer'"
+    },
+    [pscustomobject]@{
+        Name = 'Viewer uninstaller'
+        Text = $viewerUninstall
+        Acquire = "Enter-SswDeploymentLock -Product 'Viewer'"
+    }
+)
+foreach ($deploymentScript in $deploymentScripts) {
+    $acquireIndex = $deploymentScript.Text.IndexOf($deploymentScript.Acquire)
+    $journalIndex = $deploymentScript.Text.IndexOf('Write-SswOperationJournal')
+    $releaseIndex = $deploymentScript.Text.LastIndexOf(
+        'Exit-SswDeploymentLock -Lock $deploymentLock')
+    Assert-DeploymentTest -Condition (
+        $acquireIndex -ge 0 -and
+        $journalIndex -gt $acquireIndex -and
+        $releaseIndex -gt $journalIndex
+    ) -Message "$($deploymentScript.Name) must hold one product lock across every journaled mutation."
+}
+$agentStateReadIndex = $install.IndexOf('$existingService = Get-Service')
+$agentLockIndex = $install.IndexOf("Enter-SswDeploymentLock -Product 'Agent'")
+Assert-DeploymentTest -Condition (
+    $agentStateReadIndex -gt $agentLockIndex
+) -Message 'Agent installed state must be read only after the deployment lock is held.'
+
+$lockTestId = [Guid]::NewGuid().ToString('N')
+$lockTestFolderName = [string]::Concat(
+    'SamsungSwitchWatch ',
+    [char]0xBC30,
+    [char]0xD3EC,
+    ' ',
+    [char]0xC7A0,
+    [char]0xAE08,
+    ' ',
+    $lockTestId)
+$lockTestRoot = Join-Path ([IO.Path]::GetTempPath()) $lockTestFolderName
+Assert-SswChildPath -Parent ([IO.Path]::GetTempPath()) -Child $lockTestRoot
+$lockReadyPath = Join-Path $lockTestRoot 'child-ready.txt'
+$lockName = 'Global\SamsungSwitchWatch.Deployment.Test.{0}' -f $lockTestId
+$childProcess = $null
+$witnessMutex = $null
+$parentLock = $null
+$childCommand = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. $env:SSW_DEPLOYMENT_LOCK_COMMON
+$lock = $null
+try {
+    $lock = Enter-SswNamedDeploymentLock -Name $env:SSW_DEPLOYMENT_LOCK_NAME -Product 'Test'
+    [IO.File]::WriteAllText($env:SSW_DEPLOYMENT_LOCK_READY, 'ready')
+    Start-Sleep -Seconds 60
+}
+finally {
+    Exit-SswDeploymentLock -Lock $lock
+}
+'@
+try {
+    New-Item -ItemType Directory -Path $lockTestRoot | Out-Null
+    $encodedChildCommand = [Convert]::ToBase64String(
+        [Text.Encoding]::Unicode.GetBytes($childCommand))
+    $childStart = New-Object Diagnostics.ProcessStartInfo
+    $childStart.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $childStart.Arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedChildCommand"
+    $childStart.UseShellExecute = $false
+    $childStart.CreateNoWindow = $true
+    $childStart.EnvironmentVariables['SSW_DEPLOYMENT_LOCK_COMMON'] = (
+        Join-Path $PSScriptRoot 'common.ps1')
+    $childStart.EnvironmentVariables['SSW_DEPLOYMENT_LOCK_NAME'] = $lockName
+    $childStart.EnvironmentVariables['SSW_DEPLOYMENT_LOCK_READY'] = $lockReadyPath
+    $childProcess = [Diagnostics.Process]::Start($childStart)
+
+    for ($attempt = 0; $attempt -lt 100 -and
+        -not (Test-Path -LiteralPath $lockReadyPath -PathType Leaf); $attempt++) {
+        if ($childProcess.HasExited) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-DeploymentTest -Condition (
+        -not $childProcess.HasExited -and
+        (Test-Path -LiteralPath $lockReadyPath -PathType Leaf)
+    ) -Message 'The child Windows PowerShell process must hold the deployment lock.'
+
+    $busyFailure = $null
+    try {
+        $parentLock = Enter-SswNamedDeploymentLock -Name $lockName -Product 'Test'
+    }
+    catch {
+        $busyFailure = $_.Exception.Message
+    }
+    finally {
+        if ($parentLock) {
+            Exit-SswDeploymentLock -Lock $parentLock
+            $parentLock = $null
+        }
+    }
+    Assert-DeploymentTest -Condition (
+        [string]$busyFailure -like 'DEPLOYMENT_ALREADY_RUNNING:*'
+    ) -Message 'A second deployment process must fail closed without waiting.'
+
+    # Keep one witness handle alive so the killed owner leaves an observable abandoned mutex.
+    $witnessMutex = [Threading.Mutex]::OpenExisting($lockName)
+    $childProcess.Kill()
+    Assert-DeploymentTest -Condition ($childProcess.WaitForExit(5000)) `
+        -Message 'The lock-holder child process must terminate within five seconds.'
+
+    $interruptedFailure = $null
+    try {
+        $parentLock = Enter-SswNamedDeploymentLock -Name $lockName -Product 'Test'
+    }
+    catch {
+        $interruptedFailure = $_.Exception.Message
+    }
+    finally {
+        if ($parentLock) {
+            Exit-SswDeploymentLock -Lock $parentLock
+            $parentLock = $null
+        }
+    }
+    Assert-DeploymentTest -Condition (
+        [string]$interruptedFailure -like 'DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED:*'
+    ) -Message 'An abandoned deployment lock must stop automatic changes with a stable code.'
+
+    $parentLock = Enter-SswNamedDeploymentLock -Name $lockName -Product 'Test'
+    Assert-DeploymentTest -Condition ($null -ne $parentLock) `
+        -Message 'The deployment lock must be reusable after the abandoned state is acknowledged.'
+    Exit-SswDeploymentLock -Lock $parentLock
+    $parentLock = $null
+
+    $parentLock = Enter-SswNamedDeploymentLock -Name $lockName -Product 'Test'
+    Assert-DeploymentTest -Condition ($null -ne $parentLock) `
+        -Message 'A normally released deployment lock must be immediately reusable.'
+    Exit-SswDeploymentLock -Lock $parentLock
+    $parentLock = $null
+}
+finally {
+    if ($parentLock) { Exit-SswDeploymentLock -Lock $parentLock }
+    if ($childProcess) {
+        if (-not $childProcess.HasExited) {
+            $childProcess.Kill()
+            $childProcess.WaitForExit(5000) | Out-Null
+        }
+        $childProcess.Dispose()
+    }
+    if ($witnessMutex) { $witnessMutex.Dispose() }
+    if (Test-Path -LiteralPath $lockTestRoot -PathType Container) {
+        Assert-SswChildPath -Parent ([IO.Path]::GetTempPath()) -Child $lockTestRoot
+        Remove-Item -LiteralPath $lockTestRoot -Recurse -Force
+    }
+}
+Assert-DeploymentTest -Condition (-not (Test-Path -LiteralPath $lockTestRoot)) `
+    -Message 'Deployment lock test files must be removed.'
+$residualMutex = $null
+try {
+    $residualMutex = [Threading.Mutex]::OpenExisting($lockName)
+}
+catch [Threading.WaitHandleCannotBeOpenedException] {
+}
+finally {
+    if ($residualMutex) { $residualMutex.Dispose() }
+}
+Assert-DeploymentTest -Condition ($null -eq $residualMutex) `
+    -Message 'Every deployment lock test handle must be disposed.'
 
 Write-SswStep 'CIDR canonicalization'
 $normalized = @(ConvertTo-SswIpv4Cidrs -Cidr @('10.20.30.9/24', '10.20.30.0/24', '10.40.0.10/32'))
