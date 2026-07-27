@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.14-poc"
-DOCUMENT_DATE = "2026-07-26"
+VERSION = "0.9.15-poc"
+DOCUMENT_DATE = "2026-07-27"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -670,7 +670,7 @@ def build_manual(output_path: Path, images_dir: Path):
         [
             "원격 PC에서 Agent ZIP을 풀고 Install-or-Update-Agent.cmd를 실행합니다.",
             "Viewer PC에서 Viewer ZIP을 풀고 Install-or-Update-Viewer.cmd를 실행합니다.",
-            "Viewer가 열리면 Agent 주소만 입력합니다. HTTPS/18443은 자동입니다.",
+            "Viewer가 열리면 Agent를 설치한 원격 PC의 주소만 입력합니다. HTTPS/18443은 자동입니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
@@ -766,9 +766,10 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         "설치 실패와 Viewer 연결 거부",
         "관리자 설치 창에 Agent installation failed가 표시되면 Cause 줄을 먼저 확인하세요. "
-        "설치가 완료되지 않은 동안 SamsungSwitchWatchAgent 서비스와 TCP/18443 listener가 없으므로 "
-        "Viewer에는 AGENT_CONNECTION_REFUSED가 표시됩니다. 이전 Agent 설치기를 반복 실행하거나 "
-        f"서비스를 수동 등록하지 말고 {VERSION} Agent 설치기를 사용하세요.",
+        "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP, Viewer PC 주소 또는 "
+        "localhost가 아니라 Agent를 설치한 PC 주소를 입력했는지 먼저 확인하세요. 그 다음 "
+        "SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. 서비스를 수동 등록하지 말고 "
+        f"{VERSION} Agent 설치기를 사용하세요.",
         "danger",
     )
     add_heading(doc, "Viewer 설치", 2, heading_num_id)
@@ -799,7 +800,8 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
     add_bullets(
         doc,
         [
-            "Agent PC의 IPv4 또는 사내 DNS 이름만 입력합니다.",
+            "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다.",
+            "스위치 IP, Viewer PC 주소와 localhost는 Agent와 Viewer가 같은 PC가 아닌 한 입력하지 않습니다.",
             "https://, 포트, 인증서 SHA-256 지문, 페어링 토큰은 입력하지 않습니다.",
             "정상 Agent 교체나 재설치가 확실할 때만 '이 Agent로 다시 연결'을 사용합니다.",
         ],
@@ -994,12 +996,12 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("수동 show 입력·출력", "Viewer 프로세스 메모리", "복사 가능, 종료 시 소멸"),
             (
                 "Agent HTTPS 신원",
-                "%ProgramData%\\SamsungSwitchWatch",
+                "%ProgramData%\\\nSamsungSwitchWatch",
                 "DPAPI LocalMachine + SYSTEM/Administrators/서비스 SID ACL",
             ),
             (
                 "Agent 설치 영수증",
-                "%ProgramData%\\SamsungSwitchWatch",
+                "%ProgramData%\\\nSamsungSwitchWatch",
                 "Administrators owner + SYSTEM/Administrators 전용 ACL",
             ),
             ("장비 계정·스위치 출력", "Agent", "저장하지 않음"),
@@ -1038,7 +1040,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("AGENT_DIRECTORY_TRUST_INVALID", "활성 Agent install/data 트리의 owner 또는 reparse 구성을 신뢰할 수 없음. 삭제·강제 소유권 변경 없이 Windows 관리자 확인"),
             ("AGENT_RECEIPT_TRUST_INVALID", "영구 삭제용 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. 영수증과 데이터 보존 후 관리자 확인"),
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
-            ("AGENT_CONNECTION_REFUSED", "Agent 설치 완료 여부 → SamsungSwitchWatchAgent 서비스 → TCP/18443 수신 상태"),
+            ("AGENT_CONNECTION_REFUSED", "입력 주소가 실제 Agent PC인지 → 서비스 → 로컬 진단 → Viewer PC의 원격 TCP/18443"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
@@ -1089,8 +1091,30 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
     add_code_block(
         doc,
         r"""
-.\diagnose-agent.ps1 -OutputPath C:\Temp\ssw-diagnostic.json
+.\diagnose-agent.ps1 -OutputPath "$env:TEMP\ssw-diagnostic.json"
 """,
+    )
+    add_table(
+        doc,
+        ["확인 위치", "정상 기준/조치"],
+        [
+            (
+                "Viewer",
+                "Agent 연결에 실제 Agent PC 주소를 입력합니다. 원격 구성에서는 localhost나 스위치 IP를 사용하지 않습니다.",
+            ),
+            (
+                "Agent PC",
+                "진단 결과의 service, agentLive, agentReady가 각각 OK, LIVE, READY인지 확인합니다.",
+            ),
+            (
+                "Viewer PC",
+                "Test-NetConnection <Agent-PC-주소> -Port 18443을 실행합니다. 실패하면 Viewer 관리 CIDR, Domain/Private 방화벽, 라우팅과 EDR을 확인합니다.",
+            ),
+        ],
+        [1900, 7460],
+        header_size=8.5,
+        body_size=8.25,
+        body_line=1.0,
     )
     add_callout(
         doc,
@@ -1131,7 +1155,13 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         "-RemoveData를 사용하면 Agent HTTPS 신원이 복구되지 않습니다. 이후 Viewer에서 신원 변경 경고가 발생합니다.",
         "danger",
     )
-    add_heading(doc, "최종 운영 체크리스트", 2, heading_num_id)
+    add_heading(
+        doc,
+        "최종 운영 체크리스트",
+        2,
+        heading_num_id,
+        page_break_before=True,
+    )
     add_bullets(
         doc,
         [

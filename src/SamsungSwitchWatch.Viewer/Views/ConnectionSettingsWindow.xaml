@@ -26,9 +26,9 @@
 
                         <Grid Margin="0,16,0,0">
                             <StackPanel>
-                                <TextBlock Text="Agent 주소" FontWeight="SemiBold"/>
+                                <TextBlock Text="Agent PC 주소 (스위치 IP 아님)" FontWeight="SemiBold"/>
                                 <TextBox x:Name="AgentAddressTextBox" Margin="0,7,0,0" Height="38" Padding="10,7"
-                                         AutomationProperties.Name="Agent IPv4 또는 DNS 주소"
+                                         AutomationProperties.Name="Agent를 설치한 PC의 IPv4 또는 DNS 주소"
                                          AutomationProperties.HelpText="예: 10.10.10.20 또는 monitor-pc.corp.local"/>
                             </StackPanel>
                         </Grid>

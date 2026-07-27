@@ -3,7 +3,7 @@
 삼성 `IES4224GP`, `IES4028XP`, `IES4226XP` 스위치에 Telnet으로 접속해 조회 명령을
 실행하고, 결과와 변경점을 운영자 PC에서 확인하는 Windows 전용 도구입니다.
 
-현재 버전은 `v0.9.14-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
+현재 버전은 `v0.9.15-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ```text
@@ -47,8 +47,8 @@ show syslog tail num 100
 
 GitHub Release의 Assets에서 아래 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip`
 
 두 ZIP에는 바로 열어 볼 수 있는 `SamsungSwitchWatch_User_Manual_KO.pdf`가 포함됩니다.
 편집용 DOCX는 배포 ZIP에 넣지 않습니다.
@@ -117,7 +117,7 @@ dotnet restore .\SamsungSwitchWatch.sln --locked-mode
 릴리스 패키지는 깨끗한 Git 작업 트리에서 만듭니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.14-poc
+.\scripts\build-release.ps1 -Version 0.9.15-poc
 ```
 
 `artifacts\release` 내부에는 ZIP 2개와 내부 검증용 매니페스트·SBOM·해시 파일이 생깁니다.
@@ -145,6 +145,7 @@ GitHub Release의 사용자 정의 Assets에는 Agent ZIP과 Viewer ZIP, 정확�
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.9.15-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.15_POC_KO.md)
 - [0.9.14-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.14_POC_KO.md)
 - [0.9.13-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.13_POC_KO.md)
 - [0.9.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.12_POC_KO.md)
