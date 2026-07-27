@@ -6,6 +6,29 @@ namespace SamsungSwitchWatch.Viewer.Tests;
 public sealed class ViewerSettingsTests
 {
     [Fact]
+    public void NewSettings_RequireExplicitAgentPcAddress()
+    {
+        var settings = new ViewerSettings();
+
+        Assert.Empty(settings.AgentUri);
+        Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
+
+        ViewerSettingsSanitizer.SplitAgentUri(settings.AgentUri, out var address, out var port);
+        Assert.Empty(address);
+        Assert.Equal(ViewerSettingsSanitizer.DefaultAgentPort, port);
+    }
+
+    [Fact]
+    public void ExplicitLocalhost_RemainsSupportedForSamePcInstallations()
+    {
+        var settings = new ViewerSettings { AgentUri = "https://localhost:18443" };
+
+        Assert.True(ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
+        ViewerSettingsSanitizer.SplitAgentUri(settings.AgentUri, out var address, out _);
+        Assert.Equal("localhost", address);
+    }
+
+    [Fact]
     public void Sanitize_MigratesLegacyHttpsAndRemovesUnsafeUriParts()
     {
         var source = new ViewerSettings

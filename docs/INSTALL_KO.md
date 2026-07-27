@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.14-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.15-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -191,8 +191,9 @@ Viewer 설치에는 관리자 권한이나 UAC 승인이 필요하지 않습니�
 
 더블클릭 설치는 주기 감시가 계속 시작되도록 `-StartWithWindows`를 기본 적용합니다.
 
-Viewer의 `Agent 연결`에서 Agent PC의 IPv4 또는 사내 DNS 이름과 고정 포트 `18443`을
-입력합니다. 인증서 SHA-256 지문과 페어링 토큰을 직접 입력하지 않습니다.
+Viewer의 `Agent 연결`에는 **Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만**
+입력합니다. 스위치 IP나 Viewer PC 주소를 입력하지 마십시오. HTTPS와 고정 포트 `18443`은
+자동 적용되며 인증서 SHA-256 지문과 페어링 토큰을 직접 입력하지 않습니다.
 
 Viewer는 첫 연결에서 Agent의 영구 신원을 자동으로 저장합니다. 이후 같은 주소에서 다른
 신원이 보이면 연결을 중단합니다. Agent PC가 정식으로 재설치되어 신원이 바뀐 것이 확실할
@@ -287,8 +288,25 @@ Agent는 연결을 장기간 유지하지 않습니다. 명령 요청마다 새 
 민감한 명령 결과 없이 Agent 단계 상태만 수집합니다.
 
 ```powershell
-.\diagnose-agent.ps1 -OutputPath C:\Temp\ssw-diagnostic.json
+.\diagnose-agent.ps1 -OutputPath "$env:TEMP\ssw-diagnostic.json"
 ```
+
+Viewer에서 `AGENT_CONNECTION_REFUSED`가 보이면 다음 순서로 확인합니다.
+
+1. Viewer의 `Agent 연결`에 스위치 IP가 아니라 Agent를 설치한 PC의 주소가 입력됐는지
+   확인합니다. Agent와 Viewer가 다른 PC라면 `localhost`를 사용하지 않습니다.
+2. Agent PC에서 위 진단을 실행하고 `service`, `agentLive`, `agentReady`가 각각
+   `OK`, `LIVE`, `READY`인지 확인합니다.
+3. Viewer PC의 PowerShell에서 다음 명령을 실행합니다. 실제 주소는 화면에만 입력하고
+   진단 파일이나 외부 문의 자료에는 기록하지 않습니다.
+
+   ```powershell
+   Test-NetConnection <Agent-PC-주소> -Port 18443
+   ```
+
+4. `TcpTestSucceeded : False`이면 설치 때 입력한 Viewer 관리 CIDR, Agent PC의
+   Domain/Private 방화벽 프로필, 사내 라우팅과 EDR 차단을 확인합니다. 로컬 진단은 정상인데
+   원격 검사만 실패하면 스위치 접속 문제가 아니라 Viewer PC와 Agent PC 사이의 문제입니다.
 
 기본 제거는 프로그램과 서비스만 삭제하고 HTTPS 신원·설치 설정 데이터는 보존합니다.
 
@@ -324,7 +342,7 @@ Agent 신원 불일치가 발생합니다.
 | `AGENT_DIRECTORY_TRUST_INVALID` | Agent 설치·데이터 루트 또는 하위 항목의 소유자·reparse 구성을 신뢰할 수 없어 읽기·채택·삭제를 중단함. 강제 소유권 변경이나 삭제로 우회하지 말고 Windows 관리자 확인 |
 | `AGENT_RECEIPT_TRUST_INVALID` | 데이터 영구 삭제에 필요한 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. ACL 완화·파일 재작성으로 우회하지 말고 설치 증거와 데이터 보존 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
-| `AGENT_CONNECTION_REFUSED` | Agent 설치가 완료되지 않았거나 서비스가 실행되지 않아 TCP/18443 연결이 거부됨. Agent PC에서 설치 창의 `Cause:`, `SamsungSwitchWatchAgent` 서비스와 18443 수신 상태 확인 |
+| `AGENT_CONNECTION_REFUSED` | 입력한 주소의 TCP/18443에 listener가 없음. 먼저 스위치나 Viewer PC가 아닌 실제 Agent PC 주소인지 확인한 뒤 `SamsungSwitchWatchAgent` 서비스와 로컬 진단 확인 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |

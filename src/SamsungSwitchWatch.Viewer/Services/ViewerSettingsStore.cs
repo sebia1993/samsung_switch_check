@@ -11,7 +11,7 @@ public sealed class ViewerSettings
     private readonly object _syncRoot = new();
 
     public bool DemoMode { get; set; }
-    public string AgentUri { get; set; } = "https://localhost:18443";
+    public string AgentUri { get; set; } = string.Empty;
     public Dictionary<string, string> AgentTrustPins { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public long LastEventSequence { get; set; }
     public Dictionary<string, long> EventCursors { get; set; } = new(StringComparer.Ordinal);
@@ -174,7 +174,7 @@ public static class ViewerSettingsSanitizer
         }
         if (!IsSupportedHost(address))
         {
-            reason = "Agent 주소에는 IPv4 주소 또는 DNS 이름만 입력해 주세요.";
+            reason = "Agent를 설치한 PC의 IPv4 주소 또는 DNS 이름만 입력해 주세요.";
             return false;
         }
 
@@ -203,7 +203,7 @@ public static class ViewerSettingsSanitizer
             return;
         }
 
-        address = "localhost";
+        address = string.Empty;
         port = DefaultAgentPort;
     }
 

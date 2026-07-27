@@ -528,7 +528,7 @@ public sealed class ViewerConnectionTests
 
     [Theory]
     [InlineData("AGENT_DNS_FAILED", "이름")]
-    [InlineData("AGENT_CONNECTION_REFUSED", "18443")]
+    [InlineData("AGENT_CONNECTION_REFUSED", "Agent를 설치한 PC")]
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
     [InlineData("AGENT_PROTOCOL_MISMATCH", "최신")]
