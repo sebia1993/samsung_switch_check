@@ -66,6 +66,8 @@ Write-SswStep '배포 도우미 계약 검사'
 $requireElevatedAclFixture = $env:GITHUB_ACTIONS -eq 'true'
 & (Join-Path $PSScriptRoot 'test-agent-deployment-journal.ps1') `
     -RequireElevatedAclFixture:$requireElevatedAclFixture
+& (Join-Path $PSScriptRoot 'test-agent-directory-acl.ps1') `
+    -RequireElevatedAclFixture:$requireElevatedAclFixture
 
 Write-SswStep 'GitHub 릴리스 워크플로 계약 검사'
 & (Join-Path $PSScriptRoot 'test-release-workflow-contract.ps1')

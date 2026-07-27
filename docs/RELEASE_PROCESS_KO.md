@@ -4,23 +4,23 @@
 
 - 대상: Windows x64
 - 런타임: .NET 10 self-contained, single-file, trimming 비활성
-- 현재 버전: `0.9.13-poc`
-- 태그: annotated tag `v0.9.13-poc`
+- 현재 버전: `0.9.14-poc`
+- 태그: annotated tag `v0.9.14-poc`
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP, 정확히 두 개
 - 기존 Release와 Asset은 교체하지 않는 immutable 방식
 
 공개 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip
 ```
 
 Actions 내부 검증 산출물:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -59,7 +59,7 @@ git ls-files AGENTS.md
 ## 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.13-poc
+.\scripts\build-release.ps1 -Version 0.9.14-poc
 ```
 
 스크립트는 다음을 수행합니다.
@@ -75,7 +75,7 @@ git ls-files AGENTS.md
 로컬 진단 목적으로만 더러운 작업 트리를 허용할 수 있습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.13-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.9.14-poc -AllowDirty
 ```
 
 `sourceDirty=true` 산출물은 공식 Release에 사용하지 않습니다.
@@ -113,11 +113,15 @@ NuGet 잠금 부산물을 제거합니다. 그 뒤 위 운영 스크립트와 �
 신규/업데이트를 자동 판별하고 다음 트랜잭션을 완료해야 합니다.
 
 ```text
-검증 → 정확히 소유한 이전 예약 작업 중지·제거 → 서비스 정지 → ProgramData 전체 백업
-→ 프로그램 원자 교체 → 설정·ACL·방화벽 적용
+검증 → 기존 install/data 루트 owner·reparse 신뢰 검사
+→ 패키지를 보호 staging에 복사·재해시
+→ 정확히 소유한 이전 예약 작업 중지·제거 → 서비스 정지
+→ 정확한 DataDirectory 읽기 전용 전수 검사 → 루트 선잠금·부모 우선 ACL 이관
+→ ProgramData 전체 snapshot → 프로그램 원자 교체
+→ 전용 가상 서비스 계정·설정·ACL·방화벽 적용
 → 서비스 시작 → HTTPS /health/ready
 → v0.7 자료와 이전 예약 작업 자료를 제한된 legacy-*-backup-*으로 보존
-→ 설치 영수증 확정 → 설치 트랜잭션용 백업 제거
+→ Administrators 전용 설치 영수증 확정 → 설치 트랜잭션용 백업 제거
 ```
 
 Agent 설치와 제거는 `Global\SamsungSwitchWatch.Agent.Deployment.v1` 잠금을 공유합니다.
@@ -129,7 +133,34 @@ Viewer 설치와 제거는 같은 Windows 사용자 SID가 포함된 전역 잠�
 
 readiness 실패 시 프로그램, ProgramData의 HTTPS 신원, CIDR 설정, 제품 방화벽과 이전 서비스
 실행 상태를 복구해야 합니다. 이전 예약 작업을 건드린 경우 작업 XML, 실행 상태, 원래 파일
-위치와 ACL도 복구해야 합니다.
+위치와 ACL도 복구해야 합니다. 서비스 중지·삭제 또는 선행 복구가 확인되지 않으면 후속 파일
+삭제·복구를 진행하지 않습니다. legacy program/data 이동이 일부만 끝났다면 원래 위치와
+archive를 보존하고 활성 DataDirectory 복구도 차단합니다. rollback 오류가 남은 transaction
+snapshot, program backup, legacy archive와 journal은 관리자 판단 전까지 정리하지 않습니다.
+
+DataDirectory는 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용합니다. 신규 설치에서는
+빈 선점 폴더도 거부하며 `New-Item -Force`를 사용하지 않습니다. 사전 검사 뒤 다른 프로세스가
+같은 경로를 만들면 기존 폴더를 채택하거나 rollback에서 삭제하지 않고 실패해야 합니다.
+서비스 SID는 결정론적으로 먼저 계산하고, 신규·기존 DataDirectory 모두 HTTPS 신원 복사나
+snapshot 전에 ACL 적용을 완료해야 합니다. ACL 성공 뒤에만 신규 폴더를 설치기 소유 rollback
+항목으로 표시합니다.
+
+활성 install/data 트리는 ACL 변경 전에 읽기 전용으로 owner와 reparse를 전수 검사하고,
+루트를 먼저 잠근 뒤 부모 우선 순회에서 같은 검사를 반복합니다. 서비스는
+`NT SERVICE\SamsungSwitchWatchAgent` 가상 계정으로 등록합니다. 정확한 서비스 SID owner는
+DataDirectory 하위 항목에서만 허용하며, 기존 `LocalService` owner는 그 서비스를 중지한
+업데이트의 1회 이관에만 허용합니다. 마지막 재열거에서 Administrators owner, 허용 SID ACL과
+reparse 부재를 확인합니다. 실패 코드는 `AGENT_DIRECTORY_TRUST_INVALID`이며 관리자 확인 없이
+폴더 삭제나 강제 소유권 변경으로 우회하지 않습니다.
+
+소스 패키지 검증 뒤 SYSTEM·Administrators 전용 staging을 만들고, 복사된 모든 파일과 Agent
+EXE를 in-memory 매니페스트 SHA-256과 다시 비교해야 합니다. 보호 staging 재검증 전에는 기존
+프로그램을 교체하지 않습니다.
+
+install receipt는 Administrators owner이며 SYSTEM·Administrators만 접근할 수 있어야 합니다.
+영수증에 CIDR 필드가 있어도 업데이트 권한원으로 사용하지 않습니다. 스위치 대상 CIDR은 검증된
+설정, Viewer 관리 CIDR은 정확한 제품 소유 방화벽 규칙에서 가져옵니다. 데이터 영구 제거는
+`AGENT_RECEIPT_TRUST_INVALID`가 발생하면 변경 전에 중단해야 합니다.
 
 `legacy-v0.7-backup-*`은 설치 트랜잭션용 임시 복제본이 아닙니다. 과거 자격 증명과
 SQLite 원문·이력의 보존 자료이므로 설치기와 릴리스 자동화가 삭제해서는 안 됩니다.
@@ -160,8 +191,8 @@ transaction·legacy 백업은 관리자 판단 전까지 보존해야 합니다.
 `.github/workflows/release.yml`은 `v*` 태그 push에서만 게시합니다.
 
 ```powershell
-git tag -a v0.9.13-poc -m "Samsung Switch Watch v0.9.13-poc"
-git push origin v0.9.13-poc
+git tag -a v0.9.14-poc -m "Samsung Switch Watch v0.9.14-poc"
+git push origin v0.9.14-poc
 ```
 
 워크플로는 다음 조건을 fail-closed로 확인합니다.
@@ -194,10 +225,10 @@ Agent 업데이트가 실패하면 설치기가 이전 버전을 자동 복구�
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.9.13-poc'
+$tag = 'v0.9.14-poc'
 $assets = @(
-  'SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip'
 )
 
 gh release verify $tag --repo $repo

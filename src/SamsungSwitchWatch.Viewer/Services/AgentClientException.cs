@@ -168,7 +168,7 @@ internal static class ViewerConnectionMessages
     public static string ForCode(string? errorCode) => errorCode switch
     {
         "AGENT_DNS_FAILED" => "Agent PC 이름을 찾지 못했습니다. 주소 또는 사내 DNS 연결을 확인해 주세요.",
-        "AGENT_CONNECTION_REFUSED" => "Agent가 연결을 거부했습니다. 서비스 실행 상태와 방화벽을 확인해 주세요.",
+        "AGENT_CONNECTION_REFUSED" => "Agent PC에서 연결이 거부되었습니다. Agent 설치 완료 여부, SamsungSwitchWatchAgent 서비스와 TCP/18443 수신 상태를 확인해 주세요.",
         "AGENT_UNREACHABLE" => "Agent PC까지 통신하지 못했습니다. 네트워크 경로와 방화벽을 확인해 주세요.",
         "AGENT_TIMEOUT" => "Agent 응답 시간이 초과되었습니다. 네트워크 경로를 확인해 주세요.",
         "AGENT_HTTP_ERROR" or "AGENT_INTERNAL_ERROR" => "Agent가 요청을 처리하지 못했습니다. Agent 서비스 상태와 진단 로그를 확인해 주세요.",

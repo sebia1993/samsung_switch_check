@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.9.13-poc
+.\scripts\build-release.ps1 -Version 0.9.14-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -29,6 +29,8 @@ Both release ZIPs include `SamsungSwitchWatch_User_Manual_KO.pdf`; the editable 
 - Agent stores no device inventory, credential, command, result, monitoring state or event history.
 - Public Agent runtime is Windows service-only with `--service`; direct no-argument or
   `--background` launch exits.
+- The service runs as the passwordless `NT SERVICE\SamsungSwitchWatchAgent` virtual account.
+  Accept legacy `LocalService`-owned data descendants only for one stopped-service migration.
 - Production Agent listens only on HTTPS/18443 and connects only to allowed IPv4 CIDRs on Telnet/23.
 - Each request uses a fresh bounded Telnet session and always disconnects. If the device closes the
   connection during command execution, reconnect at most once and execute only unfinished commands;
@@ -42,6 +44,11 @@ Both release ZIPs include `SamsungSwitchWatch_User_Manual_KO.pdf`; the editable 
 - Never commit credentials, tokens, certificates, real IPs, host names, MAC addresses, or company command output.
 - The Agent API has no application authentication. Windows Firewall management CIDRs are the access boundary.
 - Persistent Agent ECDSA identity is stored only under ProgramData and protected with DPAPI LocalMachine.
+- Agent DataDirectory is exactly `%ProgramData%\SamsungSwitchWatch`; reject custom paths and even
+  empty pre-existing roots during a new install.
+- `install-receipt.json` is Administrators-owned with SYSTEM/Administrators-only ACL. It is not a
+  CIDR authority; preserve target CIDRs from validated config and management CIDRs from the exact
+  owned firewall rule.
 - Keep stable sanitized error codes; never log passwords, enable passwords, commands, or raw output.
 - Do not claim live validation from mock tests.
 - Do not perform live network writes or company-network testing from Codex.
@@ -54,5 +61,8 @@ Both release ZIPs include `SamsungSwitchWatch_User_Manual_KO.pdf`; the editable 
 - `Install-or-Update-Agent.cmd` is the only public Agent installation entrypoint. Legacy
   scheduled-task scripts stay source-only for ownership-aware migration and must not enter public ZIPs.
 - Preserve Agent ProgramData identity and CIDR configuration across transactional updates.
+- Copy packages into protected staging and rehash them before swapping. If service quiescence,
+  rollback dependencies or legacy moves are incomplete, block later file mutation and preserve
+  snapshots, archives, backups and journal evidence.
 - Internal Actions artifacts contain six validation files; GitHub Release custom Assets contain only the versioned Agent and Viewer ZIP files.
 - Verify `git ls-files AGENTS.md` before GitHub handoff.
