@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.13-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.14-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -54,7 +54,9 @@ SYSTEM·Administrators만 접근하도록 제한합니다. journal은 64KiB를 �
    확인합니다.
 
 설치기는 `SamsungSwitchWatchAgent` 서비스 존재 여부로 신규 설치와 업데이트를 자동 판별합니다.
-업데이트에서는 기존 CIDR을 그대로 사용하므로 일반적인 업데이트에 재입력이 필요하지 않습니다.
+서비스는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정으로
+등록합니다. 업데이트에서는 기존 설정의 스위치 대상 CIDR과 제품 소유 방화벽 규칙의 Viewer
+관리 CIDR을 그대로 사용하므로 일반적인 업데이트에 재입력이 필요하지 않습니다.
 
 이전 버전의 `SamsungSwitchWatchAgent-CurrentUser` 예약 작업이 있으면 설치기는 이름만 보고
 중지하지 않습니다. 현재 Windows 사용자, 설명, 실행 경로·인수, 설치 영수증, 패키지
@@ -80,6 +82,24 @@ SYSTEM과 Administrators만 접근하도록 다시 잠급니다. 설치 성공 �
 이력 복구 또는 보존 기간 종료 후 삭제는 관리자가 사내 정책과 별도 승인을 확인해 수동으로
 수행하십시오.
 
+DataDirectory는 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용합니다. 신규 설치에서는
+이 경로가 이미 존재하면 비어 있더라도 설치용 폴더로 채택하지 않습니다. 기존 설치 폴더나
+DataDirectory를 사용하는 업데이트·제거는 설정·영수증을 읽기 전에 루트 소유자 SID와 reparse
+point를 검사합니다. 설치 트랜잭션에서는 먼저 전체 트리를 읽기 전용으로 검사하고, 루트 ACL을
+잠근 뒤 부모부터 하위 항목을 다시 검사·이관합니다. 마지막 전체 재열거까지 통과하면 루트와
+하위 항목의 소유자는 Administrators이며, ACL에는 SYSTEM·Administrators·정확한 Agent 서비스
+SID만 남습니다.
+
+기존 `LocalService` Agent를 업데이트할 때만 서비스가 중지된 사실을 확인한 뒤
+`LocalService` 소유 하위 파일을 한 번 이관 대상으로 인정합니다. 이 항목들도 Administrators
+소유로 다시 고정하고 서비스 등록을 `NT SERVICE\SamsungSwitchWatchAgent`로 전환합니다.
+신규 설치, 실행 중인 서비스 또는 일반 프로그램 트리에는 이 예외를 적용하지 않습니다.
+
+기존 릴리스가 다른 관리자 계정을 owner로 남긴 환경은 자동으로 관리자 그룹 포함 여부를
+조회하지 않습니다. 폐쇄망의 도메인 조회 지연과 잘못된 권한 추측을 피하기 위한 fail-closed
+동작입니다. `AGENT_DIRECTORY_TRUST_INVALID`가 표시되면 폴더를 삭제하거나 `takeown` 등으로
+강제 변경하지 말고, 사내 Windows 관리자가 현재 소유권·ACL과 설치 이력을 확인해야 합니다.
+
 설치 결과:
 
 ```text
@@ -89,9 +109,19 @@ SYSTEM과 Administrators만 접근하도록 다시 잠급니다. 설치 성공 �
 수신:     HTTPS/18443
 ```
 
-Agent 데이터 폴더에는 Agent의 영구 HTTPS 신원과 설치 영수증이 들어갑니다. 업데이트는 이 폴더
-전체를 제한된 임시 폴더에 백업한 뒤 프로그램을 교체합니다. 새 버전이 `/health/ready` 검증을
-통과하지 못하면 프로그램, 데이터, 방화벽과 이전 실행 상태를 자동 복구합니다.
+Agent 데이터 폴더에는 Agent의 영구 HTTPS 신원과 설치 영수증이 들어갑니다. 설치 영수증 파일은
+상위 폴더의 서비스 쓰기 권한을 상속하지 않고 SYSTEM·Administrators 전용 ACL로 보호합니다.
+업데이트 시 CIDR은 영수증이 아니라 검증된 `appsettings.Production.json`과 정확히 제품이
+소유한 방화벽 규칙에서 가져옵니다. 과거 서비스 쓰기 가능 영수증은 CIDR 권한원으로 사용하지
+않고 새 관리자 전용 영수증으로 교체합니다.
+
+패키지는 먼저 관리자 전용 staging 폴더로 복사합니다. 복사된 모든 파일과 Agent EXE를 메모리에
+읽어 둔 매니페스트의 SHA-256과 다시 비교한 뒤에만 프로그램 폴더를 교체합니다. 업데이트는
+DataDirectory 전체를 제한된 transaction snapshot에 백업합니다. 새 버전이 `/health/ready`
+검증을 통과하지 못하면 프로그램, 데이터, 방화벽과 이전 실행 상태를 복구합니다. 다만 서비스
+중지·삭제 또는 선행 복구 단계를 확인하지 못하면 파일을 계속 삭제하거나 덮어쓰지 않습니다.
+복구 오류가 하나라도 남으면 snapshot, legacy archive, program backup과 작업 journal 등 남아
+있는 증거를 자동 정리하지 않고 관리자 확인 대상으로 보존합니다.
 
 ### CIDR을 변경하는 경우
 
@@ -119,9 +149,10 @@ Telnet 23의 변경은 지원하지 않습니다.
 
 ### Agent 창이 보이지 않는 이유
 
-Agent는 `LocalService` 계정의 Windows 서비스로 Session 0에서 실행됩니다. 바탕 화면, 작업
-표시줄 또는 시스템 트레이에 창을 만들지 않으며 RDP 연결 종료와 사용자 로그오프 뒤에도
-계속 실행됩니다. 일반 사용자는 보이는 창을 실수로 닫을 수 없습니다.
+Agent는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정의 Windows 서비스로 Session
+0에서 실행됩니다. 별도 비밀번호를 만들거나 저장하지 않습니다. 바탕 화면, 작업 표시줄 또는
+시스템 트레이에 창을 만들지 않으며 RDP 연결 종료와 사용자 로그오프 뒤에도 계속 실행됩니다.
+일반 사용자는 보이는 창을 실수로 닫을 수 없습니다.
 
 `SamsungSwitchWatch.Agent.exe`를 직접 더블클릭하면 Agent를 별도로 실행하지 않고 즉시
 종료합니다. 운영할 때는 반드시 설치된 Windows 서비스를 사용하십시오.
@@ -270,6 +301,12 @@ Agent는 연결을 장기간 유지하지 않습니다. 명령 요청마다 새 
 정책과 별도 승인을 먼저 확인하십시오. 삭제한 신원은 복구되지 않으며 Viewer에서 기존
 Agent 신원 불일치가 발생합니다.
 
+`-RemoveData`는 install receipt가 SYSTEM·Administrators 전용 일반 파일이고 설치 경로와
+정확한 DataDirectory에 결속된 경우에만 허용됩니다. `AGENT_RECEIPT_TRUST_INVALID`가 표시되면
+영수증 ACL을 임의로 완화하거나 파일을 새로 만들어 우회하지 마십시오. 제거 과정에서 서비스
+중지 또는 삭제를 확인하지 못하면 실행 파일이 사용 중일 가능성이 있으므로 후속 방화벽·프로그램·
+데이터 삭제를 차단하고 journal에 실패를 남깁니다.
+
 ```powershell
 .\uninstall-agent.ps1 -RemoveData
 ```
@@ -284,7 +321,10 @@ Agent 신원 불일치가 발생합니다.
 | `AGENT_DEPLOYMENT_RECOVERY_REQUIRED` | 이전 Agent 설치·제거가 완료되지 않았거나 rollback 오류가 남음. 자동 복구가 아니므로 journal과 백업을 보존하고 관리자 상태 확인 후 다음 조치 결정 |
 | `AGENT_DEPLOYMENT_JOURNAL_INVALID` | Agent 작업 기록이 손상됐거나 지원되지 않는 형식임. 기록을 삭제해 우회하지 말고 백업과 함께 보존하여 관리자 확인 |
 | `AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID` | 작업 기록 폴더의 소유자·ACL·파일 구성이 안전하지 않음. 폴더를 임의로 새로 만들거나 삭제하지 말고 관리자와 보안 정책 확인 |
+| `AGENT_DIRECTORY_TRUST_INVALID` | Agent 설치·데이터 루트 또는 하위 항목의 소유자·reparse 구성을 신뢰할 수 없어 읽기·채택·삭제를 중단함. 강제 소유권 변경이나 삭제로 우회하지 말고 Windows 관리자 확인 |
+| `AGENT_RECEIPT_TRUST_INVALID` | 데이터 영구 삭제에 필요한 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. ACL 완화·파일 재작성으로 우회하지 말고 설치 증거와 데이터 보존 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
+| `AGENT_CONNECTION_REFUSED` | Agent 설치가 완료되지 않았거나 서비스가 실행되지 않아 TCP/18443 연결이 거부됨. Agent PC에서 설치 창의 `Cause:`, `SamsungSwitchWatchAgent` 서비스와 18443 수신 상태 확인 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |
@@ -312,7 +352,16 @@ transaction 백업, Agent 데이터와 `legacy-*-backup-*`을 삭제·이동·�
 서비스나 제품 방화벽 규칙도 임의로 다시 만들지 마십시오. 해당 자료는 중단 지점과 안전한
 복구 방향을 판단하는 증거입니다.
 
+서비스 중지·삭제 실패 또는 legacy program/data의 부분 이동이 기록된 경우에는 설치기가
+후속 파일 삭제·복구를 의도적으로 진행하지 않습니다. 원래 위치와 archive 양쪽에 자료가
+남아 있어도 중복으로 단정해 정리하지 말고, snapshot과 작업 journal을 함께 보존하십시오.
+
 이전 작업 기록이 현재 실행한 관리자와 다른 계정 소유라면 자동 이관하지 않습니다. 폐쇄망에서
 장기 대기를 만들 수 있는 로컬·도메인 그룹 조회로 다른 owner의 권한을 추측하지 않으므로
 `AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`가 표시될 수 있습니다. 기록을 삭제해 우회하지 말고
 사내 Windows 관리자에게 소유권과 ACL 확인을 요청하십시오.
+
+`AGENT_DIRECTORY_TRUST_INVALID`는 작업 journal이 아니라 활성 Agent 설치·데이터 트리의
+신뢰 검사가 실패했다는 뜻입니다. 정적 비신뢰 항목은 ACL을 바꾸기 전에 거부하지만, 검사 중
+동시 변경이 감지된 경우 이미 안전하게 잠긴 상위 ACL이 남을 수 있습니다. 이 경우에도 임의
+정리하지 말고 설치기 메시지와 `%ProgramData%\SamsungSwitchWatch-Operations`를 보존하십시오.

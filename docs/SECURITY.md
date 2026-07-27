@@ -30,7 +30,9 @@ DPAPI 파일을 다른 PC나 다른 Windows 사용자에게 복사해도 복호�
 ## Agent HTTPS 신원
 
 Agent는 최초 정상 시작 때 ECDSA P-256 키와 자체 서명 인증서를 생성합니다. 개인 키가 포함된
-PFX 자료는 DataDirectory 아래에 영구 저장하고 DPAPI LocalMachine으로 보호합니다.
+PFX 자료는 정확히 `%ProgramData%\SamsungSwitchWatch`인 DataDirectory 아래에 영구 저장하고
+DPAPI LocalMachine으로 보호합니다. 다른 DataDirectory는 설치·업데이트·제거 대상으로
+허용하지 않습니다.
 
 DPAPI LocalMachine만으로는 같은 컴퓨터의 다른 사용자가 파일을 읽는 상황을 충분히 막지
 못합니다. 설치기는 `%ProgramData%\SamsungSwitchWatch` 전체에 폐쇄형 ACL을 적용합니다.
@@ -40,13 +42,46 @@ DPAPI LocalMachine만으로는 같은 컴퓨터의 다른 사용자가 파일을
 - `SamsungSwitchWatchAgent` 서비스 SID: Modify
 - 일반 Users와 로그인 사용자의 직접·상속 읽기 권한: 제거
 
-설치기는 루트와 기존 하위 파일의 ACE를 다시 구성하고, 예상하지 않은 명시적·상속 규칙이
-남아 있으면 설치를 실패시킵니다. 따라서 일반 PC 사용자는 PFX나 설치 영수증을 읽을 수
-없습니다.
+서비스 자체는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정으로
+실행합니다. 계정과 서비스 SID는 해당 서비스 이름에 결속되며 공유 `LocalService` 계정으로
+신규 등록하지 않습니다.
+
+설치·업데이트·제거는 기존 설치 폴더와 DataDirectory의 내용을 읽거나 삭제하기 전에 루트
+소유자를 SID로 직접 확인합니다. 루트는 `SYSTEM`, 로컬 `Administrators` 또는 현재 elevated
+관리자 소유만 신뢰합니다. 계정명을 SID로 변환하거나 다른 로컬·도메인 그룹을 전개하지
+않으므로 폐쇄망의 디렉터리 조회 지연에 의존하지 않습니다.
+
+신규 설치는 DataDirectory 경로가 비어 있더라도 이미 존재하면 채택하지 않습니다. 업데이트와
+제거는 ACL 변경 전 전체 트리를 읽기 전용으로 검사한 다음 루트를 Administrators 소유와
+폐쇄형 ACL로 먼저 잠급니다. 이후 부모 디렉터리를 잠근 뒤 자식을 열거하는 순서로 소유자와
+ACE를 다시 검사·이관합니다. 기존 `LocalService` 서비스에서 생성된 DataDirectory 하위
+항목은 해당 서비스를 먼저 중지한 업데이트에서만 한 번 이관 대상으로 신뢰합니다. 정확한
+Agent 서비스 SID 소유 하위 항목은 정상 운영 결과로 허용하지만 프로그램 트리에는 두 예외를
+적용하지 않습니다. Builtin Users 등 비신뢰 owner나 junction·symlink가 발견되면
+`AGENT_DIRECTORY_TRUST_INVALID`로 fail-closed 중단합니다.
+
+마지막에는 트리를 새로 재열거하여 모든 owner가 Administrators인지, 루트와 상속 ACL에
+SYSTEM·Administrators·정확한 서비스 SID 외 규칙이 없는지, reparse point가 없는지 확인합니다.
+따라서 일반 PC 사용자는 PFX를 읽을 수 없습니다.
+
+`install-receipt.json`은 상위 DataDirectory와 달리 서비스 SID 권한을 상속하지 않습니다.
+파일 owner는 Administrators이고 SYSTEM·Administrators만 FullControl을 갖습니다. 설치
+영수증은 설치 경로와 증거를 확인하기 위한 자료이며 CIDR 권한원이 아닙니다. 업데이트의 스위치
+대상 CIDR은 검증된 `appsettings.Production.json`, Viewer 관리 CIDR은 정확히 제품이 소유한
+방화벽 규칙에서 가져옵니다. 데이터 영구 제거가 이 ACL 검사를 통과하지 못하면
+`AGENT_RECEIPT_TRUST_INVALID`로 중단합니다.
+
+설치 패키지는 먼저 SYSTEM·Administrators 전용 staging으로 복사한 뒤, 복사본의 모든 파일과
+Agent EXE SHA-256을 메모리에 읽어 둔 패키지 매니페스트와 다시 비교합니다. 이 재검증을
+통과한 staging만 프로그램 폴더와 교체합니다.
 
 업데이트는 DataDirectory 전체를 동일하게 제한된 트랜잭션 폴더에 백업합니다. HTTPS
-readiness 실패 시 이전 자료를 복구한 뒤 폐쇄형 ACL을 다시 적용합니다. 성공 시 설치
-트랜잭션용 복제본만 제거합니다.
+readiness 실패 시 이전 자료를 복구한 뒤 폐쇄형 ACL을 다시 적용합니다. 서비스 중지·삭제나
+선행 복구가 확인되지 않으면 실행 중인 파일을 삭제·덮어쓰는 후속 복구를 차단합니다. legacy
+program/data 이동이 일부만 완료된 경우에도 원래 위치와 archive를 그대로 보존합니다. rollback
+오류가 남으면 transaction snapshot, program backup, legacy archive와 journal 등 남아 있는
+증거를 자동 정리하지 않습니다. 모든 복구가 성공한 경우에만 설치 트랜잭션용 복제본을
+제거합니다.
 
 Agent 설치·제거 journal은 `%ProgramData%\SamsungSwitchWatch-Operations`에 저장합니다.
 설치기와 제거기는 기존 루트의 관리자 소유권과 reparse 여부를 확인한 뒤 루트 ACL을 먼저
@@ -149,7 +184,7 @@ Agent는 Viewer가 보낸 문자열을 그대로 신뢰하지 않습니다. 정�
 
 ## 가용성과 세션
 
-- Agent는 무창 `LocalService` Windows 서비스로 실행합니다.
+- Agent는 무창 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정 Windows 서비스로 실행합니다.
 - 일반 사용자가 닫을 창이나 트레이 종료 메뉴가 없습니다.
 - 서비스 실패 시 5초, 15초, 60초 재시작 정책을 적용합니다.
 - 장비마다 동시 세션 1개, 전체 최대 2개로 제한합니다.

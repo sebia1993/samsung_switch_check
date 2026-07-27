@@ -8,7 +8,8 @@
 - [ ] Agent ZIP과 Viewer ZIP의 Release 검증 완료
 - [ ] `Install-or-Update-Agent.cmd`에서 UAC 승인
 - [ ] Viewer 관리 CIDR과 스위치 대상 CIDR을 최소 범위로 입력
-- [ ] `SamsungSwitchWatchAgent` 서비스가 `LocalService`, 자동 시작으로 등록됨
+- [ ] `SamsungSwitchWatchAgent` 서비스가 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정,
+      자동 시작으로 등록됨
 - [ ] 서비스 실행 중 사용자 바탕 화면·작업 표시줄·트레이에 Agent 창이 없음
 - [ ] Agent EXE 직접 더블클릭 시 별도 프로세스가 남지 않음
 - [ ] RDP 연결 종료 후 서비스 계속 실행
@@ -22,6 +23,8 @@
 
 - [ ] `%ProgramData%\SamsungSwitchWatch`의 상속이 차단됨
 - [ ] SYSTEM, Administrators, Agent 서비스 SID만 허용됨
+- [ ] 루트와 모든 기존 하위 항목의 owner가 로컬 Administrators로 정규화됨
+- [ ] `install-receipt.json`은 서비스 SID 권한 없이 SYSTEM·Administrators만 접근 가능
 - [ ] 일반 Users 및 로그인 사용자가 데이터 폴더를 읽을 수 없음
 - [ ] Viewer 최초 연결에서 지문·토큰 입력 없이 자동 연결됨
 - [ ] Viewer 재실행 후 같은 Agent를 계속 신뢰함
@@ -107,13 +110,30 @@
 - [ ] v0.7 또는 v0.8 설치에서 v0.9 설치기가 업데이트 모드 자동 감지
 - [ ] 기존 Viewer 방화벽 주소와 장비 주소를 최소 `/32` CIDR로 이관
 - [ ] v0.9 재업데이트 시 관리 CIDR 재입력 없이 보존
+- [ ] 대상 CIDR은 설치 설정, Viewer 관리 CIDR은 정확한 제품 소유 방화벽 규칙에서 보존되고
+      install receipt를 CIDR 권한원으로 사용하지 않음
 - [ ] 업데이트 전후 Agent HTTPS 신원 동일
 - [ ] 업데이트 전후 ProgramData ACL 동일
+- [ ] 기존 `LocalService` 서비스는 중지 확인 뒤 1회만 전용 가상 계정으로 이관됨
+- [ ] 실행 중인 `LocalService` 소유 항목과 신규 설치에는 legacy owner 예외가 적용되지 않음
+- [ ] 정상 기존 설치를 같은 관리자 계정으로 업데이트할 때 owner·ACL 이관 성공
+- [ ] 비신뢰 root/child owner는 `AGENT_DIRECTORY_TRUST_INVALID`로 중단되고 내용·ACL이 변경되지 않음
+- [ ] junction·symlink가 포함된 install/data 트리는 외부 대상 변경 없이 거부됨
+- [ ] 설정 파일이 없는 설치 잔재도 root owner 검사 없이 재귀 삭제되지 않음
+- [ ] 사용자 지정 DataDirectory가 거부되고 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용됨
+- [ ] 신규 설치에서 빈 `%ProgramData%\SamsungSwitchWatch` 선점 폴더도 채택하지 않고 중단됨
+- [ ] 보호 staging 복사본을 재해시한 뒤에만 기존 프로그램을 교체함
+- [ ] staging 파일 변조 fixture는 기존 프로그램 교체 전에 실패함
 - [ ] v0.7 자격 증명·SQLite 자료가 `legacy-v0.7-backup-*`으로 이동해 자동 삭제되지 않음
 - [ ] legacy 백업 폴더와 하위 항목은 SYSTEM, Administrators만 접근 가능하고 Agent 서비스 SID는 제외됨
 - [ ] 강제 readiness 실패 시 이전 프로그램 복구
 - [ ] 강제 readiness 실패 시 ProgramData와 방화벽 복구
 - [ ] rollback 후 기존 Agent가 이전 프로토콜로 다시 실행
+- [ ] rollback 중 서비스 중지·삭제 실패 시 후속 파일 삭제·복구가 차단됨
+- [ ] legacy program/data 부분 이동 시 원래 위치와 archive가 모두 보존되고 후속 data 복구가 차단됨
+- [ ] rollback 오류 시 transaction snapshot, program backup, archive와 journal이 자동 정리되지 않음
+- [ ] `-RemoveData`는 Administrators 전용 receipt만 허용하고 그 외에는
+      `AGENT_RECEIPT_TRUST_INVALID`로 중단됨
 
 ## 9. 진단과 인수 기준
 

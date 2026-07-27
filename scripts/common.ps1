@@ -75,14 +75,17 @@ function Assert-SswProductPath {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$BaseRoot,
-        [Parameter(Mandatory = $true)][string]$ProductRelativeRoot
+        [Parameter(Mandatory = $true)][string]$ProductRelativeRoot,
+        [switch]$RequireExactProductRoot
     )
 
     $baseFull = [IO.Path]::GetFullPath($BaseRoot).TrimEnd('\')
     $productFull = [IO.Path]::GetFullPath((Join-Path $baseFull $ProductRelativeRoot)).TrimEnd('\')
     $targetFull = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    if (-not $targetFull.Equals($productFull, [StringComparison]::OrdinalIgnoreCase) -and
-        -not $targetFull.StartsWith(($productFull + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+    $isExact = $targetFull.Equals($productFull, [StringComparison]::OrdinalIgnoreCase)
+    if (($RequireExactProductRoot -and -not $isExact) -or
+        (-not $RequireExactProductRoot -and -not $isExact -and
+            -not $targetFull.StartsWith(($productFull + '\'), [StringComparison]::OrdinalIgnoreCase))) {
         throw "SamsungSwitchWatch 전용 안전 경로 밖입니다: $targetFull"
     }
     Assert-SswNoReparsePoint -Parent $baseFull -Child $targetFull
@@ -285,6 +288,322 @@ function Test-SswTrustedAdministrativeOwnerSid {
     return $false
 }
 
+function Get-SswAclOwnerSid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.AccessControl.FileSystemSecurity]$Acl
+    )
+
+    try {
+        return $Acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        throw 'Windows ACL owner SID를 직접 확인하지 못했습니다.'
+    }
+}
+
+function Get-SswFileSystemAccessRulesBySid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.AccessControl.FileSystemSecurity]$Acl
+    )
+
+    return @($Acl.GetAccessRules(
+        $true,
+        $true,
+        [Security.Principal.SecurityIdentifier]))
+}
+
+function Clear-SswFileSystemAccessRules {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.AccessControl.FileSystemSecurity]$Acl
+    )
+
+    $identitySids = @(
+        Get-SswFileSystemAccessRulesBySid -Acl $Acl |
+            ForEach-Object { $_.IdentityReference.Value } |
+            Select-Object -Unique
+    )
+    foreach ($identitySid in $identitySids) {
+        $Acl.PurgeAccessRules(
+            (New-Object Security.Principal.SecurityIdentifier($identitySid)))
+    }
+}
+
+function Test-SswAdministratorsOnlyFileAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    try {
+        $resolved = [IO.Path]::GetFullPath($Path)
+        if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) { return $false }
+        $item = Get-Item -LiteralPath $resolved -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $false
+        }
+
+        $acl = Get-Acl -LiteralPath $resolved
+        if ((Get-SswAclOwnerSid -Acl $acl) -ne 'S-1-5-32-544' -or
+            -not $acl.AreAccessRulesProtected) {
+            return $false
+        }
+        $rules = @(Get-SswFileSystemAccessRulesBySid -Acl $acl)
+        $requiredSids = @('S-1-5-18', 'S-1-5-32-544')
+        if ($rules.Count -ne $requiredSids.Count) { return $false }
+        foreach ($requiredSid in $requiredSids) {
+            $matches = @($rules | Where-Object {
+                $_.IdentityReference.Value -eq $requiredSid -and
+                -not $_.IsInherited -and
+                $_.AccessControlType -eq
+                    [Security.AccessControl.AccessControlType]::Allow -and
+                $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and
+                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+                $_.FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl
+            })
+            if ($matches.Count -ne 1) { return $false }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-SswAdministratorsOnlyFileAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-SswAdministratorsOnlyFileAcl -Path $Path)) {
+        throw 'AGENT_RECEIPT_TRUST_INVALID: Agent 설치 영수증이 Administrators 전용 일반 파일이 아니므로 신뢰하지 않습니다.'
+    }
+}
+
+function Set-SswAdministratorsOnlyFileAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolved = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        throw "관리자 전용 ACL을 설정할 파일이 없습니다: $resolved"
+    }
+    $item = Get-Item -LiteralPath $resolved -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AGENT_RECEIPT_TRUST_INVALID: junction 또는 symlink 설치 영수증은 사용하지 않습니다.'
+    }
+
+    $administratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $acl = Get-Acl -LiteralPath $resolved
+    $acl.SetOwner($administratorsSid)
+    $acl.SetAccessRuleProtection($true, $false)
+    Clear-SswFileSystemAccessRules -Acl $acl
+    foreach ($sid in @($systemSid, $administratorsSid)) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow)))
+    }
+    Set-Acl -LiteralPath $resolved -AclObject $acl
+    Assert-SswAdministratorsOnlyFileAcl -Path $resolved
+}
+
+function Assert-SswLegacyBackgroundRollbackReadyForDataRestore {
+    param(
+        [AllowNull()][string]$ArchivePath,
+        [bool]$ProgramMoveAttempted = $false,
+        [bool]$ProgramWasMoved,
+        [AllowNull()][string]$ProgramRestorePath,
+        [bool]$DataMoveAttempted = $false,
+        [bool]$DataWasMoved,
+        [AllowNull()][string]$DataRestorePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ArchivePath)) { return }
+    if (($ProgramMoveAttempted -and -not $ProgramWasMoved) -or
+        ($DataMoveAttempted -and -not $DataWasMoved)) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 이전 현재 사용자 Agent 폴더 이동이 부분적으로만 완료되어 활성 Agent data를 보존했습니다.'
+    }
+    foreach ($item in @(
+        [pscustomobject]@{
+            WasMoved = $ProgramWasMoved
+            Archive = Join-Path $ArchivePath 'program'
+            Restored = $ProgramRestorePath
+            Label = 'program'
+        },
+        [pscustomobject]@{
+            WasMoved = $DataWasMoved
+            Archive = Join-Path $ArchivePath 'data'
+            Restored = $DataRestorePath
+            Label = 'data'
+        }
+    )) {
+        if (-not $item.WasMoved) { continue }
+        if ((Test-Path -LiteralPath $item.Archive) -or
+            [string]::IsNullOrWhiteSpace([string]$item.Restored) -or
+            -not (Test-Path -LiteralPath ([string]$item.Restored) -PathType Container)) {
+            throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 이전 현재 사용자 Agent $($item.Label) 복구가 끝나지 않아 활성 Agent data를 보존했습니다."
+        }
+    }
+}
+
+function Get-SswProgramRollbackDisposition {
+    param(
+        [Parameter(Mandatory = $true)][bool]$IsUpdate,
+        [Parameter(Mandatory = $true)][bool]$InstallSwapped,
+        [Parameter(Mandatory = $true)][bool]$ProgramBackupTaken,
+        [Parameter(Mandatory = $true)][bool]$InstallExists,
+        [Parameter(Mandatory = $true)][bool]$ProgramBackupExists
+    )
+
+    if ($ProgramBackupTaken) {
+        if (-not $ProgramBackupExists) {
+            throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 이전 Agent 프로그램 백업이 없어 활성 프로그램을 보존했습니다.'
+        }
+        return 'RestoreBackup'
+    }
+    if ($ProgramBackupExists) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 기록되지 않은 Agent 프로그램 백업이 있어 자동 복구를 중단했습니다.'
+    }
+    if ($InstallSwapped) {
+        if ($IsUpdate) {
+            throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 업데이트 프로그램이 교체됐지만 이전 프로그램 백업이 없어 활성 프로그램을 보존했습니다.'
+        }
+        return 'QuarantineNewInstall'
+    }
+    if ($IsUpdate -and -not $InstallExists) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 프로그램 교체 전 실패했지만 이전 Agent 프로그램 폴더를 확인할 수 없습니다.'
+    }
+    if (-not $IsUpdate -and $InstallExists) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 신규 설치 프로그램 교체 완료 여부가 불명확해 활성 프로그램을 보존했습니다.'
+    }
+    return 'AlreadyIntact'
+}
+
+function Restore-SswDirectoryWithQuarantine {
+    param(
+        [Parameter(Mandatory = $true)][string]$ActivePath,
+        [Parameter(Mandatory = $true)][string]$BackupPath,
+        [Parameter(Mandatory = $true)][string]$QuarantinePath,
+        [switch]$BackupRequired
+    )
+
+    $active = [IO.Path]::GetFullPath($ActivePath).TrimEnd('\')
+    $backup = [IO.Path]::GetFullPath($BackupPath).TrimEnd('\')
+    $quarantine = [IO.Path]::GetFullPath($QuarantinePath).TrimEnd('\')
+    $distinct = @(@($active, $backup, $quarantine) | Sort-Object -Unique)
+    if ($distinct.Count -ne 3) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 복구 원본, 활성 경로 및 격리 경로가 서로 달라야 합니다.'
+    }
+    $roots = @(
+        @($active, $backup, $quarantine) |
+            ForEach-Object { [IO.Path]::GetPathRoot($_) } |
+            Sort-Object -Unique
+    )
+    if ($roots.Count -ne 1) {
+        throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 디렉터리 복구는 동일 볼륨의 원자적 이름 변경만 허용합니다.'
+    }
+    if ($BackupRequired -and -not (Test-Path -LiteralPath $backup -PathType Container)) {
+        throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 복구 원본 폴더가 없어 활성 사본을 보존했습니다: $backup"
+    }
+    if (Test-Path -LiteralPath $active) {
+        if (-not (Test-Path -LiteralPath $active -PathType Container)) {
+            throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 활성 복구 대상이 폴더가 아니므로 보존했습니다: $active"
+        }
+        $activeItem = Get-Item -LiteralPath $active -Force
+        if (($activeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 활성 복구 대상이 reparse point이므로 보존했습니다: $active"
+        }
+    }
+    if (Test-Path -LiteralPath $quarantine) {
+        throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 격리 경로가 이미 있어 활성 사본을 보존했습니다: $quarantine"
+    }
+
+    $activeQuarantined = $false
+    if (Test-Path -LiteralPath $active -PathType Container) {
+        try {
+            Move-Item -LiteralPath $active -Destination $quarantine -ErrorAction Stop
+            $activeQuarantined = $true
+        }
+        catch {
+            if (-not (Test-Path -LiteralPath $active) -and
+                (Test-Path -LiteralPath $quarantine -PathType Container)) {
+                try {
+                    Move-Item -LiteralPath $quarantine -Destination $active -ErrorAction Stop
+                }
+                catch {
+                    throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 활성 폴더 격리 중 오류가 발생했고 원위치 복구도 실패했습니다: $active"
+                }
+            }
+            throw
+        }
+    }
+
+    if ($BackupRequired) {
+        try {
+            Move-Item -LiteralPath $backup -Destination $active -ErrorAction Stop
+        }
+        catch {
+            if ($activeQuarantined -and
+                -not (Test-Path -LiteralPath $active) -and
+                (Test-Path -LiteralPath $quarantine -PathType Container)) {
+                try {
+                    Move-Item -LiteralPath $quarantine -Destination $active -ErrorAction Stop
+                    $activeQuarantined = $false
+                }
+                catch {
+                    throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 백업 복구와 활성 폴더 원위치 복구가 모두 실패했습니다: $active"
+                }
+            }
+            throw
+        }
+    }
+    return $activeQuarantined
+}
+
+function Assert-SswTrustedDirectoryRootOwner {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolved = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "AGENT_DIRECTORY_TRUST_INVALID: 신뢰할 Agent 폴더가 없습니다: $resolved"
+    }
+    $rootItem = Get-Item -LiteralPath $resolved -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: junction 또는 symlink Agent 폴더는 자동으로 채택하지 않습니다.'
+    }
+
+    $ownerSid = Get-SswAclOwnerSid -Acl (Get-Acl -LiteralPath $resolved)
+    if (-not (Test-SswTrustedAdministrativeOwnerSid -Sid $ownerSid)) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 폴더 소유자가 SYSTEM, Administrators 또는 현재 elevated 관리자가 아니므로 자동 변경을 중단했습니다.'
+    }
+    return $ownerSid
+}
+
+function Test-SswTrustedAgentDescendantOwnerSid {
+    param(
+        [Parameter(Mandatory = $true)][string]$OwnerSid,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [switch]$AllowLegacyLocalServiceOwner
+    )
+
+    $normalizedOwnerSid = (
+        New-Object Security.Principal.SecurityIdentifier($OwnerSid)).Value
+    $normalizedServiceSid = (
+        New-Object Security.Principal.SecurityIdentifier($ServiceSid)).Value
+    if ($normalizedOwnerSid -eq $normalizedServiceSid -or
+        ($AllowLegacyLocalServiceOwner -and $normalizedOwnerSid -eq 'S-1-5-19')) {
+        return $true
+    }
+    return Test-SswTrustedAdministrativeOwnerSid -Sid $normalizedOwnerSid
+}
+
 function Assert-SswBackgroundAgentReceipt {
     param(
         [Parameter(Mandatory = $true)][object]$Receipt,
@@ -342,7 +661,9 @@ function Set-SswRestrictedDirectoryAcl {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ServiceSid,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('ReadAndExecute', 'Modify')][string]$ServiceRights
+        [ValidateSet('ReadAndExecute', 'Modify')][string]$ServiceRights,
+        [switch]$AllowServiceOwnedDescendants,
+        [switch]$AllowLegacyLocalServiceOwnedDescendants
     )
 
     $resolved = [IO.Path]::GetFullPath($Path)
@@ -351,7 +672,7 @@ function Set-SswRestrictedDirectoryAcl {
     }
     $rootItem = Get-Item -LiteralPath $resolved -Force
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "junction 또는 symlink 폴더는 ACL을 자동 변경하지 않습니다: $resolved"
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: junction 또는 symlink Agent 폴더는 ACL을 자동 변경하지 않습니다.'
     }
 
     $systemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -360,20 +681,77 @@ function Set-SswRestrictedDirectoryAcl {
     $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $propagation = [Security.AccessControl.PropagationFlags]::None
     $allow = [Security.AccessControl.AccessControlType]::Allow
+    $allowedSids = @($systemSid.Value, $administratorsSid.Value, $agentSid.Value)
+    $ownerTrustCache = @{}
+    $testTrustedOwner = {
+        param(
+            [Parameter(Mandatory = $true)][string]$OwnerSid,
+            [switch]$AllowServiceOwner,
+            [switch]$AllowLegacyLocalServiceOwner
+        )
 
-    $descendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
-    $reparsePoint = $descendants | Where-Object {
-        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-    } | Select-Object -First 1
-    if ($reparsePoint) {
-        throw "junction 또는 symlink가 포함된 폴더 트리는 자동 변경하지 않습니다: $($reparsePoint.FullName)"
+        $cacheKey = '{0}|{1}|{2}' -f
+            ([bool]$AllowServiceOwner),
+            ([bool]$AllowLegacyLocalServiceOwner),
+            $OwnerSid
+        if (-not $ownerTrustCache.ContainsKey($cacheKey)) {
+            $ownerTrustCache[$cacheKey] = if ($AllowServiceOwner) {
+                Test-SswTrustedAgentDescendantOwnerSid `
+                    -OwnerSid $OwnerSid -ServiceSid $agentSid.Value `
+                    -AllowLegacyLocalServiceOwner:$AllowLegacyLocalServiceOwner
+            }
+            else {
+                Test-SswTrustedAdministrativeOwnerSid -Sid $OwnerSid
+            }
+        }
+        return [bool]$ownerTrustCache[$cacheKey]
     }
 
     $acl = Get-Acl -LiteralPath $resolved
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($identity in @($acl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
-        $acl.PurgeAccessRules($identity)
+    $rootOwnerSid = Get-SswAclOwnerSid -Acl $acl
+    if (-not (& $testTrustedOwner $rootOwnerSid)) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 루트 폴더 소유자가 SYSTEM, Administrators 또는 현재 elevated 관리자가 아니므로 자동 변경을 중단했습니다.'
     }
+
+    # Reject a static untrusted tree before changing any ACL. The root-first
+    # mutation pass below repeats every check so a race cannot bypass the gate.
+    $preflightDirectories = New-Object Collections.Generic.Queue[string]
+    $preflightDirectories.Enqueue($resolved)
+    while ($preflightDirectories.Count -gt 0) {
+        $parent = $preflightDirectories.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'AGENT_DIRECTORY_TRUST_INVALID: junction 또는 symlink가 포함된 Agent 폴더 트리는 자동 변경하지 않습니다.'
+            }
+            $existingOwnerSid = Get-SswAclOwnerSid -Acl (Get-Acl -LiteralPath $item.FullName)
+            $ownerTrusted = if ($AllowServiceOwnedDescendants) {
+                & $testTrustedOwner $existingOwnerSid -AllowServiceOwner `
+                    -AllowLegacyLocalServiceOwner:$AllowLegacyLocalServiceOwnedDescendants
+            }
+            else {
+                & $testTrustedOwner $existingOwnerSid
+            }
+            if (-not $ownerTrusted) {
+                throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 하위 항목 소유자를 신뢰할 수 없어 자동 변경을 중단했습니다.'
+            }
+            if ($item.PSIsContainer) {
+                $preflightDirectories.Enqueue($item.FullName)
+            }
+        }
+    }
+
+    $rootItem = Get-Item -LiteralPath $resolved -Force
+    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: junction 또는 symlink Agent 폴더는 ACL을 자동 변경하지 않습니다.'
+    }
+    $acl = Get-Acl -LiteralPath $resolved
+    $rootOwnerSid = Get-SswAclOwnerSid -Acl $acl
+    if (-not (& $testTrustedOwner $rootOwnerSid)) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 루트 폴더 소유자가 SYSTEM, Administrators 또는 현재 elevated 관리자가 아니므로 자동 변경을 중단했습니다.'
+    }
+    $acl.SetOwner($administratorsSid)
+    $acl.SetAccessRuleProtection($true, $false)
+    Clear-SswFileSystemAccessRules -Acl $acl
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
         $systemSid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow)))
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
@@ -382,40 +760,75 @@ function Set-SswRestrictedDirectoryAcl {
         $agentSid, [Security.AccessControl.FileSystemRights]::$ServiceRights, $inheritance, $propagation, $allow)))
     Set-Acl -LiteralPath $resolved -AclObject $acl
 
-    foreach ($item in $descendants | Sort-Object { $_.FullName.Length }) {
-        $childAcl = Get-Acl -LiteralPath $item.FullName
-        $childAcl.SetAccessRuleProtection($true, $false)
-        foreach ($identity in @($childAcl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
-            $childAcl.PurgeAccessRules($identity)
+    # Lock each parent before enumerating its children. A standard user can no
+    # longer insert a new child after that parent has been inspected.
+    $pendingDirectories = New-Object Collections.Generic.Queue[string]
+    $pendingDirectories.Enqueue($resolved)
+    while ($pendingDirectories.Count -gt 0) {
+        $parent = $pendingDirectories.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'AGENT_DIRECTORY_TRUST_INVALID: junction 또는 symlink가 포함된 Agent 폴더 트리는 자동 변경하지 않습니다.'
+            }
+
+            $childAcl = Get-Acl -LiteralPath $item.FullName
+            $childOwnerSid = Get-SswAclOwnerSid -Acl $childAcl
+            $ownerTrusted = if ($AllowServiceOwnedDescendants) {
+                & $testTrustedOwner $childOwnerSid -AllowServiceOwner `
+                    -AllowLegacyLocalServiceOwner:$AllowLegacyLocalServiceOwnedDescendants
+            }
+            else {
+                & $testTrustedOwner $childOwnerSid
+            }
+            if (-not $ownerTrusted) {
+                throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 하위 항목 소유자를 신뢰할 수 없어 자동 변경을 중단했습니다.'
+            }
+            $childAcl.SetOwner($administratorsSid)
+            $childAcl.SetAccessRuleProtection($true, $false)
+            Clear-SswFileSystemAccessRules -Acl $childAcl
+            $childAcl.SetAccessRuleProtection($false, $false)
+            Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
+
+            if ($item.PSIsContainer) {
+                $pendingDirectories.Enqueue($item.FullName)
+            }
         }
-        $childAcl.SetAccessRuleProtection($false, $false)
-        Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
     }
 
     $verified = Get-Acl -LiteralPath $resolved
-    $allowedSids = @($systemSid.Value, $administratorsSid.Value, $agentSid.Value)
-    $unexpected = @($verified.Access | Where-Object {
+    if ((Get-SswAclOwnerSid -Acl $verified) -ne $administratorsSid.Value) {
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 루트 폴더 소유자를 Administrators로 고정하지 못했습니다.'
+    }
+    $verifiedRules = @(Get-SswFileSystemAccessRulesBySid -Acl $verified)
+    $unexpected = @($verifiedRules | Where-Object {
         $_.IsInherited -or $_.AccessControlType -ne $allow -or
-        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+        $_.IdentityReference.Value -notin $allowedSids
     })
     if ($unexpected.Count -gt 0) {
-        throw "허용되지 않은 폴더 권한이 남아 있습니다: $resolved"
+        throw 'AGENT_DIRECTORY_TRUST_INVALID: 허용되지 않은 Agent 루트 폴더 권한이 남아 있습니다.'
     }
     foreach ($requiredSid in $allowedSids) {
-        if (-not ($verified.Access | Where-Object {
-            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $requiredSid
+        if (-not ($verifiedRules | Where-Object {
+            $_.IdentityReference.Value -eq $requiredSid
         })) {
-            throw "필수 폴더 권한을 확인하지 못했습니다: $requiredSid"
+            throw "AGENT_DIRECTORY_TRUST_INVALID: 필수 Agent 루트 폴더 권한을 확인하지 못했습니다: $requiredSid"
         }
     }
-    foreach ($item in $descendants) {
+    $verifiedDescendants = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -ErrorAction Stop)
+    foreach ($item in $verifiedDescendants) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'AGENT_DIRECTORY_TRUST_INVALID: ACL 적용 후 junction 또는 symlink가 발견되었습니다.'
+        }
         $childAcl = Get-Acl -LiteralPath $item.FullName
-        $invalidChildRule = $childAcl.Access | Where-Object {
+        if ((Get-SswAclOwnerSid -Acl $childAcl) -ne $administratorsSid.Value) {
+            throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 하위 항목 소유자를 Administrators로 고정하지 못했습니다.'
+        }
+        $invalidChildRule = Get-SswFileSystemAccessRulesBySid -Acl $childAcl | Where-Object {
             -not $_.IsInherited -or $_.AccessControlType -ne $allow -or
-            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+            $_.IdentityReference.Value -notin $allowedSids
         } | Select-Object -First 1
         if ($invalidChildRule) {
-            throw "하위 항목에 허용되지 않은 명시적 권한이 남아 있습니다: $($item.FullName)"
+            throw 'AGENT_DIRECTORY_TRUST_INVALID: Agent 하위 항목에 허용되지 않은 명시적 권한이 남아 있습니다.'
         }
     }
 }
@@ -594,8 +1007,7 @@ function Set-SswInstallerBackupAcl {
     $allow = [Security.AccessControl.AccessControlType]::Allow
     $ownerTrustCache = @{}
     $testExistingOwner = {
-        param([Parameter(Mandatory = $true)][string]$Owner)
-        $ownerSid = ConvertTo-SswIdentitySid -Identity $Owner
+        param([Parameter(Mandatory = $true)][string]$OwnerSid)
         if (-not $ownerTrustCache.ContainsKey($ownerSid)) {
             $ownerTrustCache[$ownerSid] = Test-SswTrustedAdministrativeOwnerSid -Sid $ownerSid
         }
@@ -604,14 +1016,34 @@ function Set-SswInstallerBackupAcl {
 
     $acl = Get-Acl -LiteralPath $resolved
     if ($ValidateExistingOwner -and
-        -not (& $testExistingOwner $acl.Owner)) {
+        -not (& $testExistingOwner (Get-SswAclOwnerSid -Acl $acl))) {
         throw "백업 폴더 소유자가 로컬 Administrators 구성원이 아닙니다: $resolved"
+    }
+    if ($ValidateExistingOwner) {
+        # Validate the complete existing tree before changing the root so a
+        # rejected child cannot leave a partially migrated operations ACL.
+        $preflightDirectories = New-Object Collections.Generic.Queue[string]
+        $preflightDirectories.Enqueue($resolved)
+        while ($preflightDirectories.Count -gt 0) {
+            $parent = $preflightDirectories.Dequeue()
+            foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop)) {
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "junction 또는 symlink가 포함된 백업 트리는 사용하지 않습니다: $($item.FullName)"
+                }
+                $existingOwnerSid = Get-SswAclOwnerSid -Acl (
+                    Get-Acl -LiteralPath $item.FullName)
+                if (-not (& $testExistingOwner $existingOwnerSid)) {
+                    throw "하위 백업 항목 소유자가 로컬 Administrators 구성원이 아닙니다: $($item.FullName)"
+                }
+                if ($item.PSIsContainer) {
+                    $preflightDirectories.Enqueue($item.FullName)
+                }
+            }
+        }
     }
     $acl.SetOwner($administratorsSid)
     $acl.SetAccessRuleProtection($true, $false)
-    foreach ($identity in @($acl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
-        $acl.PurgeAccessRules($identity)
-    }
+    Clear-SswFileSystemAccessRules -Acl $acl
     foreach ($sid in @($systemSid, $administratorsSid)) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
             $sid, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance, $propagation, $allow)))
@@ -631,14 +1063,12 @@ function Set-SswInstallerBackupAcl {
 
             $childAcl = Get-Acl -LiteralPath $item.FullName
             if ($ValidateExistingOwner -and
-                -not (& $testExistingOwner $childAcl.Owner)) {
+                -not (& $testExistingOwner (Get-SswAclOwnerSid -Acl $childAcl))) {
                 throw "하위 백업 항목 소유자가 로컬 Administrators 구성원이 아닙니다: $($item.FullName)"
             }
             $childAcl.SetOwner($administratorsSid)
             $childAcl.SetAccessRuleProtection($true, $false)
-            foreach ($identity in @($childAcl.Access | ForEach-Object { $_.IdentityReference } | Select-Object -Unique)) {
-                $childAcl.PurgeAccessRules($identity)
-            }
+            Clear-SswFileSystemAccessRules -Acl $childAcl
             $childAcl.SetAccessRuleProtection($false, $false)
             Set-Acl -LiteralPath $item.FullName -AclObject $childAcl
 
@@ -649,20 +1079,20 @@ function Set-SswInstallerBackupAcl {
     }
 
     $verified = Get-Acl -LiteralPath $resolved
-    if ($verified.Owner -and
-        (ConvertTo-SswIdentitySid -Identity $verified.Owner) -ne $administratorsSid.Value) {
+    if ((Get-SswAclOwnerSid -Acl $verified) -ne $administratorsSid.Value) {
         throw "백업 폴더 소유자가 로컬 Administrators가 아닙니다: $resolved"
     }
-    $unexpected = @($verified.Access | Where-Object {
+    $verifiedRules = @(Get-SswFileSystemAccessRulesBySid -Acl $verified)
+    $unexpected = @($verifiedRules | Where-Object {
         $_.IsInherited -or $_.AccessControlType -ne $allow -or
-        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+        $_.IdentityReference.Value -notin $allowedSids
     })
     if ($unexpected.Count -gt 0) {
         throw "허용되지 않은 백업 폴더 권한이 남아 있습니다: $resolved"
     }
     foreach ($requiredSid in $allowedSids) {
-        if (-not ($verified.Access | Where-Object {
-            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $requiredSid
+        if (-not ($verifiedRules | Where-Object {
+            $_.IdentityReference.Value -eq $requiredSid
         })) {
             throw "필수 백업 폴더 권한을 확인하지 못했습니다: $requiredSid"
         }
@@ -673,13 +1103,12 @@ function Set-SswInstallerBackupAcl {
             throw "ACL 적용 후 junction 또는 symlink가 발견되었습니다: $($item.FullName)"
         }
         $childAcl = Get-Acl -LiteralPath $item.FullName
-        if ($childAcl.Owner -and
-            (ConvertTo-SswIdentitySid -Identity $childAcl.Owner) -ne $administratorsSid.Value) {
+        if ((Get-SswAclOwnerSid -Acl $childAcl) -ne $administratorsSid.Value) {
             throw "하위 백업 항목 소유자가 로컬 Administrators가 아닙니다: $($item.FullName)"
         }
-        $invalidChildRule = $childAcl.Access | Where-Object {
+        $invalidChildRule = Get-SswFileSystemAccessRulesBySid -Acl $childAcl | Where-Object {
             -not $_.IsInherited -or $_.AccessControlType -ne $allow -or
-            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin $allowedSids
+            $_.IdentityReference.Value -notin $allowedSids
         } | Select-Object -First 1
         if ($invalidChildRule) {
             throw "하위 백업 항목에 허용되지 않은 명시적 권한이 남아 있습니다: $($item.FullName)"

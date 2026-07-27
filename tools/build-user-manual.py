@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.13-poc"
+VERSION = "0.9.14-poc"
 DOCUMENT_DATE = "2026-07-26"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -626,6 +626,7 @@ def add_cover(doc):
 
 def build_manual(output_path: Path, images_dir: Path):
     doc = Document()
+    doc.settings.odd_and_even_pages_header_footer = False
     section = doc.sections[0]
     configure_header_footer(section, first=True)
     define_styles(doc)
@@ -738,8 +739,37 @@ Viewer PC                 Agent PC                    Samsung Switch
 Viewer 관리망 CIDR 예: 192.0.2.0/24
 스위치 대상망 CIDR 예: 198.51.100.0/24
 서비스 이름          : SamsungSwitchWatchAgent
+서비스 계정          : NT SERVICE\\SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
-""",
+        """,
+    )
+    add_callout(
+        doc,
+        "기존 폴더 신뢰 검사",
+        "설치·업데이트·제거는 install/data 폴더의 owner SID와 junction·symlink를 먼저 "
+        "검사합니다. DataDirectory는 정확히 %ProgramData%\\SamsungSwitchWatch만 허용하며, "
+        "신규 설치에서는 빈 선점 폴더도 채택하지 않습니다. "
+        "AGENT_DIRECTORY_TRUST_INVALID가 표시되면 삭제나 강제 소유권 변경으로 우회하지 "
+        "말고 Windows 관리자에게 확인을 요청하세요.",
+        "danger",
+    )
+    add_callout(
+        doc,
+        "업데이트 안정성",
+        "패키지는 SYSTEM·Administrators 전용 staging으로 복사한 뒤 SHA-256을 다시 확인합니다. "
+        "install receipt는 관리자 전용 설치 증거이고, CIDR은 검증된 설정과 제품 소유 방화벽에서 "
+        "가져옵니다. rollback 선행 단계가 실패하면 후속 파일 변경을 멈추고 snapshot·archive·journal을 "
+        "보존합니다.",
+        "info",
+    )
+    add_callout(
+        doc,
+        "설치 실패와 Viewer 연결 거부",
+        "관리자 설치 창에 Agent installation failed가 표시되면 Cause 줄을 먼저 확인하세요. "
+        "설치가 완료되지 않은 동안 SamsungSwitchWatchAgent 서비스와 TCP/18443 listener가 없으므로 "
+        "Viewer에는 AGENT_CONNECTION_REFUSED가 표시됩니다. 이전 Agent 설치기를 반복 실행하거나 "
+        f"서비스를 수동 등록하지 말고 {VERSION} Agent 설치기를 사용하세요.",
+        "danger",
     )
     add_heading(doc, "Viewer 설치", 2, heading_num_id)
     add_steps(
@@ -962,7 +992,16 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("ID·로그인 PW·enable PW", "Viewer 사용자 프로필", "DPAPI CurrentUser 암호화"),
             ("주기 감시 기준 해시·이벤트", "Viewer 사용자 프로필", "원문 없이 로컬 저장"),
             ("수동 show 입력·출력", "Viewer 프로세스 메모리", "복사 가능, 종료 시 소멸"),
-            ("Agent HTTPS 신원·설치 영수증", "Agent PC ProgramData", "서비스/관리자 ACL"),
+            (
+                "Agent HTTPS 신원",
+                "%ProgramData%\\SamsungSwitchWatch",
+                "DPAPI LocalMachine + SYSTEM/Administrators/서비스 SID ACL",
+            ),
+            (
+                "Agent 설치 영수증",
+                "%ProgramData%\\SamsungSwitchWatch",
+                "Administrators owner + SYSTEM/Administrators 전용 ACL",
+            ),
             ("장비 계정·스위치 출력", "Agent", "저장하지 않음"),
         ],
         [2200, 3000, 4160],
@@ -973,6 +1012,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             "Viewer 설정 파일을 다른 PC나 다른 Windows 사용자에게 복사해도 계정은 복호화되지 않습니다.",
             "진단 파일에는 IP, ID, 비밀번호, 호스트명과 수동 명령 원문을 넣지 않습니다.",
             "레거시 백업은 SYSTEM과 로컬 Administrators만 접근할 수 있으며 Agent 서비스 SID에는 권한을 주지 않습니다.",
+            "대상 CIDR은 설치 설정, Viewer 관리 CIDR은 제품 소유 방화벽 규칙이 권한원이며 설치 영수증에서 복원하지 않습니다.",
             "Agent 방화벽은 Viewer 관리 CIDR만 HTTPS/18443에 접근하도록 제한합니다.",
             "Agent는 지정된 스위치 대상 CIDR과 고정 Telnet/23만 허용합니다.",
         ],
@@ -995,7 +1035,10 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("AGENT_DEPLOYMENT_RECOVERY_REQUIRED", "이전 Agent 설치·제거 미완료 또는 rollback 오류. journal·백업을 보존하고 관리자 확인"),
             ("AGENT_DEPLOYMENT_JOURNAL_INVALID", "Agent 작업 기록 손상 또는 미지원 형식. 기록을 삭제해 우회하지 말고 관리자 확인"),
             ("AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID", "작업 기록 폴더 소유자·ACL·파일 구성이 안전하지 않음. 관리자와 보안 정책 확인"),
+            ("AGENT_DIRECTORY_TRUST_INVALID", "활성 Agent install/data 트리의 owner 또는 reparse 구성을 신뢰할 수 없음. 삭제·강제 소유권 변경 없이 Windows 관리자 확인"),
+            ("AGENT_RECEIPT_TRUST_INVALID", "영구 삭제용 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. 영수증과 데이터 보존 후 관리자 확인"),
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
+            ("AGENT_CONNECTION_REFUSED", "Agent 설치 완료 여부 → SamsungSwitchWatchAgent 서비스 → TCP/18443 수신 상태"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
@@ -1020,12 +1063,26 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
     )
     add_callout(
         doc,
+        "Agent 폴더 신뢰 오류",
+        "AGENT_DIRECTORY_TRUST_INVALID는 작업 journal 오류가 아니라 활성 install/data 트리의 "
+        "소유권 또는 reparse 검사가 실패했다는 뜻입니다. DataDirectory는 정확히 "
+        "%ProgramData%\\SamsungSwitchWatch만 허용하고 신규 설치의 빈 선점 폴더도 거부합니다. "
+        "이전 릴리스의 owner가 현재 실행한 관리자와 다를 때도 fail-closed로 중단될 수 있습니다. "
+        "폴더와 설치 이력을 보존한 채 사내 Windows 관리자에게 확인하세요.",
+        "danger",
+    )
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(2)
+    add_callout(
+        doc,
         "Agent 중단 기록 보존",
         "%ProgramData%\\SamsungSwitchWatch-Operations, .__staging_*, .__backup_*와 legacy 백업은 "
         "자동 복구 자료가 아니라 관리자 판단 증거입니다. 작업 기록 루트는 부모부터 "
         "Administrators 소유와 SYSTEM·Administrators 전용 ACL로 이관하며, 64KiB를 넘는 "
         "journal은 파싱하지 않습니다. 이전 기록이 현재 실행한 관리자와 다른 계정 소유면 "
-        "자동 이관하지 않습니다. 오류가 표시되면 삭제·이동·이름 변경하지 마세요.",
+        "자동 이관하지 않습니다. 서비스 중지·삭제나 legacy 이동이 완결되지 않으면 후속 파일 "
+        "복구를 차단하고 snapshot·archive를 보존합니다. 오류가 표시되면 삭제·이동·이름 변경하지 "
+        "마세요.",
         "danger",
     )
     add_heading(doc, "현장 진단 파일", 2, heading_num_id)

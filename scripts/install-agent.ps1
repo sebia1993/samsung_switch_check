@@ -11,6 +11,7 @@
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 $serviceName = Get-SswAgentServiceName
+$virtualServiceAccount = "NT SERVICE\$serviceName"
 $httpsPort = 18443
 $source = [IO.Path]::GetFullPath($SourceDirectory)
 $install = [IO.Path]::GetFullPath($InstallDirectory)
@@ -38,6 +39,20 @@ function Read-SswJson {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
     try { return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json }
     catch { throw "$Label is invalid JSON: $($_.Exception.Message)" }
+}
+
+function New-SswServiceControlFailureMessage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [AllowNull()][object[]]$Output
+    )
+
+    $detail = (@($Output) | ForEach-Object { [string]$_ }) -join ' '
+    $detail = [regex]::Replace($detail, '[\x00-\x1F]+', ' ').Trim()
+    if ($detail.Length -gt 500) { $detail = $detail.Substring(0, 500) + '...' }
+    if (-not $detail) { $detail = 'No additional diagnostic was returned by Windows.' }
+    return "$Stage failed (sc.exe exit code $ExitCode). $detail"
 }
 
 function Resolve-SswCidrInput {
@@ -345,7 +360,8 @@ if ($source.TrimEnd('\').Equals($install.TrimEnd('\'), [StringComparison]::Ordin
     throw 'Extract the release ZIP outside the Program Files install directory.'
 }
 Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativeRoot 'SamsungSwitchWatch\Agent'
-Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData `
+    -ProductRelativeRoot 'SamsungSwitchWatch' -RequireExactProductRoot
 
 $sourceManifest = Read-SswJson -Path $sourceManifestPath -Label 'Agent package manifest'
 if ($sourceManifest.manifestVersion -ne 1 -or $sourceManifest.packageKind -ne 'Agent' -or
@@ -377,67 +393,110 @@ Initialize-SswAgentOperationsRoot -OperationsRoot $operationsRoot
 Assert-SswAgentDeploymentJournalsReady -OperationsRoot $operationsRoot
 $existingService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 $isUpdate = $null -ne $existingService
+$existingServiceConfiguration = if ($isUpdate) {
+    Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+}
+else { $null }
+if ($isUpdate -and [string]$existingServiceConfiguration.StartName -notin @(
+    'NT AUTHORITY\LocalService',
+    $virtualServiceAccount
+)) {
+    throw "The existing Agent service account is not supported for automatic update: $([string]$existingServiceConfiguration.StartName)"
+}
 $existingConfig = $null
 $existingReceipt = $null
 $preservedClientCidrs = @()
 $preservedTargetCidrs = @()
 $migratingLegacyAgentState = $false
 $legacyBackgroundState = Get-SswLegacyBackgroundState
+Assert-SswAgentFirewallNameSafety
+$oldHttpFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
+$oldHttpsFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
 if ($isUpdate -and $legacyBackgroundState) {
     throw "Windows 서비스와 이전 현재 사용자 예약 작업이 동시에 등록되어 있어 자동 이관하지 않습니다. 서비스 '$serviceName'과 예약 작업 '$legacyBackgroundTaskName' 중 실제 운영 중인 하나를 관리자가 확인·정리한 뒤 다시 실행하세요."
 }
 if ($isUpdate) {
+    $null = Assert-SswTrustedDirectoryRootOwner -Path $install
     if (-not (Test-Path -LiteralPath $installedConfigPath -PathType Leaf)) {
         throw 'The existing service is missing its configuration.'
     }
     $existingConfig = Read-SswJson -Path $installedConfigPath -Label 'Installed Agent configuration'
     $configuredData = [IO.Path]::GetFullPath([string]$existingConfig.Agent.DataDirectory)
-    Assert-SswProductPath -Path $configuredData -BaseRoot $env:ProgramData -ProductRelativeRoot 'SamsungSwitchWatch'
+    Assert-SswProductPath -Path $configuredData -BaseRoot $env:ProgramData `
+        -ProductRelativeRoot 'SamsungSwitchWatch' -RequireExactProductRoot
     if ($PSBoundParameters.ContainsKey('DataDirectory') -and
         -not $data.Equals($configuredData, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'DataDirectory does not match the existing Agent configuration.'
     }
     $data = $configuredData
+    $null = Assert-SswTrustedDirectoryRootOwner -Path $data
     $receiptPath = Join-Path $data 'install-receipt.json'
     if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) {
         throw 'The existing service is missing its install receipt.'
     }
-    $existingReceipt = Read-SswJson -Path $receiptPath -Label 'Installed Agent receipt'
-    if ([int]$existingReceipt.receiptVersion -eq 3) {
-        $validatedReceipt = Assert-SswAgentExecutorReceipt -Receipt $existingReceipt `
-            -InstallDirectory $install -DataDirectory $data
-        $AgentId = $validatedReceipt.AgentId
-        $preservedClientCidrs = @($validatedReceipt.ClientManagementCidrs)
-        $preservedTargetCidrs = @($validatedReceipt.AllowedTargetCidrs)
+    $receiptIsAdministratorsOnly = Test-SswAdministratorsOnlyFileAcl -Path $receiptPath
+    if ($receiptIsAdministratorsOnly) {
+        $existingReceipt = Read-SswJson -Path $receiptPath -Label 'Installed Agent receipt'
     }
     else {
+        Write-Host '  migration: service-writable install receipt will be ignored and replaced by an Administrators-only receipt'
+    }
+
+    $AgentId = [string]$existingConfig.Agent.AgentId
+    if ($AgentId -notmatch '^[A-Za-z0-9_-]{1,64}$') {
+        throw 'The installed Agent configuration contains an invalid AgentId.'
+    }
+    $legacySwitches = if ($existingConfig.Agent.PSObject.Properties['Switches']) {
+        @($existingConfig.Agent.Switches)
+    }
+    else { @() }
+    if ($legacySwitches.Count -gt 0) {
         $migratingLegacyAgentState = $true
-        $legacySwitches = @($existingConfig.Agent.Switches)
-        if ($legacySwitches.Count -lt 1) { throw 'Legacy Agent inventory is empty and cannot be migrated safely.' }
         $legacyInventoryHash = Get-SswSwitchInventoryHash -Switches $legacySwitches
-        $null = Assert-SswAgentInstallReceipt -Receipt $existingReceipt `
-            -AgentId ([string]$existingConfig.Agent.AgentId) `
-            -SwitchInventoryHash $legacyInventoryHash -SwitchCount $legacySwitches.Count
-        $AgentId = [string]$existingConfig.Agent.AgentId
-        $legacyClientAddresses = if ($existingReceipt.PSObject.Properties['viewerRemoteAddresses']) {
-            @($existingReceipt.viewerRemoteAddresses)
-        } else { @() }
-        if ($legacyClientAddresses.Count -eq 0) {
-            $legacyFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
-            if (-not $legacyFirewall) {
-                $legacyFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+        if ($existingReceipt) {
+            if ([int]$existingReceipt.receiptVersion -eq 3) {
+                throw 'The Administrators-only install receipt does not match the legacy Agent configuration.'
             }
-            if ($legacyFirewall) { $legacyClientAddresses = @($legacyFirewall.RemoteAddress) }
+            $null = Assert-SswAgentInstallReceipt -Receipt $existingReceipt `
+                -AgentId $AgentId -SwitchInventoryHash $legacyInventoryHash `
+                -SwitchCount $legacySwitches.Count
         }
-        $preservedClientCidrs = @($legacyClientAddresses | ForEach-Object {
-            $address = [string]$_
-            if ($address -match '/') { $address } else { "$address/32" }
-        })
         $preservedTargetCidrs = @($legacySwitches | ForEach-Object {
             $hostAddress = [string]$_.Host
             if ($hostAddress -match '/') { $hostAddress } else { "$hostAddress/32" }
         })
         Write-Host '  migration: legacy inventory/firewall addresses will seed target and management CIDR gates'
+    }
+    else {
+        $configuredTargetCidrs = if (
+            $existingConfig.Agent.PSObject.Properties['AllowedTargetCidrs']) {
+            @($existingConfig.Agent.AllowedTargetCidrs)
+        }
+        else { @() }
+        if ($configuredTargetCidrs.Count -lt 1) {
+            throw 'The installed Agent configuration has no allowed target CIDRs.'
+        }
+        $preservedTargetCidrs = @(ConvertTo-SswIpv4Cidrs -Cidr $configuredTargetCidrs)
+        if ($existingReceipt) {
+            if ([int]$existingReceipt.receiptVersion -ne 3) {
+                throw 'The Administrators-only install receipt does not match the stateless Agent configuration.'
+            }
+            $null = Assert-SswAgentExecutorReceipt -Receipt $existingReceipt `
+                -InstallDirectory $install -DataDirectory $data
+        }
+    }
+
+    $existingManagementFirewall = if ($oldHttpsFirewall) {
+        $oldHttpsFirewall
+    }
+    else {
+        $oldHttpFirewall
+    }
+    if ($existingManagementFirewall) {
+        $preservedClientCidrs = @($existingManagementFirewall.RemoteAddress | ForEach-Object {
+            $address = [string]$_
+            if ($address -match '/') { $address } else { "$address/32" }
+        })
     }
     if ([string]$existingConfig.Agent.ListenUrl -ne 'https://0.0.0.0:18443') {
         Write-Host '  migration: legacy listener will be replaced by fixed HTTPS/18443'
@@ -446,9 +505,9 @@ if ($isUpdate) {
 elseif ((Test-Path -LiteralPath $install) -or (Test-Path -LiteralPath $receiptPath)) {
     throw 'Install remnants exist without the registered Agent service. Inspect or uninstall them before reinstalling.'
 }
-elseif ((Test-Path -LiteralPath $data -PathType Container) -and
-    @(Get-ChildItem -LiteralPath $data -Force).Count -gt 0) {
-    throw 'A non-empty Agent data directory exists without a registered service and valid receipt. Refusing to adopt unknown HTTPS identity data.'
+elseif (Test-Path -LiteralPath $data -PathType Container) {
+    $null = Assert-SswTrustedDirectoryRootOwner -Path $data
+    throw 'An Agent data directory exists without a registered service and valid receipt. Refusing to adopt even an empty pre-existing directory.'
 }
 if ($legacyBackgroundState) {
     if (-not $isUpdate) {
@@ -466,8 +525,6 @@ $clientCidrs = @(Resolve-SswCidrInput -Requested $ClientManagementCidrs -Preserv
 $targetCidrs = @(Resolve-SswCidrInput -Requested $AllowedTargetCidrs -Preserved $preservedTargetCidrs `
     -Prompt '스위치 관리 IP가 있는 CIDR (예: 10.40.0.0/16, 여러 개는 쉼표로 구분)')
 
-$oldHttpFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Http'
-$oldHttpsFirewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
 Assert-SswAgentFirewallGateReady -Port $httpsPort -AgentExecutablePath $installedExe
 
 Write-Host "  작업 구분     : $(if ($isUpdate) { '기존 Agent 업데이트' } else { '신규 Agent 설치' })"
@@ -482,25 +539,35 @@ if ($Preflight) {
 }
 
 $transactionId = [Guid]::NewGuid().ToString('N')
+$serviceSid = Get-SswServiceSid -Name $serviceName
 $installParent = Split-Path $install -Parent
 $transactionRoot = Join-Path $operationsRoot "transactions\$transactionId"
 $staging = "$install.__staging_$transactionId"
 $programBackup = "$install.__backup_$transactionId"
+$failedProgram = "$install.__failed_$transactionId"
 $dataSnapshot = Join-Path $transactionRoot 'data'
+$failedData = Join-Path $transactionRoot 'failed-active-data'
 $serviceCreated = $false
 $installSwapped = $false
+$programBackupTaken = $false
 $dataExisted = Test-Path -LiteralPath $data -PathType Container
+$dataCreationAttempted = $false
 $dataCreated = $false
 $dataSnapshotTaken = $false
 $firewallChanged = $false
 $transactionCommitted = $false
-$previousServiceWasRunning = $isUpdate -and $existingService.Status -eq 'Running'
-$previousService = if ($isUpdate) { Get-CimInstance Win32_Service -Filter "Name='$serviceName'" } else { $null }
+$serviceQuiescenceRequired = $false
+$previousServiceWasRunning = $false
+$previousService = $existingServiceConfiguration
+$previousServiceUsesLocalService = $isUpdate -and
+    [string]$previousService.StartName -ieq 'NT AUTHORITY\LocalService'
 $previousUsesHttps = $isUpdate -and [string]$existingConfig.Agent.ListenUrl -like 'https://*'
 $legacyBackgroundTaskTouched = $false
 $legacyBackgroundTaskRemoved = $false
 $legacyBackgroundArchive = $null
+$legacyBackgroundProgramMoveAttempted = $false
 $legacyBackgroundProgramMoved = $false
+$legacyBackgroundDataMoveAttempted = $false
 $legacyBackgroundDataMoved = $false
 
 Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
@@ -509,9 +576,26 @@ Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update
 try {
     Write-SswStep 'Stage verified package'
     New-Item -ItemType Directory -Path $installParent, $staging, $transactionRoot -Force | Out-Null
+    Set-SswInstallerBackupAcl -Path $staging
     Set-SswInstallerBackupAcl -Path $transactionRoot
     foreach ($file in @($sourceManifest.files)) {
         Copy-Item -LiteralPath (Join-Path $source ([string]$file.name)) -Destination $staging -Force
+    }
+    Write-SswStep 'Re-verify package inside protected staging'
+    foreach ($file in @($sourceManifest.files)) {
+        $stagedPath = Join-Path $staging ([string]$file.name)
+        if (-not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
+            throw "Staged package file is missing: $([string]$file.name)"
+        }
+        $stagedHash = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($stagedHash -ne ([string]$file.sha256).ToLowerInvariant()) {
+            throw "Staged package hash mismatch: $([string]$file.name)"
+        }
+    }
+    $stagedExe = Join-Path $staging 'SamsungSwitchWatch.Agent.exe'
+    if ((Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) {
+        throw 'Staged Agent executable hash does not match the in-memory package manifest.'
     }
     $newConfig = New-SswExecutorConfiguration -ResolvedAgentId $AgentId -TargetCidrs $targetCidrs
     [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
@@ -539,27 +623,70 @@ try {
         $legacyBackgroundTaskRemoved = $true
     }
 
-    if ($isUpdate -and $existingService.Status -ne 'Stopped') {
+    $serviceAtMutationBoundary = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($isUpdate) {
+        if (-not $serviceAtMutationBoundary) {
+            throw 'The existing Agent service disappeared during installation preparation.'
+        }
+        $serviceConfigurationAtMutationBoundary = Get-CimInstance Win32_Service `
+            -Filter "Name='$serviceName'" -ErrorAction Stop
+        if ([string]$serviceConfigurationAtMutationBoundary.PathName -cne
+                [string]$previousService.PathName -or
+            [string]$serviceConfigurationAtMutationBoundary.StartName -ine
+                [string]$previousService.StartName -or
+            [string]$serviceConfigurationAtMutationBoundary.StartMode -cne
+                [string]$previousService.StartMode) {
+            throw 'The existing Agent service configuration changed during installation preparation. No Agent files were changed.'
+        }
+        $previousService = $serviceConfigurationAtMutationBoundary
+        $previousServiceWasRunning = $serviceAtMutationBoundary.Status -eq 'Running'
+        $previousServiceUsesLocalService =
+            [string]$previousService.StartName -ieq 'NT AUTHORITY\LocalService'
+    }
+    elseif ($serviceAtMutationBoundary) {
+        throw 'The Agent service appeared during installation preparation. No Agent files were changed.'
+    }
+
+    $serviceQuiescenceRequired = $true
+    if ($isUpdate -and $serviceAtMutationBoundary.Status -ne 'Stopped') {
         Write-SswStep 'Stop existing Agent service'
         Stop-Service -Name $serviceName -Force
-        (Get-Service -Name $serviceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+        $serviceAtMutationBoundary.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+    }
+    if ($isUpdate) {
+        $stoppedService = Get-Service -Name $serviceName -ErrorAction Stop
+        if ($stoppedService.Status -ne 'Stopped') {
+            throw 'The existing Agent service did not reach the stopped state.'
+        }
     }
     if (-not (Test-SswTcpPortAvailable -Port $httpsPort)) {
         throw 'TCP/18443 is still occupied after stopping the existing Agent.'
     }
 
-    Write-SswStep 'Back up persistent Agent identity and configuration data'
+    Write-SswStep 'Secure and back up persistent Agent identity and configuration data'
+    Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData `
+        -ProductRelativeRoot 'SamsungSwitchWatch' -RequireExactProductRoot
+    if (-not $dataExisted) {
+        # Do not use -Force here. If another process creates the directory after
+        # preflight, creation must fail instead of adopting an untrusted root.
+        $dataCreationAttempted = $true
+        New-Item -ItemType Directory -Path $data -ErrorAction Stop | Out-Null
+    }
+    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid `
+        -ServiceRights Modify -AllowServiceOwnedDescendants `
+        -AllowLegacyLocalServiceOwnedDescendants:$previousServiceUsesLocalService
+    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+        Set-SswAdministratorsOnlyFileAcl -Path $receiptPath
+    }
+    if (-not $dataExisted) {
+        # Only treat the root as our rollback artifact after ownership and ACL
+        # normalization succeeds. A raced replacement must never be deleted.
+        $dataCreated = $true
+    }
     if ($dataExisted) {
-        $reparse = Get-ChildItem -LiteralPath $data -Recurse -Force -ErrorAction Stop |
-            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
-            Select-Object -First 1
-        if ($reparse) { throw "Agent data contains a junction or symlink: $($reparse.FullName)" }
         Copy-Item -LiteralPath $data -Destination $dataSnapshot -Recurse -Force
         $dataSnapshotTaken = $true
-    }
-    else {
-        New-Item -ItemType Directory -Path $data -Force | Out-Null
-        $dataCreated = $true
+        Set-SswInstallerBackupAcl -Path $dataSnapshot
     }
     if ($legacyBackgroundState -and $legacyBackgroundState.IdentityFilesAvailable) {
         Write-SswStep 'Preserve current-user Agent HTTPS identity'
@@ -572,33 +699,86 @@ try {
     Write-SswStep 'Atomically swap Agent program files'
     if (Test-Path -LiteralPath $install -PathType Container) {
         Move-Item -LiteralPath $install -Destination $programBackup
+        $programBackupTaken = $true
+        Set-SswInstallerBackupAcl -Path $programBackup
     }
     Move-Item -LiteralPath $staging -Destination $install
     $installSwapped = $true
 
-    $serviceBinPath = "`"$installedExe`" --service"
+    # Windows PowerShell 5.1 strips unescaped embedded quotes when invoking a
+    # native executable. Prefix the quotes with backslashes so sc.exe receives
+    # one binPath value containing the literal executable-path quotes.
+    $serviceBinPathForSc = '\"' + $installedExe + '\" --service'
     if (-not $isUpdate) {
-        & sc.exe create $serviceName "binPath= $serviceBinPath" 'start= auto' 'obj= NT AUTHORITY\LocalService' `
-            'DisplayName= Samsung Switch Watch Agent' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows service registration failed.' }
-        $serviceCreated = $true
+        $serviceCreateOutput = @(& sc.exe create $serviceName 'binPath=' $serviceBinPathForSc 'start=' 'auto' `
+            'obj=' $virtualServiceAccount `
+            'DisplayName=' 'Samsung Switch Watch Agent' 2>&1)
+        $serviceCreateExitCode = $LASTEXITCODE
+        if ($serviceCreateExitCode -eq 0) { $serviceCreated = $true }
+        if ($serviceCreateExitCode -ne 0) {
+            throw (New-SswServiceControlFailureMessage `
+                -Stage 'Windows service registration' -ExitCode $serviceCreateExitCode `
+                -Output $serviceCreateOutput)
+        }
+        if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+            throw 'Windows service registration returned success but the service is missing.'
+        }
     }
     else {
-        & sc.exe config $serviceName "binPath= $serviceBinPath" 'start= auto' 'obj= NT AUTHORITY\LocalService' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'Windows service update failed.' }
+        $serviceUpdateOutput = @(& sc.exe config $serviceName 'binPath=' $serviceBinPathForSc 'start=' 'auto' `
+            'obj=' $virtualServiceAccount 2>&1)
+        $serviceUpdateExitCode = $LASTEXITCODE
+        if ($serviceUpdateExitCode -ne 0) {
+            throw (New-SswServiceControlFailureMessage `
+                -Stage 'Windows service update' -ExitCode $serviceUpdateExitCode `
+                -Output $serviceUpdateOutput)
+        }
     }
-    & sc.exe description $serviceName 'Windowless Samsung switch Telnet execution Agent' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows service description update failed.' }
-    & sc.exe failure $serviceName 'reset= 86400' 'actions= restart/5000/restart/15000/restart/60000' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows service recovery policy update failed.' }
-    & sc.exe failureflag $serviceName 1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows service failure flag update failed.' }
-    & sc.exe sidtype $serviceName unrestricted | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Windows service SID activation failed.' }
+    $serviceDescriptionOutput = @(& sc.exe description $serviceName `
+        'Windowless Samsung switch Telnet execution Agent' 2>&1)
+    $serviceDescriptionExitCode = $LASTEXITCODE
+    if ($serviceDescriptionExitCode -ne 0) {
+        throw (New-SswServiceControlFailureMessage `
+            -Stage 'Windows service description update' -ExitCode $serviceDescriptionExitCode `
+            -Output $serviceDescriptionOutput)
+    }
+    $serviceRecoveryOutput = @(& sc.exe failure $serviceName 'reset=' '86400' `
+        'actions=' 'restart/5000/restart/15000/restart/60000' 2>&1)
+    $serviceRecoveryExitCode = $LASTEXITCODE
+    if ($serviceRecoveryExitCode -ne 0) {
+        throw (New-SswServiceControlFailureMessage `
+            -Stage 'Windows service recovery policy update' -ExitCode $serviceRecoveryExitCode `
+            -Output $serviceRecoveryOutput)
+    }
+    $serviceFailureFlagOutput = @(& sc.exe failureflag $serviceName 1 2>&1)
+    $serviceFailureFlagExitCode = $LASTEXITCODE
+    if ($serviceFailureFlagExitCode -ne 0) {
+        throw (New-SswServiceControlFailureMessage `
+            -Stage 'Windows service failure flag update' -ExitCode $serviceFailureFlagExitCode `
+            -Output $serviceFailureFlagOutput)
+    }
+    $serviceSidOutput = @(& sc.exe sidtype $serviceName unrestricted 2>&1)
+    $serviceSidExitCode = $LASTEXITCODE
+    if ($serviceSidExitCode -ne 0) {
+        throw (New-SswServiceControlFailureMessage `
+            -Stage 'Windows service SID activation' -ExitCode $serviceSidExitCode `
+            -Output $serviceSidOutput)
+    }
+    $expectedServicePath = "`"$installedExe`" --service"
+    $appliedServiceConfiguration = Get-CimInstance Win32_Service `
+        -Filter "Name='$serviceName'" -ErrorAction Stop
+    if ([string]$appliedServiceConfiguration.PathName -cne $expectedServicePath -or
+        [string]$appliedServiceConfiguration.StartName -ine $virtualServiceAccount -or
+        [string]$appliedServiceConfiguration.StartMode -cne 'Auto') {
+        throw 'Windows service registration postcondition failed.'
+    }
 
-    $serviceSid = Get-SswServiceSid -Name $serviceName
     Set-SswRestrictedDirectoryAcl -Path $install -ServiceSid $serviceSid -ServiceRights ReadAndExecute
-    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid -ServiceRights Modify
+    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $serviceSid `
+        -ServiceRights Modify -AllowServiceOwnedDescendants
+    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+        Set-SswAdministratorsOnlyFileAcl -Path $receiptPath
+    }
     foreach ($existingLegacyArchive in @(Get-ChildItem -LiteralPath $data `
         -Directory -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -like 'legacy-v0.7-backup-*' -or
@@ -619,6 +799,30 @@ try {
         throw 'The applied HTTPS firewall rule does not match the requested management CIDRs.'
     }
 
+    $receipt = [ordered]@{
+        receiptVersion = 3
+        product = 'SamsungSwitchWatchAgent'
+        agentId = $AgentId
+        installDirectory = $install
+        dataDirectory = $data
+        httpsPort = 18443
+        clientManagementCidrs = @($clientCidrs)
+        allowedTargetCidrs = @($targetCidrs)
+        installedVersion = [string]$sourceManifest.version
+        sourceCommit = [string]$sourceManifest.sourceCommit
+        legacyBackgroundTaskMigrated = [bool]($null -ne $legacyBackgroundState)
+        updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
+    } | ConvertTo-Json -Depth 8
+    $temporaryReceipt = "$receiptPath.$transactionId.tmp"
+    [IO.File]::WriteAllText($temporaryReceipt, $receipt, (New-Object Text.UTF8Encoding($false)))
+    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
+        $receiptReplaceBackup = "$receiptPath.$transactionId.bak"
+        [IO.File]::Replace($temporaryReceipt, $receiptPath, $receiptReplaceBackup, $true)
+        Remove-Item -LiteralPath $receiptReplaceBackup -Force
+    }
+    else { Move-Item -LiteralPath $temporaryReceipt -Destination $receiptPath }
+    Set-SswAdministratorsOnlyFileAcl -Path $receiptPath
+
     Write-SswStep 'Start windowless service and verify HTTPS readiness'
     Start-Service -Name $serviceName
     $ready = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps
@@ -631,13 +835,36 @@ try {
             ([Guid]::NewGuid().ToString('N').Substring(0, 8))
         $legacyBackgroundArchive = Join-Path $data $legacyBackgroundArchiveName
         Assert-SswChildPath -Parent $data -Child $legacyBackgroundArchive
-        New-Item -ItemType Directory -Path $legacyBackgroundArchive -Force | Out-Null
-        Move-Item -LiteralPath $legacyBackgroundState.InstallDirectory `
-            -Destination (Join-Path $legacyBackgroundArchive 'program')
-        $legacyBackgroundProgramMoved = $true
-        Move-Item -LiteralPath $legacyBackgroundState.DataDirectory `
-            -Destination (Join-Path $legacyBackgroundArchive 'data')
-        $legacyBackgroundDataMoved = $true
+        New-Item -ItemType Directory -Path $legacyBackgroundArchive -ErrorAction Stop | Out-Null
+        Set-SswInstallerBackupAcl -Path $legacyBackgroundArchive
+        $legacyBackgroundProgramDestination = Join-Path $legacyBackgroundArchive 'program'
+        $legacyBackgroundProgramMoveAttempted = $true
+        try {
+            Move-Item -LiteralPath $legacyBackgroundState.InstallDirectory `
+                -Destination $legacyBackgroundProgramDestination -ErrorAction Stop
+            $legacyBackgroundProgramMoved = $true
+        }
+        catch {
+            if (-not (Test-Path -LiteralPath $legacyBackgroundState.InstallDirectory) -and
+                (Test-Path -LiteralPath $legacyBackgroundProgramDestination -PathType Container)) {
+                $legacyBackgroundProgramMoved = $true
+            }
+            throw
+        }
+        $legacyBackgroundDataDestination = Join-Path $legacyBackgroundArchive 'data'
+        $legacyBackgroundDataMoveAttempted = $true
+        try {
+            Move-Item -LiteralPath $legacyBackgroundState.DataDirectory `
+                -Destination $legacyBackgroundDataDestination -ErrorAction Stop
+            $legacyBackgroundDataMoved = $true
+        }
+        catch {
+            if (-not (Test-Path -LiteralPath $legacyBackgroundState.DataDirectory) -and
+                (Test-Path -LiteralPath $legacyBackgroundDataDestination -PathType Container)) {
+                $legacyBackgroundDataMoved = $true
+            }
+            throw
+        }
         $backgroundArchiveMetadata = [ordered]@{
             formatVersion = 1
             source = 'SamsungSwitchWatch current-user scheduled-task Agent'
@@ -692,29 +919,6 @@ try {
         Write-Host "  legacy backup : $legacyArchive"
     }
 
-    $receipt = [ordered]@{
-        receiptVersion = 3
-        product = 'SamsungSwitchWatchAgent'
-        agentId = $AgentId
-        installDirectory = $install
-        dataDirectory = $data
-        httpsPort = 18443
-        clientManagementCidrs = @($clientCidrs)
-        allowedTargetCidrs = @($targetCidrs)
-        installedVersion = [string]$sourceManifest.version
-        sourceCommit = [string]$sourceManifest.sourceCommit
-        legacyBackgroundTaskMigrated = [bool]($null -ne $legacyBackgroundState)
-        updatedUtc = [DateTimeOffset]::UtcNow.ToString('O')
-    } | ConvertTo-Json -Depth 8
-    $temporaryReceipt = "$receiptPath.$transactionId.tmp"
-    [IO.File]::WriteAllText($temporaryReceipt, $receipt, (New-Object Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
-        $receiptReplaceBackup = "$receiptPath.$transactionId.bak"
-        [IO.File]::Replace($temporaryReceipt, $receiptPath, $receiptReplaceBackup, $true)
-        Remove-Item -LiteralPath $receiptReplaceBackup -Force
-    }
-    else { Move-Item -LiteralPath $temporaryReceipt -Destination $receiptPath }
-
     Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
         -TransactionId $transactionId -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
     $transactionCommitted = $true
@@ -737,41 +941,131 @@ catch {
         return
     }
     Write-Warning 'Install or update failed. Restoring the previous service, data, and firewall state.'
+    $rollbackState = [pscustomobject]@{
+        ServiceQuiesced = $false
+        ServiceRegistrationReady = $false
+        ProgramRestored = $false
+        ServiceConfigurationRestored = $false
+        LegacyBackgroundFilesRestored = $false
+        DataRestored = $false
+    }
     $rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'stop-new-service'; Action = {
-            $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            if ($current -and $current.Status -ne 'Stopped') {
-                Stop-Service -Name $serviceName -Force
-                $current.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+            if ($serviceQuiescenceRequired) {
+                $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($current -and $current.Status -ne 'Stopped') {
+                    Stop-Service -Name $serviceName -Force
+                    $current.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20))
+                }
+                $current = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                if ($current -and $current.Status -ne 'Stopped') {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Agent service did not stop; destructive rollback is blocked.'
+                }
             }
+            $rollbackState.ServiceQuiesced = $true
         } },
         [pscustomobject]@{ Name = 'delete-new-service'; Action = {
+            if (-not $rollbackState.ServiceQuiesced) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Service stop was not confirmed; service deletion is blocked.'
+            }
             if ($serviceCreated) {
                 & sc.exe delete $serviceName | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw 'Service delete failed.' }
                 Wait-SswServiceDeleted -Name $serviceName -TimeoutSeconds 20
+                if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: New Agent service deletion was not confirmed.'
+                }
             }
+            elseif (-not $isUpdate -and
+                (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: An unconfirmed service remains after failed creation; file rollback is blocked.'
+            }
+            elseif ($isUpdate -and
+                -not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: The previous Agent service disappeared; file rollback is blocked.'
+            }
+            $rollbackState.ServiceRegistrationReady = $true
         } },
         [pscustomobject]@{ Name = 'restore-program'; Action = {
-            if ($installSwapped -and (Test-Path -LiteralPath $install)) {
-                Remove-Item -LiteralPath $install -Recurse -Force
+            if (-not $rollbackState.ServiceQuiesced -or
+                -not $rollbackState.ServiceRegistrationReady) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Service quiescence was not confirmed; program rollback is blocked.'
             }
-            if (Test-Path -LiteralPath $programBackup) {
-                Move-Item -LiteralPath $programBackup -Destination $install
+            $programRollbackDisposition = Get-SswProgramRollbackDisposition `
+                -IsUpdate $isUpdate -InstallSwapped $installSwapped `
+                -ProgramBackupTaken $programBackupTaken `
+                -InstallExists (Test-Path -LiteralPath $install -PathType Container) `
+                -ProgramBackupExists (Test-Path -LiteralPath $programBackup -PathType Container)
+            switch ($programRollbackDisposition) {
+                'RestoreBackup' {
+                    Set-SswInstallerBackupAcl -Path $programBackup -ValidateExistingOwner
+                    $null = Restore-SswDirectoryWithQuarantine `
+                        -ActivePath $install -BackupPath $programBackup `
+                        -QuarantinePath $failedProgram -BackupRequired
+                    Set-SswRestrictedDirectoryAcl -Path $install -ServiceSid $serviceSid `
+                        -ServiceRights ReadAndExecute -AllowServiceOwnedDescendants
+                }
+                'QuarantineNewInstall' {
+                    $null = Restore-SswDirectoryWithQuarantine `
+                        -ActivePath $install -BackupPath $programBackup `
+                        -QuarantinePath $failedProgram
+                }
+                'AlreadyIntact' { }
+                default {
+                    throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Unsupported program rollback disposition: $programRollbackDisposition"
+                }
             }
             if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+            $rollbackState.ProgramRestored = $true
         } },
         [pscustomobject]@{ Name = 'restore-service'; Action = {
-            if ($isUpdate -and (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-                $oldPath = [string]$previousService.PathName
-                & sc.exe config $serviceName "binPath= $oldPath" 'start= auto' | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw 'Previous service configuration restore failed.' }
+            if (-not $rollbackState.ProgramRestored) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Program rollback was not confirmed; service configuration rollback is blocked.'
             }
+            if ($serviceQuiescenceRequired -and $isUpdate) {
+                if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Previous Agent service is missing; configuration rollback is blocked.'
+                }
+                $oldPath = [string]$previousService.PathName
+                $oldStartName = [string]$previousService.StartName
+                $oldStartMode = [string]$previousService.StartMode
+                $oldStartTypeForSc = switch ($oldStartMode) {
+                    'Auto' { 'auto' }
+                    'Manual' { 'demand' }
+                    'Disabled' { 'disabled' }
+                    default {
+                        throw "AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Unsupported previous service start mode: $oldStartMode"
+                    }
+                }
+                $oldPathForSc = $oldPath.Replace('"', '\"')
+                & sc.exe config $serviceName 'binPath=' $oldPathForSc 'start=' $oldStartTypeForSc `
+                    'obj=' $oldStartName | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Previous service configuration restore failed.' }
+                $restoredService = Get-CimInstance Win32_Service `
+                    -Filter "Name='$serviceName'" -ErrorAction Stop
+                if ([string]$restoredService.PathName -cne $oldPath -or
+                    [string]$restoredService.StartName -ine $oldStartName -or
+                    [string]$restoredService.StartMode -cne $oldStartMode) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Previous service configuration postcondition failed.'
+                }
+            }
+            $rollbackState.ServiceConfigurationRestored = $true
         } },
         [pscustomobject]@{ Name = 'restore-legacy-background-files'; Action = {
+            if (-not $rollbackState.ServiceConfigurationRestored) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Service configuration rollback was not confirmed; legacy file rollback is blocked.'
+            }
             if ($legacyBackgroundArchive) {
                 $archivedProgram = Join-Path $legacyBackgroundArchive 'program'
                 $archivedData = Join-Path $legacyBackgroundArchive 'data'
+                if ($legacyBackgroundProgramMoveAttempted -and
+                    -not $legacyBackgroundProgramMoved) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy program move was only partially completed; source and archive were preserved.'
+                }
+                if ($legacyBackgroundDataMoveAttempted -and
+                    -not $legacyBackgroundDataMoved) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy data move was only partially completed; source and archive were preserved.'
+                }
                 if ($legacyBackgroundProgramMoved) {
                     if (Test-Path -LiteralPath $legacyBackgroundState.InstallDirectory) {
                         throw 'Legacy background program restore target already exists.'
@@ -794,21 +1088,56 @@ catch {
                     Restore-SswDirectoryAclSnapshot -Path $legacyBackgroundState.DataDirectory `
                         -Snapshot @($legacyBackgroundState.DataAclSnapshot)
                 }
+                if (Test-Path -LiteralPath $archivedProgram) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy program remains in the archive after rollback.'
+                }
+                if (Test-Path -LiteralPath $archivedData) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy data remains in the archive after rollback.'
+                }
                 if (Test-Path -LiteralPath $legacyBackgroundArchive) {
                     Remove-Item -LiteralPath $legacyBackgroundArchive -Recurse -Force
                 }
             }
+            $rollbackState.LegacyBackgroundFilesRestored = $true
         } },
         [pscustomobject]@{ Name = 'restore-data'; Action = {
-            if ($dataCreated -and (Test-Path -LiteralPath $data)) {
-                Remove-Item -LiteralPath $data -Recurse -Force
+            if (-not $rollbackState.ServiceConfigurationRestored -or
+                -not $rollbackState.LegacyBackgroundFilesRestored) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Prior rollback dependencies are incomplete; active Agent data is preserved.'
             }
-            elseif ($dataSnapshotTaken) {
-                if (Test-Path -LiteralPath $data) { Remove-Item -LiteralPath $data -Recurse -Force }
-                Move-Item -LiteralPath $dataSnapshot -Destination $data
+            Assert-SswLegacyBackgroundRollbackReadyForDataRestore `
+                -ArchivePath $legacyBackgroundArchive `
+                -ProgramMoveAttempted $legacyBackgroundProgramMoveAttempted `
+                -ProgramWasMoved $legacyBackgroundProgramMoved `
+                -ProgramRestorePath $(if ($legacyBackgroundState) {
+                    $legacyBackgroundState.InstallDirectory
+                } else { $null }) `
+                -DataMoveAttempted $legacyBackgroundDataMoveAttempted `
+                -DataWasMoved $legacyBackgroundDataMoved `
+                -DataRestorePath $(if ($legacyBackgroundState) {
+                    $legacyBackgroundState.DataDirectory
+                } else { $null })
+            if ($dataCreationAttempted -and -not $dataCreated -and
+                (Test-Path -LiteralPath $data)) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: 신규 Agent 데이터 폴더 생성 또는 ACL 적용 완료 여부가 불명확해 해당 폴더를 보존했습니다.'
+            }
+            if ($dataCreated -or $dataSnapshotTaken) {
+                if ($dataSnapshotTaken) {
+                    Set-SswInstallerBackupAcl -Path $dataSnapshot -ValidateExistingOwner
+                }
+                $null = Restore-SswDirectoryWithQuarantine `
+                    -ActivePath $data -BackupPath $dataSnapshot `
+                    -QuarantinePath $failedData -BackupRequired:$dataSnapshotTaken
+            }
+            if ($dataSnapshotTaken) {
                 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
                     $oldServiceSid = Get-SswServiceSid -Name $serviceName
-                    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $oldServiceSid -ServiceRights Modify
+                    Set-SswRestrictedDirectoryAcl -Path $data -ServiceSid $oldServiceSid `
+                        -ServiceRights Modify -AllowServiceOwnedDescendants
+                    $restoredReceiptPath = Join-Path $data 'install-receipt.json'
+                    if (Test-Path -LiteralPath $restoredReceiptPath -PathType Leaf) {
+                        Set-SswAdministratorsOnlyFileAcl -Path $restoredReceiptPath
+                    }
                     foreach ($restoredLegacyArchive in @(Get-ChildItem -LiteralPath $data `
                         -Directory -ErrorAction SilentlyContinue | Where-Object {
                             $_.Name -like 'legacy-v0.7-backup-*' -or
@@ -819,6 +1148,7 @@ catch {
                     }
                 }
             }
+            $rollbackState.DataRestored = $true
         } },
         [pscustomobject]@{ Name = 'restore-firewall'; Action = {
             if ($firewallChanged) {
@@ -826,9 +1156,18 @@ catch {
             }
         } },
         [pscustomobject]@{ Name = 'restart-previous-service'; Action = {
-            if ($isUpdate -and $previousServiceWasRunning -and
+            if (-not $rollbackState.ServiceConfigurationRestored -or
+                -not $rollbackState.ProgramRestored -or
+                -not $rollbackState.DataRestored) {
+                throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Previous Agent state was not fully restored; service restart is blocked.'
+            }
+            if ($serviceQuiescenceRequired -and $isUpdate -and
+                $previousServiceWasRunning -and
                 (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-                Start-Service -Name $serviceName
+                $restoredServiceStatus = Get-Service -Name $serviceName -ErrorAction Stop
+                if ($restoredServiceStatus.Status -ne 'Running') {
+                    Start-Service -Name $serviceName
+                }
                 if ($previousUsesHttps) {
                     $null = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps
                 }
@@ -839,6 +1178,10 @@ catch {
         } },
         [pscustomobject]@{ Name = 'restore-legacy-background-task'; Action = {
             if ($legacyBackgroundTaskTouched) {
+                if (-not $rollbackState.LegacyBackgroundFilesRestored -or
+                    -not $rollbackState.DataRestored) {
+                    throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy Agent files were not fully restored; task restart is blocked.'
+                }
                 $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `
                     -TaskPath '\' -ErrorAction SilentlyContinue
                 if ($legacyBackgroundTaskRemoved) {
@@ -857,13 +1200,28 @@ catch {
                     Start-ScheduledTask -TaskName $legacyBackgroundTaskName -TaskPath '\'
                 }
             }
-        } },
-        [pscustomobject]@{ Name = 'remove-transaction-files'; Action = {
-            if (Test-Path -LiteralPath $transactionRoot) {
-                Remove-Item -LiteralPath $transactionRoot -Recurse -Force
-            }
         } }
     ))
+    if ($rollbackErrors.Count -eq 0) {
+        foreach ($rollbackArtifact in @($failedProgram, $transactionRoot)) {
+            if (-not (Test-Path -LiteralPath $rollbackArtifact)) { continue }
+            try {
+                Remove-Item -LiteralPath $rollbackArtifact -Recurse -Force
+            }
+            catch {
+                $rollbackErrors += 'REMOVE_TRANSACTION_FILES_FAILED'
+                Write-Warning "복구 증거 폴더를 정리하지 못해 보존했습니다: $rollbackArtifact"
+                break
+            }
+        }
+    }
+    else {
+        foreach ($rollbackArtifact in @($failedProgram, $transactionRoot)) {
+            if (Test-Path -LiteralPath $rollbackArtifact) {
+                Write-Warning "복구 오류 때문에 원본 snapshot과 증거를 보존했습니다: $rollbackArtifact"
+            }
+        }
+    }
     Write-SswOperationJournal -Path $journalPath -Operation 'agent-install-or-update' `
         -TransactionId $transactionId -Stage 'rollback-completed' -Status 'failed' `
         -Version ([string]$sourceManifest.version) -ErrorCodes $rollbackErrors

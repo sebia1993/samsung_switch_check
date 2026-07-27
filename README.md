@@ -3,7 +3,7 @@
 삼성 `IES4224GP`, `IES4028XP`, `IES4226XP` 스위치에 Telnet으로 접속해 조회 명령을
 실행하고, 결과와 변경점을 운영자 PC에서 확인하는 Windows 전용 도구입니다.
 
-현재 버전은 `v0.9.13-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
+현재 버전은 `v0.9.14-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ```text
@@ -21,8 +21,8 @@ SamsungSwitchWatch.Viewer                     SamsungSwitchWatch.Agent
 
 - Viewer가 장비, 자격 증명, 감시 일정과 이력의 소유자입니다.
 - Agent는 장비나 자격 증명을 저장하지 않는 Telnet 실행 대행자입니다.
-- Agent는 `LocalService` Windows 서비스로 실행되어 사용자 화면에 창이나 트레이 아이콘을
-  표시하지 않습니다.
+- Agent는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정의 Windows
+  서비스로 실행되어 사용자 화면에 창이나 트레이 아이콘을 표시하지 않습니다.
 - 매 요청마다 새 Telnet 세션을 열고 종료하므로 장비의 짧은 `exec-timeout`에 의존하지 않습니다.
 - 명령 실행 중 장비가 연결을 끊으면 완료된 명령은 반복하지 않고 남은 명령만 새 세션에서
   1회 재시도합니다. 인증·enable 실패와 명령 타임아웃은 자동 재시도하지 않습니다.
@@ -47,8 +47,8 @@ show syslog tail num 100
 
 GitHub Release의 Assets에서 아래 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.13-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.13-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.14-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.14-poc-win-x64.zip`
 
 두 ZIP에는 바로 열어 볼 수 있는 `SamsungSwitchWatch_User_Manual_KO.pdf`가 포함됩니다.
 편집용 DOCX는 배포 ZIP에 넣지 않습니다.
@@ -59,9 +59,21 @@ UAC를 승인한 뒤 다음 두 범위를 입력합니다.
 1. Viewer가 접속하는 관리망 IPv4 CIDR
 2. Agent가 Telnet으로 접속해도 되는 스위치 IPv4 CIDR
 
-설치기는 신규 설치와 기존 서비스를 자동 판별합니다. 업데이트라면 기존 CIDR 설정과
-`%ProgramData%\SamsungSwitchWatch`의 HTTPS 신원 자료를 보존하고, 검증 실패 시 이전 버전으로
-복구합니다.
+설치기는 신규 설치와 기존 서비스를 자동 판별합니다. 업데이트라면 기존 설정의 스위치 대상
+CIDR과 제품 소유 방화벽 규칙의 Viewer 관리 CIDR, `%ProgramData%\SamsungSwitchWatch`의 HTTPS
+신원 자료를 보존하고, 검증 실패 시 이전 버전으로 복구합니다. install receipt는
+SYSTEM·Administrators만 접근하는 설치 증거이며 CIDR 권한원으로 사용하지 않습니다.
+
+설치·업데이트·제거는 설치 폴더와 데이터 폴더의 소유자 SID와 reparse point를 먼저 검사합니다.
+DataDirectory는 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용하며, 신규 설치에서는 이
+경로가 비어 있더라도 기존 폴더를 채택하지 않고 중단합니다. 검사에 통과한 기존 제품 트리만
+루트부터 Administrators 소유와 폐쇄형 ACL로 잠그며, 비신뢰 소유자나 junction·symlink가
+발견되면 `AGENT_DIRECTORY_TRUST_INVALID`로 중단합니다. 폴더를 삭제하거나 소유권을 강제로
+바꾸어 우회하지 말고 Windows 관리자에게 확인을 요청하십시오.
+
+설치 패키지는 관리자 전용 staging으로 복사한 뒤 매니페스트 SHA-256을 다시 확인하고 프로그램을
+교체합니다. rollback 중 서비스 중지·삭제나 선행 복구를 확인하지 못하면 후속 파일
+삭제·복구를 중단하고 snapshot, legacy archive와 작업 증거를 보존합니다.
 
 Agent와 Viewer의 설치·업데이트·제거는 제품별 잠금으로 겹쳐 실행되지 않습니다. 다른 작업이
 진행 중이면 즉시 중단하고 먼저 시작한 작업이 끝난 뒤 다시 실행하도록 안내합니다.
@@ -105,7 +117,7 @@ dotnet restore .\SamsungSwitchWatch.sln --locked-mode
 릴리스 패키지는 깨끗한 Git 작업 트리에서 만듭니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.13-poc
+.\scripts\build-release.ps1 -Version 0.9.14-poc
 ```
 
 `artifacts\release` 내부에는 ZIP 2개와 내부 검증용 매니페스트·SBOM·해시 파일이 생깁니다.
@@ -133,6 +145,7 @@ GitHub Release의 사용자 정의 Assets에는 Agent ZIP과 Viewer ZIP, 정확�
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.9.14-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.14_POC_KO.md)
 - [0.9.13-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.13_POC_KO.md)
 - [0.9.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.12_POC_KO.md)
 - [0.9.11-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.11_POC_KO.md)
