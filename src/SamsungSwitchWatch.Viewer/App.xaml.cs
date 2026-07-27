@@ -28,6 +28,12 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (ViewerInstallSmokeCheck.IsRequested(e.Args))
+        {
+            Shutdown(ViewerInstallSmokeCheck.Run(Resources));
+            return;
+        }
+
         base.OnStartup(e);
         ApplyAccessibilityTheme();
         DispatcherUnhandledException += OnDispatcherUnhandledException;

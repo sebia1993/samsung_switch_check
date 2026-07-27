@@ -5,6 +5,9 @@
     [string]$AgentId = "agent-$env:COMPUTERNAME",
     [string[]]$ClientManagementCidrs,
     [string[]]$AllowedTargetCidrs,
+    [string[]]$ClientManagementAddresses,
+    [string[]]$AllowedTargetAddresses,
+    [switch]$ReconfigureAddresses,
     [switch]$Preflight
 )
 
@@ -19,6 +22,7 @@ $data = [IO.Path]::GetFullPath($DataDirectory)
 $sourceExe = Join-Path $source 'SamsungSwitchWatch.Agent.exe'
 $sourceManifestPath = Join-Path $source 'BUILD-MANIFEST.json'
 $installedExe = Join-Path $install 'SamsungSwitchWatch.Agent.exe'
+$installedManifestPath = Join-Path $install 'BUILD-MANIFEST.json'
 $installedConfigPath = Join-Path $install 'appsettings.Production.json'
 $receiptPath = Join-Path $data 'install-receipt.json'
 $operationsRoot = Join-Path $env:ProgramData 'SamsungSwitchWatch-Operations'
@@ -55,26 +59,150 @@ function New-SswServiceControlFailureMessage {
     return "$Stage failed (sc.exe exit code $ExitCode). $detail"
 }
 
-function Resolve-SswCidrInput {
+function ConvertTo-SswIpv4HostCidrs {
     param(
-        [AllowNull()][string[]]$Requested,
-        [AllowNull()][string[]]$Preserved,
-        [Parameter(Mandatory = $true)][string]$Prompt
+        [Parameter(Mandatory = $true)][string[]]$Address,
+        [Parameter(Mandatory = $true)][string]$Label
     )
 
-    if ($Requested -and @($Requested).Count -gt 0) {
-        return @(ConvertTo-SswIpv4Cidrs -Cidr @($Requested))
+    $entries = @($Address | ForEach-Object {
+        ([string]$_).Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    })
+    try {
+        $normalized = @(ConvertTo-SswViewerRemoteAddresses -Address $entries)
     }
-    if ($Preserved -and @($Preserved).Count -gt 0) {
-        return @(ConvertTo-SswIpv4Cidrs -Cidr @($Preserved))
+    catch {
+        throw "$Label 입력은 1~32개의 일반 IPv4만 허용합니다. CIDR, DNS 이름, IPv6와 선행 0은 사용할 수 없습니다. 상세: $($_.Exception.Message)"
     }
+    return @($normalized | ForEach-Object { "$_/32" })
+}
+
+function Resolve-SswAddressPolicyInput {
+    param(
+        [AllowNull()][string[]]$RequestedAddresses,
+        [AllowNull()][string[]]$RequestedCidrs,
+        [AllowNull()][string[]]$PreservedCidrs,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [switch]$PromptEvenWhenPreserved,
+        [switch]$AllowBlankPreserve
+    )
+
+    if ($RequestedAddresses -and @($RequestedAddresses).Count -gt 0 -and
+        $RequestedCidrs -and @($RequestedCidrs).Count -gt 0) {
+        throw "AGENT_ADDRESS_INPUT_CONFLICT: $Label 일반 IPv4와 고급 CIDR을 동시에 지정할 수 없습니다."
+    }
+    if ($RequestedAddresses -and @($RequestedAddresses).Count -gt 0) {
+        return @(ConvertTo-SswIpv4HostCidrs -Address @($RequestedAddresses) -Label $Label)
+    }
+    if ($RequestedCidrs -and @($RequestedCidrs).Count -gt 0) {
+        return @(ConvertTo-SswIpv4Cidrs -Cidr @($RequestedCidrs))
+    }
+    if (-not $PromptEvenWhenPreserved -and
+        $PreservedCidrs -and @($PreservedCidrs).Count -gt 0) {
+        return @(ConvertTo-SswIpv4Cidrs -Cidr @($PreservedCidrs))
+    }
+
+    $script:sswAddressInputPrompted = $true
     $answer = Read-Host $Prompt
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        if ($AllowBlankPreserve -and
+            $PreservedCidrs -and @($PreservedCidrs).Count -gt 0) {
+            return @(ConvertTo-SswIpv4Cidrs -Cidr @($PreservedCidrs))
+        }
+        throw "$Label 값이 비어 있습니다. 일반 IPv4를 입력하세요."
+    }
     $entries = @($answer.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($entries.Count -eq 0) {
-        throw 'CIDR 값이 비어 있습니다. 예시처럼 네트워크 주소와 /숫자를 함께 입력하세요.'
+        throw "$Label 값이 비어 있습니다. 일반 IPv4를 입력하세요."
     }
-    try { return @(ConvertTo-SswIpv4Cidrs -Cidr $entries) }
-    catch { throw "CIDR 입력 형식이 올바르지 않습니다. 예: 10.20.30.0/24. 상세: $($_.Exception.Message)" }
+    return @(ConvertTo-SswIpv4HostCidrs -Address $entries -Label $Label)
+}
+
+function Test-SswStringSetEqual {
+    param(
+        [AllowNull()][string[]]$Left,
+        [AllowNull()][string[]]$Right
+    )
+
+    $normalizedLeft = @($Left | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    $normalizedRight = @($Right | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    return ($normalizedLeft -join '|') -ceq ($normalizedRight -join '|')
+}
+
+function Assert-SswReconfigurationPackageMatch {
+    param(
+        [Parameter(Mandatory = $true)][object]$SourceManifest,
+        [Parameter(Mandatory = $true)][object]$InstalledManifest,
+        [Parameter(Mandatory = $true)][object]$InstallReceipt,
+        [Parameter(Mandatory = $true)][string]$InstalledExecutablePath
+    )
+
+    try {
+        $sourceVersion = [string]$SourceManifest.version
+        $sourceCommit = [string]$SourceManifest.sourceCommit
+        $sourceExeHash = [string]$SourceManifest.executable.sha256
+        $installedManifestVersion = [int]$InstalledManifest.manifestVersion
+        $installedPackageKind = [string]$InstalledManifest.packageKind
+        $installedExeName = [string]$InstalledManifest.executable.name
+        $installedVersion = [string]$InstalledManifest.version
+        $installedCommit = [string]$InstalledManifest.sourceCommit
+        $installedExeHash = [string]$InstalledManifest.executable.sha256
+        $receiptVersion = [int]$InstallReceipt.receiptVersion
+        $receiptInstalledVersion = [string]$InstallReceipt.installedVersion
+        $receiptSourceCommit = [string]$InstallReceipt.sourceCommit
+    }
+    catch {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent 또는 재설정 패키지의 빌드 정보가 불완전합니다.'
+    }
+    if ([string]::IsNullOrWhiteSpace($sourceVersion) -or
+        $sourceCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+        $installedManifestVersion -ne 1 -or
+        $installedPackageKind -ne 'Agent' -or
+        $installedExeName -ne 'SamsungSwitchWatch.Agent.exe' -or
+        [string]::IsNullOrWhiteSpace($installedVersion) -or
+        $installedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+        $sourceExeHash -notmatch '^[0-9a-fA-F]{64}$' -or
+        $installedExeHash -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent 또는 재설정 패키지의 빌드 정보를 확인할 수 없습니다.'
+    }
+    if (-not [string]::Equals($sourceVersion, $installedVersion, [StringComparison]::Ordinal) -or
+        -not [string]::Equals($sourceCommit, $installedCommit, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($sourceExeHash, $installedExeHash, [StringComparison]::OrdinalIgnoreCase) -or
+        $receiptVersion -ne 3 -or
+        -not [string]::Equals(
+            $receiptInstalledVersion,
+            $installedVersion,
+            [StringComparison]::Ordinal) -or
+        -not [string]::Equals(
+            $receiptSourceCommit,
+            $installedCommit,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent와 현재 패키지의 버전 또는 소스 커밋이 다릅니다. 설치에 사용한 같은 버전의 Agent ZIP에서 다시 실행하세요.'
+    }
+    try {
+        $actualInstalledExeHash = if (Test-Path -LiteralPath $InstalledExecutablePath -PathType Leaf) {
+            (Get-FileHash -LiteralPath $InstalledExecutablePath -Algorithm SHA256).Hash
+        }
+        else { $null }
+    }
+    catch { $actualInstalledExeHash = $null }
+    if (-not [string]::Equals(
+        [string]$actualInstalledExeHash,
+        $installedExeHash,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent 실행 파일이 설치 빌드 정보와 일치하지 않습니다.'
+    }
+}
+
+function Confirm-SswAddressPolicy {
+    param([Parameter(Mandatory = $true)][bool]$Required)
+
+    if (-not $Required) { return }
+    $answer = (Read-Host '위 허용 IP 설정으로 계속하시겠습니까? [Y/N]').Trim()
+    if ($answer -notmatch '^(?i:y|yes)$') {
+        throw 'AGENT_ADDRESS_CONFIGURATION_CANCELLED: 사용자가 허용 IP 변경을 취소했습니다.'
+    }
 }
 
 function New-SswExecutorConfiguration {
@@ -363,7 +491,27 @@ Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles -ProductRelativ
 Assert-SswProductPath -Path $data -BaseRoot $env:ProgramData `
     -ProductRelativeRoot 'SamsungSwitchWatch' -RequireExactProductRoot
 
-$sourceManifest = Read-SswJson -Path $sourceManifestPath -Label 'Agent package manifest'
+try {
+    $sourceManifestBytes = [IO.File]::ReadAllBytes($sourceManifestPath)
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    $sourceManifestJson = $strictUtf8.GetString($sourceManifestBytes)
+    if ($sourceManifestJson.Length -gt 0 -and
+        $sourceManifestJson[0] -eq [char]0xfeff) {
+        $sourceManifestJson = $sourceManifestJson.Substring(1)
+    }
+    $sourceManifest = $sourceManifestJson | ConvertFrom-Json
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $sourceManifestHash = ([BitConverter]::ToString(
+            $sha256.ComputeHash($sourceManifestBytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+catch {
+    throw "Agent package manifest is invalid JSON or UTF-8: $($_.Exception.Message)"
+}
 if ($sourceManifest.manifestVersion -ne 1 -or $sourceManifest.packageKind -ne 'Agent' -or
     $sourceManifest.executable.name -ne 'SamsungSwitchWatch.Agent.exe') {
     throw 'The package manifest is not an Agent manifest.'
@@ -407,6 +555,7 @@ $existingConfig = $null
 $existingReceipt = $null
 $preservedClientCidrs = @()
 $preservedTargetCidrs = @()
+$script:sswAddressInputPrompted = $false
 $migratingLegacyAgentState = $false
 $legacyBackgroundState = Get-SswLegacyBackgroundState
 Assert-SswAgentFirewallNameSafety
@@ -520,19 +669,66 @@ if ($legacyBackgroundState) {
     Write-Host '  migration: current-user program and data will move to an Administrators-only ProgramData archive'
 }
 
-$clientCidrs = @(Resolve-SswCidrInput -Requested $ClientManagementCidrs -Preserved $preservedClientCidrs `
-    -Prompt 'Viewer PC가 있는 관리망 CIDR (예: 내 PC가 10.20.30.x이면 10.20.30.0/24, 여러 개는 쉼표로 구분)')
-$targetCidrs = @(Resolve-SswCidrInput -Requested $AllowedTargetCidrs -Preserved $preservedTargetCidrs `
-    -Prompt '스위치 관리 IP가 있는 CIDR (예: 10.40.0.0/16, 여러 개는 쉼표로 구분)')
+if ($ReconfigureAddresses) {
+    if (-not $isUpdate) {
+        throw 'AGENT_RECONFIGURE_REQUIRES_EXISTING_INSTALL: 허용 IP 재설정은 설치된 Windows 서비스 Agent에서만 사용할 수 있습니다.'
+    }
+    if ($legacyBackgroundState -or $migratingLegacyAgentState) {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 이전 Agent 구조는 허용 IP만 재설정할 수 없습니다. 먼저 일반 설치/업데이트를 완료하세요.'
+    }
+    if (-not $existingReceipt) {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 관리자 전용 설치 영수증을 확인할 수 없습니다. 같은 버전의 Agent를 먼저 정상 업데이트하세요.'
+    }
+    if (-not (Test-Path -LiteralPath $installedManifestPath -PathType Leaf)) {
+        throw 'AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent의 BUILD-MANIFEST.json을 찾지 못했습니다.'
+    }
+    try {
+        $installedManifest = Read-SswJson -Path $installedManifestPath -Label 'Installed Agent package manifest'
+    }
+    catch {
+        throw "AGENT_RECONFIGURE_SOURCE_MISMATCH: 설치된 Agent의 빌드 정보를 읽지 못했습니다. $($_.Exception.Message)"
+    }
+    Assert-SswReconfigurationPackageMatch -SourceManifest $sourceManifest `
+        -InstalledManifest $installedManifest -InstallReceipt $existingReceipt `
+        -InstalledExecutablePath $installedExe
+}
+
+$clientPrompt = if ($ReconfigureAddresses) {
+    'Viewer PC IPv4 (예: 10.20.30.41, 여러 대는 쉼표, 비우면 기존 설정 유지)'
+}
+else {
+    'Viewer PC IPv4 (예: 10.20.30.41, 여러 대는 쉼표로 구분)'
+}
+$targetPrompt = if ($ReconfigureAddresses) {
+    '스위치 관리 IPv4 (예: 10.40.0.11, 여러 대는 쉼표, 비우면 기존 설정 유지)'
+}
+else {
+    '스위치 관리 IPv4 (예: 10.40.0.11, 여러 대는 쉼표로 구분)'
+}
+$clientCidrs = @(Resolve-SswAddressPolicyInput `
+    -RequestedAddresses $ClientManagementAddresses -RequestedCidrs $ClientManagementCidrs `
+    -PreservedCidrs $preservedClientCidrs -Prompt $clientPrompt -Label 'Viewer PC IPv4' `
+    -PromptEvenWhenPreserved:$ReconfigureAddresses -AllowBlankPreserve:$ReconfigureAddresses)
+$targetCidrs = @(Resolve-SswAddressPolicyInput `
+    -RequestedAddresses $AllowedTargetAddresses -RequestedCidrs $AllowedTargetCidrs `
+    -PreservedCidrs $preservedTargetCidrs -Prompt $targetPrompt -Label '스위치 관리 IPv4' `
+    -PromptEvenWhenPreserved:$ReconfigureAddresses -AllowBlankPreserve:$ReconfigureAddresses)
 
 Assert-SswAgentFirewallGateReady -Port $httpsPort -AgentExecutablePath $installedExe
 
-Write-Host "  작업 구분     : $(if ($isUpdate) { '기존 Agent 업데이트' } else { '신규 Agent 설치' })"
+Write-Host "  작업 구분     : $(if ($ReconfigureAddresses) { 'Agent 허용 IP 재설정' } elseif ($isUpdate) { '기존 Agent 업데이트' } else { '신규 Agent 설치' })"
 Write-Host "  Windows 서비스: $serviceName (창 없음, 자동 시작)"
 Write-Host "  Viewer 연결   : HTTPS/TCP 18443"
 Write-Host "  Viewer 관리망 : $($clientCidrs -join ', ')"
 Write-Host "  스위치 대상망 : $($targetCidrs -join ', ')"
 Write-Host "  보존 데이터   : $data"
+Confirm-SswAddressPolicy -Required ([bool]$ReconfigureAddresses -or $script:sswAddressInputPrompted)
+if ($ReconfigureAddresses -and
+    (Test-SswStringSetEqual -Left $clientCidrs -Right $preservedClientCidrs) -and
+    (Test-SswStringSetEqual -Left $targetCidrs -Right $preservedTargetCidrs)) {
+    Write-SswStep '허용 IP 변경 사항이 없어 Agent 서비스와 방화벽을 변경하지 않았습니다.'
+    return
+}
 if ($Preflight) {
     Write-SswStep 'Preflight passed; no Agent program, data, service, or firewall state was changed. The operations journal ACL may have been initialized.'
     return
@@ -581,6 +777,7 @@ try {
     foreach ($file in @($sourceManifest.files)) {
         Copy-Item -LiteralPath (Join-Path $source ([string]$file.name)) -Destination $staging -Force
     }
+    Copy-Item -LiteralPath $sourceManifestPath -Destination $staging -Force
     Write-SswStep 'Re-verify package inside protected staging'
     foreach ($file in @($sourceManifest.files)) {
         $stagedPath = Join-Path $staging ([string]$file.name)
@@ -596,6 +793,11 @@ try {
     if ((Get-FileHash -LiteralPath $stagedExe -Algorithm SHA256).Hash.ToLowerInvariant() -ne
         ([string]$sourceManifest.executable.sha256).ToLowerInvariant()) {
         throw 'Staged Agent executable hash does not match the in-memory package manifest.'
+    }
+    $stagedManifestPath = Join-Path $staging 'BUILD-MANIFEST.json'
+    if ((Get-FileHash -LiteralPath $stagedManifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        $sourceManifestHash) {
+        throw 'Staged Agent BUILD-MANIFEST.json does not match the verified source package.'
     }
     $newConfig = New-SswExecutorConfiguration -ResolvedAgentId $AgentId -TargetCidrs $targetCidrs
     [IO.File]::WriteAllText((Join-Path $staging 'appsettings.Production.json'),
@@ -927,7 +1129,12 @@ try {
         if (Test-Path -LiteralPath $obsolete) { Remove-Item -LiteralPath $obsolete -Recurse -Force -ErrorAction SilentlyContinue }
     }
     Write-Host ''
-    Write-Host 'Samsung Switch Watch Agent 설치/업데이트가 완료되었습니다.' -ForegroundColor Green
+    if ($ReconfigureAddresses) {
+        Write-Host 'Samsung Switch Watch Agent 허용 IP 재설정이 완료되었습니다.' -ForegroundColor Green
+    }
+    else {
+        Write-Host 'Samsung Switch Watch Agent 설치/업데이트가 완료되었습니다.' -ForegroundColor Green
+    }
     Write-Host 'Agent는 사용자에게 보이는 창 없이 Windows 서비스로 실행 중입니다.'
     Write-Host '스위치 IP와 ID/PW/enable PW는 Viewer에서만 등록하세요.'
     if ($legacyBackgroundState) {
@@ -948,6 +1155,7 @@ catch {
         ServiceConfigurationRestored = $false
         LegacyBackgroundFilesRestored = $false
         DataRestored = $false
+        FirewallRestored = $false
     }
     $rollbackErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'stop-new-service'; Action = {
@@ -1154,11 +1362,13 @@ catch {
             if ($firewallChanged) {
                 Restore-SswAgentFirewallSnapshots -Snapshots @($oldHttpFirewall, $oldHttpsFirewall)
             }
+            $rollbackState.FirewallRestored = $true
         } },
         [pscustomobject]@{ Name = 'restart-previous-service'; Action = {
             if (-not $rollbackState.ServiceConfigurationRestored -or
                 -not $rollbackState.ProgramRestored -or
-                -not $rollbackState.DataRestored) {
+                -not $rollbackState.DataRestored -or
+                -not $rollbackState.FirewallRestored) {
                 throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Previous Agent state was not fully restored; service restart is blocked.'
             }
             if ($serviceQuiescenceRequired -and $isUpdate -and
@@ -1179,7 +1389,8 @@ catch {
         [pscustomobject]@{ Name = 'restore-legacy-background-task'; Action = {
             if ($legacyBackgroundTaskTouched) {
                 if (-not $rollbackState.LegacyBackgroundFilesRestored -or
-                    -not $rollbackState.DataRestored) {
+                    -not $rollbackState.DataRestored -or
+                    -not $rollbackState.FirewallRestored) {
                     throw 'AGENT_DEPLOYMENT_RECOVERY_REQUIRED: Legacy Agent files were not fully restored; task restart is blocked.'
                 }
                 $currentLegacyTask = Get-ScheduledTask -TaskName $legacyBackgroundTaskName `

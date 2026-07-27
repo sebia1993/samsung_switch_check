@@ -91,6 +91,7 @@ try {
             Required = @(
                 'SamsungSwitchWatch.Agent.exe',
                 'Install-or-Update-Agent.cmd',
+                'Configure-Agent-Allowed-IPs.cmd',
                 'common.ps1',
                 'install-agent.ps1',
                 'uninstall-agent.ps1',
@@ -252,6 +253,9 @@ try {
                 'https://0.0.0.0:18443',
                 '[string[]]$ClientManagementCidrs',
                 '[string[]]$AllowedTargetCidrs',
+                '[string[]]$ClientManagementAddresses',
+                '[string[]]$AllowedTargetAddresses',
+                '[switch]$ReconfigureAddresses',
                 '--service',
                 'Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps',
                 'Restore-SswAgentFirewallSnapshots',
