@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.15-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.16-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.16-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.16-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -170,6 +170,29 @@ Agent는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정의 Windows �
    실행되며, 다음 로그인부터 자동 시작됩니다.
 
 Viewer 설치에는 관리자 권한이나 UAC 승인이 필요하지 않습니다.
+
+### Viewer 설치가 이전 상태로 복구된 경우
+
+Viewer 설치 창에 `Viewer 설치 실패를 감지해 설치 전 상태로 되돌립니다.`가 표시되면 바로
+아래의 세 줄을 먼저 확인합니다.
+
+```text
+Cause: <최초 실패 코드>
+Recovery: <복구 결과>
+Diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch-Operations\viewer-install.json
+```
+
+- `Recovery: PREVIOUS_VIEWER_RESTORED`이면 기존 Viewer 파일과 바로 가기가 복구된
+  상태입니다. Viewer는 자동으로 다시 실행되지 않으므로 시작 메뉴의 `Samsung Switch Watch`를
+  실행합니다.
+- `Recovery: PARTIAL_INSTALL_REMOVED`이면 처음 설치하던 일부 파일을 제거해 설치 전
+  상태로 돌아간 것입니다. `Cause`의 원인을 해결한 뒤 같은 패키지를 다시 실행합니다.
+- `Recovery: ROLLBACK_INCOMPLETE (...)`이면 백업과 진단 파일을 삭제하지 말고 Windows
+  관리자에게 표시된 코드와 진단 경로를 전달합니다.
+
+v0.9.16부터 시작 메뉴 또는 시작프로그램 폴더가 아직 없는 Windows 사용자 환경에서는
+설치기가 필요한 폴더를 먼저 만듭니다. 보안 정책이나 권한 때문에 만들 수 없으면
+`VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE`을 표시하고 설치 전 상태로 복구합니다.
 
 ### 고급 설치
 
@@ -343,6 +366,9 @@ Agent 신원 불일치가 발생합니다.
 | `AGENT_RECEIPT_TRUST_INVALID` | 데이터 영구 삭제에 필요한 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. ACL 완화·파일 재작성으로 우회하지 말고 설치 증거와 데이터 보존 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
 | `AGENT_CONNECTION_REFUSED` | 입력한 주소의 TCP/18443에 listener가 없음. 먼저 스위치나 Viewer PC가 아닌 실제 Agent PC 주소인지 확인한 뒤 `SamsungSwitchWatchAgent` 서비스와 로컬 진단 확인 |
+| `VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE` | 시작 메뉴 또는 시작프로그램 폴더를 만들 수 없음. Viewer를 설치할 동일 Windows 사용자로 실행했는지와 폴더 쓰기 권한·보안 정책 확인 |
+| `VIEWER_SHORTCUT_SETUP_FAILED` | Viewer 바로 가기 생성 또는 자동 시작 반영 실패. `Recovery` 결과를 확인하고 보안 프로그램의 바로 가기 생성 차단 여부 점검 |
+| `VIEWER_SMOKE_CHECK_FAILED` | 새 Viewer가 자체 점검 중 비정상 종료됨. 기존 Viewer 복구 여부와 진단 파일을 확인한 뒤 패키지 무결성·보안 프로그램 차단 여부 점검 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |
