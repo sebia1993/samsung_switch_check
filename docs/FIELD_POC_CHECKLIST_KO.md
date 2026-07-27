@@ -7,7 +7,8 @@
 
 - [ ] Agent ZIP과 Viewer ZIP의 Release 검증 완료
 - [ ] `Install-or-Update-Agent.cmd`에서 UAC 승인
-- [ ] Viewer 관리 CIDR과 스위치 대상 CIDR을 최소 범위로 입력
+- [ ] Viewer PC IPv4와 스위치 관리 IPv4를 CIDR 계산 없이 입력
+- [ ] 입력한 각 IPv4가 내부 설정과 방화벽에서 정확한 `/32`로 적용됨
 - [ ] `SamsungSwitchWatchAgent` 서비스가 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정,
       자동 시작으로 등록됨
 - [ ] 서비스 실행 중 사용자 바탕 화면·작업 표시줄·트레이에 Agent 창이 없음
@@ -33,13 +34,16 @@
 
 ## 3. 네트워크 경계
 
-- [ ] Viewer 관리 CIDR에서 Agent HTTPS/18443 연결 성공
+- [ ] 등록한 Viewer PC IPv4에서 Agent HTTPS/18443 연결 성공
 - [ ] 허용 범위 밖 테스트 PC에서 HTTPS/18443 차단
 - [ ] Public 방화벽 프로필에서 제품 규칙이 적용되지 않음
-- [ ] 대상 CIDR 안의 장비 TCP/23 요청 허용
-- [ ] 대상 CIDR 밖 테스트 주소가 `TARGET_NOT_ALLOWED`로 거부됨
+- [ ] 등록한 스위치 관리 IPv4의 TCP/23 요청 허용
+- [ ] 등록하지 않은 테스트 주소가 `TARGET_NOT_ALLOWED`로 거부됨
 - [ ] 요청의 포트 23 이외 값이 거부됨
 - [ ] DNS 이름, IPv6, loopback과 link-local 대상이 거부됨
+- [ ] 같은 버전 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 허용 IP 목록 변경 성공
+- [ ] 다른 버전 Agent ZIP의 허용 IP 설정 도구는 변경 전에 거부됨
+- [ ] 허용 IP 설정 도구에서 빈 입력 시 기존 목록이 보존됨
 
 ## 4. Viewer 장비와 계정
 
@@ -109,7 +113,7 @@
 
 - [ ] v0.7 또는 v0.8 설치에서 v0.9 설치기가 업데이트 모드 자동 감지
 - [ ] 기존 Viewer 방화벽 주소와 장비 주소를 최소 `/32` CIDR로 이관
-- [ ] v0.9 재업데이트 시 관리 CIDR 재입력 없이 보존
+- [ ] v0.9 재업데이트 시 Viewer·스위치 허용 주소 재입력 없이 보존
 - [ ] 대상 CIDR은 설치 설정, Viewer 관리 CIDR은 정확한 제품 소유 방화벽 규칙에서 보존되고
       install receipt를 CIDR 권한원으로 사용하지 않음
 - [ ] 업데이트 전후 Agent HTTPS 신원 동일

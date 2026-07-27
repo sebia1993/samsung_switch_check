@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.9.16-poc',
+    [string]$Version = '0.9.17-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -76,6 +76,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Viewer publish 실패' }
 
 $agentScripts = @(
     'Install-or-Update-Agent.cmd',
+    'Configure-Agent-Allowed-IPs.cmd',
     'common.ps1',
     'install-agent.ps1',
     'uninstall-agent.ps1',

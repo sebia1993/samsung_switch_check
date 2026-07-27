@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.16-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.17-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.16-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.16-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.17-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.17-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -14,16 +14,17 @@ GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키�
 
 ## 2. 설치 전 네트워크 확인
 
-다음 두 IPv4 CIDR을 준비합니다.
+일반 설치에서는 CIDR을 계산하지 않습니다. 다음 두 종류의 평범한 IPv4만 준비합니다.
 
 | 구분 | 의미 | 예 |
 |---|---|---|
-| Viewer 관리 CIDR | Viewer PC에서 Agent HTTPS/18443으로 접근할 수 있는 범위 | `10.20.30.0/24` |
-| 스위치 대상 CIDR | Agent가 Telnet/23으로 접속해도 되는 장비 범위 | `10.40.0.0/16` |
+| Viewer PC IPv4 | Viewer에서 Agent HTTPS/18443으로 접근할 때 사용하는 주소 | `10.20.30.25` |
+| 스위치 관리 IPv4 | Agent가 Telnet/23으로 접속할 장비 주소 | `10.40.0.11,10.40.0.12` |
 
-이 두 값은 서로 같을 수도 있고 다를 수도 있습니다. 범위를 넓게 지정할수록 같은 관리망의
-다른 사용자가 Agent API를 호출하거나 Agent를 경유해 더 많은 주소에 접근할 수 있으므로,
-실제 필요한 최소 범위를 사용하십시오.
+설치기는 각 주소를 내부적으로 정확한 `/32` 허용 정책으로 변환합니다. Viewer PC가 DHCP로
+주소가 바뀌거나 32대를 초과하는 스위치를 운영한다면 고정 IP·DHCP 예약을 적용하거나 아래의
+고급 CIDR 설치 방법을 사용하십시오. `LocalSubnet`, 사설망 전체와 첫 요청 대상을 자동으로
+허용하지 않습니다.
 
 필수 통신은 다음과 같습니다.
 
@@ -49,14 +50,15 @@ SYSTEM·Administrators만 접근하도록 제한합니다. journal은 64KiB를 �
 1. Agent ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.
 2. `Install-or-Update-Agent.cmd`를 더블클릭합니다.
 3. Windows UAC 창에서 관리자 권한을 승인합니다.
-4. 신규 설치라면 Viewer 관리 CIDR과 스위치 대상 CIDR을 쉼표로 구분해 입력합니다.
+4. 신규 설치라면 Viewer PC IPv4와 스위치 관리 IPv4를 쉼표로 구분해 입력합니다. `/24` 같은
+   CIDR은 일반 입력란에 넣지 않습니다.
 5. `설치/업데이트가 완료되었습니다`와 `창 없이 Windows 서비스로 실행 중입니다` 메시지를
    확인합니다.
 
 설치기는 `SamsungSwitchWatchAgent` 서비스 존재 여부로 신규 설치와 업데이트를 자동 판별합니다.
 서비스는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정으로
-등록합니다. 업데이트에서는 기존 설정의 스위치 대상 CIDR과 제품 소유 방화벽 규칙의 Viewer
-관리 CIDR을 그대로 사용하므로 일반적인 업데이트에 재입력이 필요하지 않습니다.
+등록합니다. 업데이트에서는 기존 설정의 스위치 대상 정책과 제품 소유 방화벽 규칙의 Viewer
+허용 정책을 그대로 사용하므로 일반적인 업데이트에 재입력이 필요하지 않습니다.
 
 이전 버전의 `SamsungSwitchWatchAgent-CurrentUser` 예약 작업이 있으면 설치기는 이름만 보고
 중지하지 않습니다. 현재 Windows 사용자, 설명, 실행 경로·인수, 설치 영수증, 패키지
@@ -111,8 +113,8 @@ SID만 남습니다.
 
 Agent 데이터 폴더에는 Agent의 영구 HTTPS 신원과 설치 영수증이 들어갑니다. 설치 영수증 파일은
 상위 폴더의 서비스 쓰기 권한을 상속하지 않고 SYSTEM·Administrators 전용 ACL로 보호합니다.
-업데이트 시 CIDR은 영수증이 아니라 검증된 `appsettings.Production.json`과 정확히 제품이
-소유한 방화벽 규칙에서 가져옵니다. 과거 서비스 쓰기 가능 영수증은 CIDR 권한원으로 사용하지
+업데이트 시 허용 정책은 영수증이 아니라 검증된 `appsettings.Production.json`과 정확히 제품이
+소유한 방화벽 규칙에서 가져옵니다. 과거 서비스 쓰기 가능 영수증은 정책 권한원으로 사용하지
 않고 새 관리자 전용 영수증으로 교체합니다.
 
 패키지는 먼저 관리자 전용 staging 폴더로 복사합니다. 복사된 모든 파일과 Agent EXE를 메모리에
@@ -123,9 +125,20 @@ DataDirectory 전체를 제한된 transaction snapshot에 백업합니다. 새 �
 복구 오류가 하나라도 남으면 snapshot, legacy archive, program backup과 작업 journal 등 남아
 있는 증거를 자동 정리하지 않고 관리자 확인 대상으로 보존합니다.
 
-### CIDR을 변경하는 경우
+### Viewer 또는 스위치 허용 IP를 변경하는 경우
 
-Agent ZIP 폴더에서 관리자 PowerShell을 열어 설치기를 직접 실행합니다.
+현재 Agent와 같은 버전의 Agent ZIP 폴더에서 `Configure-Agent-Allowed-IPs.cmd`를
+더블클릭하고 UAC를 승인합니다. 현재 값을 보면서 Viewer PC IPv4와 스위치 관리 IPv4의 전체
+목록을 쉼표로 입력합니다. 빈 입력은 기존값을 유지하며 적용 전 최종 목록을 다시 확인합니다.
+오류가 발생하면 설정·방화벽과 서비스 상태를 변경 전 상태로 복구합니다.
+
+다른 버전의 ZIP으로 허용 IP만 변경하지 마십시오. 먼저 `Install-or-Update-Agent.cmd`로
+Agent와 ZIP 버전을 맞춘 뒤 같은 ZIP의 설정 도구를 사용합니다.
+
+### 고급 CIDR을 사용하는 경우
+
+Viewer PC가 DHCP이거나 여러 관리 서브넷과 32대가 넘는 장비를 운영할 때만 Agent ZIP
+폴더에서 관리자 PowerShell을 열어 설치기를 직접 실행합니다.
 
 ```powershell
 .\install-agent.ps1 `
@@ -174,12 +187,15 @@ Viewer 설치에는 관리자 권한이나 UAC 승인이 필요하지 않습니�
 ### Viewer 설치가 이전 상태로 복구된 경우
 
 Viewer 설치 창에 `Viewer 설치 실패를 감지해 설치 전 상태로 되돌립니다.`가 표시되면 바로
-아래의 세 줄을 먼저 확인합니다.
+아래의 진단 줄을 먼저 확인합니다.
 
 ```text
 Cause: <최초 실패 코드>
+Detail: <실패 세부 코드>
+ExitCode: <표시되는 경우의 프로세스 종료 코드>
 Recovery: <복구 결과>
 Diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch-Operations\viewer-install.json
+Runtime diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch\logs\viewer-diagnostic.jsonl
 ```
 
 - `Recovery: PREVIOUS_VIEWER_RESTORED`이면 기존 Viewer 파일과 바로 가기가 복구된
@@ -193,6 +209,10 @@ Diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch-Operations\viewer-install.json
 v0.9.16부터 시작 메뉴 또는 시작프로그램 폴더가 아직 없는 Windows 사용자 환경에서는
 설치기가 필요한 폴더를 먼저 만듭니다. 보안 정책이나 권한 때문에 만들 수 없으면
 `VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE`을 표시하고 설치 전 상태로 복구합니다.
+
+v0.9.17부터 Viewer 실행 파일뿐 아니라 매니페스트에 선언된 모든 WPF 파일의 크기와
+SHA-256을 설치 전과 staging 복사 후 각각 검사합니다. 실제 Viewer 창과 Agent 연결을
+사용하지 않는 20초 제한 무화면 자체점검을 통과한 뒤에만 설치를 확정합니다.
 
 ### 고급 설치
 
@@ -230,7 +250,7 @@ Viewer는 첫 연결에서 Agent의 영구 신원을 자동으로 저장합니�
 |---|---|---|
 | 장비명 | 예 | 화면에 표시할 이름 |
 | 모델 | 예 | IES4224GP, IES4028XP, IES4226XP |
-| 장비 IPv4 | 예 | Agent 대상 CIDR 안의 관리 주소 |
+| 장비 IPv4 | 예 | Agent 설치 또는 허용 IP 설정 도구에 등록한 관리 주소 |
 | ID | 예 | Telnet 로그인 ID |
 | 로그인 PW | 예 | Telnet 로그인 비밀번호 |
 | enable PW | 아니요 | 로그인 프롬프트가 `>`인 장비만 필요 |
@@ -327,9 +347,11 @@ Viewer에서 `AGENT_CONNECTION_REFUSED`가 보이면 다음 순서로 확인합�
    Test-NetConnection <Agent-PC-주소> -Port 18443
    ```
 
-4. `TcpTestSucceeded : False`이면 설치 때 입력한 Viewer 관리 CIDR, Agent PC의
-   Domain/Private 방화벽 프로필, 사내 라우팅과 EDR 차단을 확인합니다. 로컬 진단은 정상인데
-   원격 검사만 실패하면 스위치 접속 문제가 아니라 Viewer PC와 Agent PC 사이의 문제입니다.
+4. `TcpTestSucceeded : False`이면 설치 때 입력한 Viewer PC 허용 IP와 Agent PC의
+   Domain/Private 방화벽 프로필, 사내 라우팅과 EDR 차단을 확인합니다. Viewer PC 주소가
+   바뀌었다면 같은 버전 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 갱신합니다. 로컬
+   진단은 정상인데 원격 검사만 실패하면 스위치 접속 문제가 아니라 Viewer PC와 Agent PC
+   사이의 문제입니다.
 
 기본 제거는 프로그램과 서비스만 삭제하고 HTTPS 신원·설치 설정 데이터는 보존합니다.
 
@@ -365,11 +387,18 @@ Agent 신원 불일치가 발생합니다.
 | `AGENT_DIRECTORY_TRUST_INVALID` | Agent 설치·데이터 루트 또는 하위 항목의 소유자·reparse 구성을 신뢰할 수 없어 읽기·채택·삭제를 중단함. 강제 소유권 변경이나 삭제로 우회하지 말고 Windows 관리자 확인 |
 | `AGENT_RECEIPT_TRUST_INVALID` | 데이터 영구 삭제에 필요한 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. ACL 완화·파일 재작성으로 우회하지 말고 설치 증거와 데이터 보존 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
-| `AGENT_CONNECTION_REFUSED` | 입력한 주소의 TCP/18443에 listener가 없음. 먼저 스위치나 Viewer PC가 아닌 실제 Agent PC 주소인지 확인한 뒤 `SamsungSwitchWatchAgent` 서비스와 로컬 진단 확인 |
+| `AGENT_CONNECTION_REFUSED` | 입력한 주소의 TCP/18443에 listener가 없음. 실제 Agent PC 주소와 `SamsungSwitchWatchAgent` 서비스를 확인하고, Viewer PC IPv4가 바뀌었다면 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 허용 IP 갱신 |
 | `VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE` | 시작 메뉴 또는 시작프로그램 폴더를 만들 수 없음. Viewer를 설치할 동일 Windows 사용자로 실행했는지와 폴더 쓰기 권한·보안 정책 확인 |
 | `VIEWER_SHORTCUT_SETUP_FAILED` | Viewer 바로 가기 생성 또는 자동 시작 반영 실패. `Recovery` 결과를 확인하고 보안 프로그램의 바로 가기 생성 차단 여부 점검 |
-| `VIEWER_SMOKE_CHECK_FAILED` | 새 Viewer가 자체 점검 중 비정상 종료됨. 기존 Viewer 복구 여부와 진단 파일을 확인한 뒤 패키지 무결성·보안 프로그램 차단 여부 점검 |
-| `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 대상 CIDR 밖임 |
+| `VIEWER_SMOKE_CHECK_FAILED` | 새 Viewer 무화면 자체점검 실패. `Detail`, 선택적 `ExitCode`, 복구 결과, 설치 journal과 Viewer 진단 로그를 확인 |
+| `VIEWER_PACKAGE_FILE_MISSING` | 압축 해제 뒤 매니페스트에 선언된 Viewer 파일이 없음. 공식 ZIP을 새 폴더에 다시 압축 해제하고 EDR 격리 여부 확인 |
+| `VIEWER_PACKAGE_HASH_MISMATCH` | Viewer 파일이 매니페스트 SHA-256과 다름. 변조된 파일을 실행하지 말고 공식 ZIP과 보안 프로그램 기록 확인 |
+| `VIEWER_UNSUPPORTED_ARCHITECTURE` | 32비트 Windows에서는 win-x64 Viewer를 설치할 수 없음. 64비트 Windows PC에서 실행 |
+| `VIEWER_SELF_CHECK_START_FAILED` | 무화면 자체점검 프로세스를 시작하지 못함. Windows x64 여부와 AppLocker·WDAC·EDR 실행 차단 확인 |
+| `VIEWER_SELF_CHECK_WAIT_FAILED` | 무화면 자체점검 프로세스의 완료 상태를 읽지 못함. 설치 journal과 Windows Application 로그를 확인한 뒤 다시 설치 |
+| `VIEWER_SELF_CHECK_TIMEOUT` | 무화면 자체점검이 20초 안에 끝나지 않음. 남은 프로세스와 보안 프로그램 지연·차단 확인 |
+| `VIEWER_SELF_CHECK_EXITED_NONZERO` | 무화면 자체점검이 비정상 종료됨. 표시된 `ExitCode`, Windows Application 로그와 EDR 기록 확인 |
+| `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 스위치 IP 또는 고급 대상 CIDR 밖임. Agent ZIP의 허용 IP 설정 도구로 갱신 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |
 | `ENABLE_FAILED` | enable 승격 실패 |

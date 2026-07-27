@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.16-poc"
+VERSION = "0.9.17-poc"
 DOCUMENT_DATE = "2026-07-27"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -458,6 +458,7 @@ def add_callout(doc, label, text, kind="info"):
     fill, accent = palette[kind]
     p = doc.add_paragraph()
     set_paragraph_spacing(p, before=4, after=8, line=1.18)
+    p.paragraph_format.keep_together = True
     p.paragraph_format.left_indent = Inches(0.08)
     p.paragraph_format.right_indent = Inches(0.04)
     set_paragraph_shading(p, fill)
@@ -701,8 +702,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         doc,
         ["구간", "고정 통신", "운영 제한"],
         [
-            ("Viewer → Agent", "HTTPS/TCP 18443", "설치 시 지정한 Viewer 관리 CIDR만 허용"),
-            ("Agent → Switch", "Telnet/TCP 23", "설치 시 지정한 스위치 대상 CIDR만 허용"),
+            ("Viewer → Agent", "HTTPS/TCP 18443", "설치 시 지정한 Viewer PC IPv4만 기본 허용"),
+            ("Agent → Switch", "Telnet/TCP 23", "설치 시 지정한 스위치 관리 IPv4만 기본 허용"),
         ],
         [1900, 2100, 5360],
     )
@@ -729,15 +730,15 @@ Viewer PC                 Agent PC                    Samsung Switch
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
             "Install-or-Update-Agent.cmd를 더블클릭하고 UAC 관리자 승인을 합니다.",
-            "신규 설치에서는 Viewer 관리망 CIDR과 스위치 대상망 CIDR을 입력합니다.",
+            "신규 설치에서는 Viewer PC IPv4와 스위치 관리 IPv4를 입력합니다. CIDR 계산은 필요하지 않습니다.",
             "SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
     )
     add_code_block(
         doc,
         """
-Viewer 관리망 CIDR 예: 192.0.2.0/24
-스위치 대상망 CIDR 예: 198.51.100.0/24
+Viewer PC IPv4 예     : 192.0.2.25
+스위치 관리 IPv4 예  : 198.51.100.11,198.51.100.12
 서비스 이름          : SamsungSwitchWatchAgent
 서비스 계정          : NT SERVICE\\SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
@@ -757,11 +758,21 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         "업데이트 안정성",
         "패키지는 SYSTEM·Administrators 전용 staging으로 복사한 뒤 SHA-256을 다시 확인합니다. "
-        "install receipt는 관리자 전용 설치 증거이고, CIDR은 검증된 설정과 제품 소유 방화벽에서 "
+        "install receipt는 관리자 전용 설치 증거이고, 허용 정책은 검증된 설정과 제품 소유 방화벽에서 "
         "가져옵니다. rollback 선행 단계가 실패하면 후속 파일 변경을 멈추고 snapshot·archive·journal을 "
         "보존합니다.",
         "info",
     )
+    add_callout(
+        doc,
+        "허용 IP 변경",
+        "Viewer PC 또는 스위치 주소가 바뀌면 현재 Agent와 같은 버전 ZIP의 "
+        "Configure-Agent-Allowed-IPs.cmd를 실행합니다. 일반 IPv4만 입력하며 내부에서 "
+        "정확한 /32 정책으로 변환합니다. DHCP 또는 32대를 넘는 장비는 INSTALL_KO.md의 "
+        "고급 CIDR 절차를 사용하세요.",
+        "info",
+    )
+    doc.add_page_break()
     add_callout(
         doc,
         "설치 실패와 Viewer 연결 거부",
@@ -772,7 +783,6 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         f"{VERSION} Agent 설치기를 사용하세요.",
         "danger",
     )
-    doc.add_page_break()
     add_heading(doc, "Viewer 설치", 2, heading_num_id)
     add_steps(
         doc,
@@ -785,7 +795,8 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
     add_callout(
         doc,
         "Viewer 설치가 복구된 경우",
-        "설치 창의 Cause, Recovery, Diagnostic를 확인하세요. PREVIOUS_VIEWER_RESTORED이면 "
+        "설치 창의 Cause, Detail, 선택적 ExitCode, Recovery와 두 진단 경로를 확인하세요. "
+        "PREVIOUS_VIEWER_RESTORED이면 "
         "시작 메뉴에서 Viewer를 다시 실행합니다. ROLLBACK_INCOMPLETE이면 백업과 진단 파일을 "
         "보존하고 Windows 관리자에게 전달하세요. 자세한 코드는 INSTALL_KO.md를 확인하세요.",
         "danger",
@@ -797,6 +808,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         "install-viewer.ps1 옵션을 사용하세요.",
         "info",
     )
+    doc.add_page_break()
     add_heading(doc, "Viewer에서 Agent 연결", 2, heading_num_id)
     add_image(
         doc,
@@ -831,7 +843,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         [
             ("장비명", "예", "운영자가 구분하기 쉬운 표시 이름"),
             ("모델", "예", "IES4224GP, IES4028XP, IES4226XP"),
-            ("장비 IPv4", "예", "Agent 설치 시 허용한 대상 CIDR 안의 관리 IP"),
+            ("장비 IPv4", "예", "Agent 설치 또는 허용 IP 설정 도구에 등록한 관리 IP"),
             ("계정 ID", "예", "Telnet 로그인 계정"),
             ("로그인 PW", "예", "현재 Windows 사용자 DPAPI로 보호"),
             ("enable PW", "아니요", "로그인 후 프롬프트가 >인 장비에서만 사용"),
@@ -843,7 +855,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         "접속 시험 실패",
         "실패한 장비도 저장할 수 있지만 '접속 미확인'으로 표시되고 주기 감시는 강제로 꺼집니다. "
-        "주소, CIDR, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 시험하세요.",
+        "주소, Agent 허용 IP, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 시험하세요.",
         "warning",
     )
     add_heading(doc, "장비 show 명령 실행", 1, heading_num_id)
@@ -1023,19 +1035,19 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             "Viewer 설정 파일을 다른 PC나 다른 Windows 사용자에게 복사해도 계정은 복호화되지 않습니다.",
             "진단 파일에는 IP, ID, 비밀번호, 호스트명과 수동 명령 원문을 넣지 않습니다.",
             "레거시 백업은 SYSTEM과 로컬 Administrators만 접근할 수 있으며 Agent 서비스 SID에는 권한을 주지 않습니다.",
-            "대상 CIDR은 설치 설정, Viewer 관리 CIDR은 제품 소유 방화벽 규칙이 권한원이며 설치 영수증에서 복원하지 않습니다.",
-            "Agent 방화벽은 Viewer 관리 CIDR만 HTTPS/18443에 접근하도록 제한합니다.",
-            "Agent는 지정된 스위치 대상 CIDR과 고정 Telnet/23만 허용합니다.",
+            "대상 정책은 설치 설정, Viewer 접근 정책은 제품 소유 방화벽 규칙이 권한원이며 설치 영수증에서 복원하지 않습니다.",
+            "Agent 방화벽은 등록한 Viewer PC IPv4 또는 고급 관리 CIDR만 HTTPS/18443에 접근하도록 제한합니다.",
+            "Agent는 등록한 스위치 IPv4 또는 고급 대상 CIDR과 고정 Telnet/23만 허용합니다.",
         ],
         bullet_num_id,
     )
+    add_heading(doc, "문제 해결", 1, heading_num_id)
     add_callout(
         doc,
         "운영 원칙",
         "Viewer PC와 Agent PC는 관리망에서만 사용하고, 일반 사용자 VLAN이나 인터넷을 거쳐 Telnet을 사용하지 마세요.",
         "danger",
     )
-    add_heading(doc, "문제 해결", 1, heading_num_id)
     add_table(
         doc,
         ["표시 코드/증상", "확인 순서"],
@@ -1048,13 +1060,20 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID", "작업 기록 폴더 소유자·ACL·파일 구성이 안전하지 않음. 관리자와 보안 정책 확인"),
             ("AGENT_DIRECTORY_TRUST_INVALID", "활성 Agent install/data 트리의 owner 또는 reparse 구성을 신뢰할 수 없음. 삭제·강제 소유권 변경 없이 Windows 관리자 확인"),
             ("AGENT_RECEIPT_TRUST_INVALID", "영구 삭제용 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. 영수증과 데이터 보존 후 관리자 확인"),
-            ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
-            ("AGENT_CONNECTION_REFUSED", "입력 주소가 실제 Agent PC인지 → 서비스 → 로컬 진단 → Viewer PC의 원격 TCP/18443"),
+            ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer PC 허용 IP 방화벽"),
+            ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → 서비스 → 허용 IP 설정 도구 → Viewer PC의 원격 TCP/18443"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
             ("VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE", "Viewer를 설치할 동일 Windows 사용자 → 시작 메뉴·시작프로그램 폴더 쓰기 권한 → 보안 정책"),
             ("VIEWER_SHORTCUT_SETUP_FAILED", "Recovery 결과 → 바로 가기 생성 권한 → 보안 프로그램 차단"),
-            ("VIEWER_SMOKE_CHECK_FAILED", "기존 Viewer 복구 여부 → 패키지 무결성 → 보안 프로그램 차단"),
-            ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
+            ("VIEWER_SMOKE_CHECK_FAILED", "Detail·ExitCode → 기존 Viewer 복구 → 설치 journal·Viewer 진단 로그 → 보안 프로그램"),
+            ("VIEWER_PACKAGE_FILE_MISSING", "공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록 확인"),
+            ("VIEWER_PACKAGE_HASH_MISMATCH", "변조 파일 실행 중지 → 공식 ZIP·매니페스트와 보안 프로그램 기록 확인"),
+            ("VIEWER_UNSUPPORTED_ARCHITECTURE", "64비트 Windows PC에서 win-x64 Viewer 설치"),
+            ("VIEWER_SELF_CHECK_START_FAILED", "Windows x64 → AppLocker·WDAC·EDR 실행 차단 확인"),
+            ("VIEWER_SELF_CHECK_WAIT_FAILED", "설치 journal → Windows Application 로그 → 다시 설치"),
+            ("VIEWER_SELF_CHECK_TIMEOUT", "20초 자체점검 제한 → 남은 프로세스·보안 프로그램 지연 확인"),
+            ("VIEWER_SELF_CHECK_EXITED_NONZERO", "표시된 ExitCode → Windows Application 로그·EDR 기록 확인"),
+            ("TARGET_NOT_ALLOWED", "장비 IPv4가 등록된 허용 IP인지 → Agent 허용 IP 설정 도구"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
@@ -1120,7 +1139,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ),
             (
                 "Viewer PC",
-                "Test-NetConnection <Agent-PC-주소> -Port 18443을 실행합니다. 실패하면 Viewer 관리 CIDR, Domain/Private 방화벽, 라우팅과 EDR을 확인합니다.",
+                "Test-NetConnection <Agent-PC-주소> -Port 18443을 실행합니다. 실패하면 Viewer PC 허용 IP, Domain/Private 방화벽, 라우팅과 EDR을 확인합니다.",
             ),
         ],
         [1900, 7460],
@@ -1146,7 +1165,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         doc,
         [
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
-            "Agent PC에서 Install-or-Update-Agent.cmd를 실행합니다. 기존 CIDR 설정은 기본적으로 보존됩니다.",
+            "Agent PC에서 Install-or-Update-Agent.cmd를 실행합니다. 기존 허용 정책은 기본적으로 보존됩니다.",
             "Viewer PC에서 새 Viewer 패키지의 Install-or-Update-Viewer.cmd를 실행합니다.",
             "Agent 연결, 장비 목록, 접속 시험, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
@@ -1172,7 +1191,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         "최종 운영 체크리스트",
         2,
         heading_num_id,
-        page_break_before=True,
+        page_break_before=False,
     )
     add_bullets(
         doc,

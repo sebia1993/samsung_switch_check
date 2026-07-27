@@ -310,14 +310,29 @@ Assert-ContainsAll -Name 'Agent rollback dependency state' -Text $install -Needl
     'ServiceConfigurationRestored = $false',
     'LegacyBackgroundFilesRestored = $false',
     'DataRestored = $false',
+    'FirewallRestored = $false',
+    '$rollbackState.FirewallRestored = $true',
     'if (-not $rollbackState.ServiceQuiesced)',
     'if (-not $rollbackState.ProgramRestored)',
     'if (-not $rollbackState.ServiceConfigurationRestored)',
     '-not $rollbackState.LegacyBackgroundFilesRestored',
+    '-not $rollbackState.FirewallRestored',
     'if ($serviceQuiescenceRequired -and $isUpdate)',
     'if ($serviceQuiescenceRequired -and $isUpdate -and',
     'Previous Agent state was not fully restored; service restart is blocked.'
 )
+$firewallRestoreIndex = $install.IndexOf(
+    '$rollbackState.FirewallRestored = $true')
+$serviceRestartIndex = $install.IndexOf(
+    "Name = 'restart-previous-service'")
+$serviceFirewallGuardIndex = $install.IndexOf(
+    '-not $rollbackState.FirewallRestored',
+    $serviceRestartIndex)
+Assert-DeploymentTest -Condition (
+    $firewallRestoreIndex -ge 0 -and
+    $serviceRestartIndex -gt $firewallRestoreIndex -and
+    $serviceFirewallGuardIndex -gt $serviceRestartIndex
+) -Message 'Rollback must confirm firewall restoration before restarting the previous Agent service.'
 Assert-ContainsAll -Name 'Agent program rollback disposition' -Text $install -Needles @(
     'Get-SswProgramRollbackDisposition',
     "'RestoreBackup'",
@@ -612,6 +627,8 @@ Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
     '-Verb RunAs',
     '-Wait',
     'SSW_INSTALLER_PATH',
+    'SSW_POWERSHELL_PATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
+    'Start-Process -FilePath $env:SSW_POWERSHELL_PATH',
     '-EncodedCommand',
     'Read-Host',
     'Agent installation failed.',
@@ -619,6 +636,8 @@ Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
     'AGENT_CONNECTION_REFUSED',
     'pause'
 )
+Assert-DeploymentTest -Condition (-not ($launcher -match '(?im)^\s*powershell\.exe(?:\s|$)')) `
+    -Message 'Agent launcher must not resolve Windows PowerShell through the current directory or PATH.'
 Assert-DeploymentTest -Condition (
     $build -match "\[string\]\`$Version\s*=\s*'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?'") `
     -Message 'Release build default must be a semantic version.'
@@ -626,10 +645,13 @@ Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Agent.cmd'"
     -Message 'Agent package must include the one-click UAC launcher.'
 Assert-ContainsAll -Name 'Viewer launcher' -Text $viewerLauncher -Needles @(
     'install-viewer.ps1',
-    'powershell.exe',
+    'SSW_POWERSHELL_PATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
+    '"%SSW_POWERSHELL_PATH%"',
     '-StartWithWindows',
     'pause'
 )
+Assert-DeploymentTest -Condition (-not ($viewerLauncher -match '(?im)^\s*powershell\.exe(?:\s|$)')) `
+    -Message 'Viewer launcher must not resolve Windows PowerShell through the current directory or PATH.'
 Assert-DeploymentTest -Condition (-not $viewerLauncher.Contains('-Verb RunAs')) `
     -Message 'Per-user Viewer launcher must not request administrator elevation.'
 Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Viewer.cmd'") `
@@ -732,10 +754,10 @@ Assert-ContainsAll -Name 'Viewer transaction boundary' -Text $viewerInstall -Nee
     'if (-not $shortcutBackupsReady) { throw',
     'Remove-SswEmptyDirectoryBestEffort -Path $startupParent',
     'Remove-SswEmptyDirectoryBestEffort -Path $startMenuParent',
-    '$smokeProcess.HasExited -and $smokeProcess.ExitCode -ne 0',
+    "-ArgumentList '--install-smoke-check'",
     'Cause: $failureCode',
     'Recovery: $recovery',
-    'Diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch-Operations\viewer-install.json',
+    'Install journal: $journalPath',
     'if ($transactionCommitted) {',
     "Name = 'cleanup-program-backup'",
     "Name = 'cleanup-shortcut-backup'"
@@ -1237,6 +1259,11 @@ $snapshot = [pscustomobject]@{
 }
 Assert-DeploymentTest -Condition (Test-SswAgentHttpsFirewallRuleExact -Snapshot $snapshot `
     -RemoteAddress @('10.20.30.9/24')) -Message 'Exact HTTPS firewall rule was rejected.'
+$snapshot.RemoteAddress = @('10.20.30.41')
+Assert-DeploymentTest -Condition (Test-SswAgentHttpsFirewallRuleExact -Snapshot $snapshot `
+    -RemoteAddress @('10.20.30.41/32')) `
+    -Message 'A NetSecurity bare host address was not treated as the equivalent /32 CIDR.'
+$snapshot.RemoteAddress = @('10.20.30.0/24')
 $snapshot.LocalPort = '18444'
 Assert-DeploymentTest -Condition (-not (Test-SswAgentHttpsFirewallRuleExact -Snapshot $snapshot `
     -RemoteAddress @('10.20.30.0/24'))) -Message 'Wrong HTTPS port was accepted.'

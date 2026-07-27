@@ -3,6 +3,7 @@ using SamsungSwitchWatch.Viewer.ViewModels;
 using SamsungSwitchWatch.Viewer.Views;
 using SamsungSwitchWatch.Viewer.Models;
 using System.IO;
+using System.Windows;
 using System.Windows.Automation;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
@@ -20,6 +21,9 @@ public sealed class WpfSmokeTests
             {
                 var app = new App();
                 app.InitializeComponent();
+                Assert.Equal(
+                    ViewerInstallSmokeCheck.SuccessExitCode,
+                    ViewerInstallSmokeCheck.Run(app.Resources));
                 var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
                 var deviceStore = new ManagedDeviceStore(Path.Combine(folder, "devices.json"));
                 var viewModel = new DashboardViewModel(new ViewerSettings
@@ -124,6 +128,81 @@ public sealed class WpfSmokeTests
         Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke thread did not finish.");
         Assert.Null(failure);
     }
+
+    [Fact]
+    public void InstallSmokeCheck_UsesOnlyExactSingleArgument()
+    {
+        Assert.True(ViewerInstallSmokeCheck.IsRequested(["--install-smoke-check"]));
+
+        Assert.False(ViewerInstallSmokeCheck.IsRequested([]));
+        Assert.False(ViewerInstallSmokeCheck.IsRequested(["--INSTALL-SMOKE-CHECK"]));
+        Assert.False(ViewerInstallSmokeCheck.IsRequested(["--install-smoke-check", "--extra"]));
+        Assert.False(ViewerInstallSmokeCheck.IsRequested(["--install-smoke-check=true"]));
+    }
+
+    [Fact]
+    public void InstallSmokeCheck_CoreLogicUsesOnlyInMemoryResources()
+    {
+        var resources = CreateInstallSmokeResources();
+        var openedResources = new List<Uri>();
+
+        var exitCode = ViewerInstallSmokeCheck.Run(resources, uri =>
+        {
+            openedResources.Add(uri);
+            return new MemoryStream([1]);
+        });
+
+        Assert.Equal(ViewerInstallSmokeCheck.SuccessExitCode, exitCode);
+        Assert.Equal(5, openedResources.Count);
+        Assert.All(openedResources, uri =>
+            Assert.StartsWith("/SamsungSwitchWatch.Viewer;component/", uri.OriginalString));
+    }
+
+    [Fact]
+    public void InstallSmokeCheck_FailuresReturnStableNonzeroExitCodes()
+    {
+        var missingApplicationResource = CreateInstallSmokeResources();
+        missingApplicationResource.Remove("PrimaryButton");
+
+        Assert.Equal(
+            ViewerInstallSmokeCheck.ApplicationResourceFailureExitCode,
+            ViewerInstallSmokeCheck.Run(
+                missingApplicationResource,
+                _ => new MemoryStream([1])));
+        Assert.Equal(
+            ViewerInstallSmokeCheck.ScreenResourceFailureExitCode,
+            ViewerInstallSmokeCheck.Run(
+                CreateInstallSmokeResources(),
+                _ => null));
+        Assert.Equal(
+            ViewerInstallSmokeCheck.UnexpectedFailureExitCode,
+            ViewerInstallSmokeCheck.Run(
+                CreateInstallSmokeResources(),
+                _ => throw new InvalidOperationException("synthetic")));
+    }
+
+    private static ResourceDictionary CreateInstallSmokeResources() =>
+        new()
+        {
+            ["HealthBrush"] = new Infrastructure.HealthToBrushConverter(),
+            ["HealthText"] = new Infrastructure.HealthToTextConverter(),
+            ["BoolOpacity"] = new Infrastructure.BoolToOpacityConverter(),
+            ["BoolVisibility"] = new System.Windows.Controls.BooleanToVisibilityConverter(),
+            ["CanvasBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["SurfaceBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["TextBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["MutedTextBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["BorderBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["PrimaryBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["PrimaryHoverBrush"] = new System.Windows.Media.SolidColorBrush(),
+            ["EmptyStateText"] = new Style(typeof(System.Windows.Controls.TextBlock)),
+            ["CardStyle"] = new Style(typeof(System.Windows.Controls.Border)),
+            ["PrimaryButton"] = new Style(typeof(System.Windows.Controls.Button)),
+            ["SecondaryButton"] = new Style(typeof(System.Windows.Controls.Button)),
+            [typeof(Window)] = new Style(typeof(Window)),
+            [typeof(System.Windows.Controls.TextBlock)] =
+                new Style(typeof(System.Windows.Controls.TextBlock))
+        };
 
     private static void VerifyDeviceManagementFailuresStayInsideWindow(string folder)
     {

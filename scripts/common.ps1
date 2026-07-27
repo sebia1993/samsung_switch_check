@@ -1799,7 +1799,16 @@ function Test-SswAgentHttpsFirewallRuleExact {
     )
 
     $expected = @(ConvertTo-SswIpv4Cidrs -Cidr $RemoteAddress | Sort-Object)
-    $actual = @($Snapshot.RemoteAddress | ForEach-Object { [string]$_ } | Sort-Object)
+    try {
+        $actualInputs = @($Snapshot.RemoteAddress | ForEach-Object {
+            $address = ([string]$_).Trim()
+            if ($address -match '/') { $address } else { "$address/32" }
+        })
+        $actual = @(ConvertTo-SswIpv4Cidrs -Cidr $actualInputs | Sort-Object)
+    }
+    catch {
+        return $false
+    }
     return (Test-SswOwnedAgentHttpsFirewallRule -Snapshot $Snapshot) -and
         $Snapshot.Enabled -eq 'True' -and $Snapshot.Direction -eq 'Inbound' -and
         $Snapshot.Action -eq 'Allow' -and $Snapshot.Protocol -in @('TCP', '6') -and
