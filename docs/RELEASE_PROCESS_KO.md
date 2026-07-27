@@ -4,23 +4,23 @@
 
 - 대상: Windows x64
 - 런타임: .NET 10 self-contained, single-file, trimming 비활성
-- 현재 버전: `0.9.15-poc`
-- 태그: annotated tag `v0.9.15-poc`
+- 현재 버전: `0.9.16-poc`
+- 태그: annotated tag `v0.9.16-poc`
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP, 정확히 두 개
 - 기존 Release와 Asset은 교체하지 않는 immutable 방식
 
 공개 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.16-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.16-poc-win-x64.zip
 ```
 
 Actions 내부 검증 산출물:
 
 ```text
-SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.9.16-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.9.16-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -59,7 +59,7 @@ git ls-files AGENTS.md
 ## 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.15-poc
+.\scripts\build-release.ps1 -Version 0.9.16-poc
 ```
 
 스크립트는 다음을 수행합니다.
@@ -75,7 +75,7 @@ git ls-files AGENTS.md
 로컬 진단 목적으로만 더러운 작업 트리를 허용할 수 있습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.15-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.9.16-poc -AllowDirty
 ```
 
 `sourceDirty=true` 산출물은 공식 Release에 사용하지 않습니다.
@@ -191,8 +191,8 @@ transaction·legacy 백업은 관리자 판단 전까지 보존해야 합니다.
 `.github/workflows/release.yml`은 `v*` 태그 push에서만 게시합니다.
 
 ```powershell
-git tag -a v0.9.15-poc -m "Samsung Switch Watch v0.9.15-poc"
-git push origin v0.9.15-poc
+git tag -a v0.9.16-poc -m "Samsung Switch Watch v0.9.16-poc"
+git push origin v0.9.16-poc
 ```
 
 워크플로는 다음 조건을 fail-closed로 확인합니다.
@@ -225,10 +225,10 @@ Agent 업데이트가 실패하면 설치기가 이전 버전을 자동 복구�
 
 ```powershell
 $repo = 'sebia1993/samsung_switch_check'
-$tag = 'v0.9.15-poc'
+$tag = 'v0.9.16-poc'
 $assets = @(
-  'SamsungSwitchWatch-Agent-0.9.15-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.9.15-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.9.16-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.9.16-poc-win-x64.zip'
 )
 
 gh release verify $tag --repo $repo

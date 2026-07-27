@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.15-poc"
+VERSION = "0.9.16-poc"
 DOCUMENT_DATE = "2026-07-27"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -772,6 +772,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
         f"{VERSION} Agent 설치기를 사용하세요.",
         "danger",
     )
+    doc.add_page_break()
     add_heading(doc, "Viewer 설치", 2, heading_num_id)
     add_steps(
         doc,
@@ -780,6 +781,14 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             "Install-or-Update-Viewer.cmd를 더블클릭합니다. 관리자 권한은 필요하지 않습니다.",
             "설치 완료 뒤 Viewer가 실행되고 다음 Windows 로그인부터 자동 시작되는지 확인합니다.",
         ],
+    )
+    add_callout(
+        doc,
+        "Viewer 설치가 복구된 경우",
+        "설치 창의 Cause, Recovery, Diagnostic를 확인하세요. PREVIOUS_VIEWER_RESTORED이면 "
+        "시작 메뉴에서 Viewer를 다시 실행합니다. ROLLBACK_INCOMPLETE이면 백업과 진단 파일을 "
+        "보존하고 Windows 관리자에게 전달하세요. 자세한 코드는 INSTALL_KO.md를 확인하세요.",
+        "danger",
     )
     add_callout(
         doc,
@@ -792,7 +801,7 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
     add_image(
         doc,
         images_dir / "02-agent-connection.png",
-        width=4.2,
+        width=2.8,
         title="Agent 연결 창",
         alt_text="Agent 주소만 입력하고 HTTPS 포트 18443을 자동 사용하는 연결 설정 창",
         caption="그림 1. Agent 주소만 입력하는 연결 설정",
@@ -1042,6 +1051,9 @@ Viewer 관리망 CIDR 예: 192.0.2.0/24
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer 관리 CIDR 방화벽"),
             ("AGENT_CONNECTION_REFUSED", "입력 주소가 실제 Agent PC인지 → 서비스 → 로컬 진단 → Viewer PC의 원격 TCP/18443"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
+            ("VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE", "Viewer를 설치할 동일 Windows 사용자 → 시작 메뉴·시작프로그램 폴더 쓰기 권한 → 보안 정책"),
+            ("VIEWER_SHORTCUT_SETUP_FAILED", "Recovery 결과 → 바로 가기 생성 권한 → 보안 프로그램 차단"),
+            ("VIEWER_SMOKE_CHECK_FAILED", "기존 Viewer 복구 여부 → 패키지 무결성 → 보안 프로그램 차단"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Agent 설치 시 지정한 대상 CIDR 안인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),

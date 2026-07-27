@@ -96,6 +96,47 @@ function Write-SswStep {
     Write-Host "[Samsung Switch Watch] $Message" -ForegroundColor Cyan
 }
 
+function New-SswDirectoryIfMissing {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Z][A-Z0-9_]{2,63}$')]
+        [string]$FailureCode,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $fullPath) {
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+            throw ('{0}: {1} 경로가 폴더가 아닙니다.' -f $FailureCode, $Description)
+        }
+        return $false
+    }
+
+    try {
+        New-Item -ItemType Directory -Path $fullPath -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        $message = '{0}: {1} 폴더를 만들 수 없습니다. 같은 Windows 사용자로 실행하고 쓰기 권한을 확인하세요.' -f
+            $FailureCode, $Description
+        throw [InvalidOperationException]::new($message, $_.Exception)
+    }
+    return $true
+}
+
+function Remove-SswEmptyDirectoryBestEffort {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return }
+        if (Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First 1) { return }
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning '설치기가 새로 만든 빈 바로 가기 폴더를 정리하지 못했습니다.'
+    }
+}
+
 function Get-SswAgentServiceName {
     return 'SamsungSwitchWatchAgent'
 }

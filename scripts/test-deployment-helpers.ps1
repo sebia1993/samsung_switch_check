@@ -660,9 +660,60 @@ Assert-ContainsAll -Name 'Viewer installer' -Text $viewerInstall -Needles @(
     '[switch]$StartWithWindows',
     '[switch]$DisableStartWithWindows',
     "if (`$StartWithWindows -and `$DisableStartWithWindows)",
+    'New-SswDirectoryIfMissing -Path $startMenuParent',
+    'New-SswDirectoryIfMissing -Path $startupParent',
+    'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE',
     'if ($StartWithWindows) { Copy-Item -LiteralPath $startMenu -Destination $startup -Force }',
     'elseif ($DisableStartWithWindows -and (Test-Path -LiteralPath $startup -PathType Leaf))'
 )
+
+Write-SswStep 'Viewer shortcut directory helper behavior'
+$shortcutDirectoryTestRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'SamsungSwitchWatch-shortcut-directory-{0}' -f [Guid]::NewGuid().ToString('N'))
+$createdShortcutDirectory = Join-Path $shortcutDirectoryTestRoot 'Programs'
+$occupiedShortcutDirectory = Join-Path $shortcutDirectoryTestRoot 'Not-A-Directory'
+try {
+    $created = New-SswDirectoryIfMissing -Path $createdShortcutDirectory `
+        -FailureCode 'TEST_DIRECTORY_UNAVAILABLE' -Description '테스트 바로 가기'
+    Assert-DeploymentTest -Condition $created -Message 'Missing shortcut directory was not reported as newly created.'
+    Assert-DeploymentTest -Condition (Test-Path -LiteralPath $createdShortcutDirectory -PathType Container) `
+        -Message 'Missing shortcut directory was not created.'
+
+    $createdAgain = New-SswDirectoryIfMissing -Path $createdShortcutDirectory `
+        -FailureCode 'TEST_DIRECTORY_UNAVAILABLE' -Description '테스트 바로 가기'
+    Assert-DeploymentTest -Condition (-not $createdAgain) `
+        -Message 'Existing shortcut directory was incorrectly reported as newly created.'
+
+    $sentinel = Join-Path $createdShortcutDirectory 'keep.txt'
+    [IO.File]::WriteAllText($sentinel, 'keep', (New-Object Text.UTF8Encoding($false)))
+    Remove-SswEmptyDirectoryBestEffort -Path $createdShortcutDirectory
+    Assert-DeploymentTest -Condition (Test-Path -LiteralPath $createdShortcutDirectory -PathType Container) `
+        -Message 'Non-empty shortcut directory was removed.'
+    Remove-Item -LiteralPath $sentinel -Force
+    Remove-SswEmptyDirectoryBestEffort -Path $createdShortcutDirectory
+    Assert-DeploymentTest -Condition (-not (Test-Path -LiteralPath $createdShortcutDirectory)) `
+        -Message 'Empty installer-created shortcut directory was not removed.'
+
+    New-Item -ItemType Directory -Path $shortcutDirectoryTestRoot -Force | Out-Null
+    [IO.File]::WriteAllText($occupiedShortcutDirectory, 'file', (New-Object Text.UTF8Encoding($false)))
+    $occupiedPathRejected = $false
+    try {
+        $null = New-SswDirectoryIfMissing -Path $occupiedShortcutDirectory `
+            -FailureCode 'TEST_DIRECTORY_UNAVAILABLE' -Description '테스트 바로 가기'
+    }
+    catch {
+        $occupiedPathRejected = $_.Exception.Message.StartsWith('TEST_DIRECTORY_UNAVAILABLE:')
+    }
+    Assert-DeploymentTest -Condition $occupiedPathRejected `
+        -Message 'A file occupying the shortcut directory path was not rejected with a stable code.'
+}
+finally {
+    if (Test-Path -LiteralPath $shortcutDirectoryTestRoot) {
+        Assert-SswChildPath -Parent ([IO.Path]::GetTempPath()) -Child $shortcutDirectoryTestRoot
+        Remove-Item -LiteralPath $shortcutDirectoryTestRoot -Recurse -Force
+    }
+}
+
 Assert-DeploymentTest -Condition (
     $mockSmoke.Contains("-ArgumentList '--service'") -and
     -not $mockSmoke.Contains("-ArgumentList '--background'")
@@ -672,11 +723,19 @@ Write-SswStep 'Viewer transactional rollback and commit boundary contract'
 Assert-ContainsAll -Name 'Viewer transaction boundary' -Text $viewerInstall -Needles @(
     '$shortcutBackupsReady = $false',
     '$shortcutMutationStarted = $false',
+    '$rollbackState = [pscustomobject]@{ ShortcutRestored = $false }',
     '$transactionCommitted = $false',
     '$shortcutBackupsReady = $true',
     '$shortcutMutationStarted = $true',
-    'if (-not $shortcutMutationStarted) { return }',
+    '$rollbackState.ShortcutRestored = $true',
+    'if (-not $rollbackState.ShortcutRestored)',
     'if (-not $shortcutBackupsReady) { throw',
+    'Remove-SswEmptyDirectoryBestEffort -Path $startupParent',
+    'Remove-SswEmptyDirectoryBestEffort -Path $startMenuParent',
+    '$smokeProcess.HasExited -and $smokeProcess.ExitCode -ne 0',
+    'Cause: $failureCode',
+    'Recovery: $recovery',
+    'Diagnostic: %LOCALAPPDATA%\SamsungSwitchWatch-Operations\viewer-install.json',
     'if ($transactionCommitted) {',
     "Name = 'cleanup-program-backup'",
     "Name = 'cleanup-shortcut-backup'"
