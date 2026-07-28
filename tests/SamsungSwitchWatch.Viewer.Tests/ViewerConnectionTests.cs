@@ -468,6 +468,7 @@ public sealed class ViewerConnectionTests
 
         Assert.Equal("AGENT_NOT_READY", failure.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, states[^1]);
+        Assert.DoesNotContain(AgentConnectionState.Connected, states);
     }
 
     [Fact]
@@ -486,6 +487,7 @@ public sealed class ViewerConnectionTests
 
         Assert.Equal("AGENT_RESPONSE_INVALID", failure.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, states[^1]);
+        Assert.DoesNotContain(AgentConnectionState.Connected, states);
     }
 
     [Fact]
