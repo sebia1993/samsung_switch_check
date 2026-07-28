@@ -33,6 +33,9 @@ internal sealed class ViewerDiagnosticLog
     ];
     private static readonly HashSet<string> AllowedErrorCodes =
     [
+        "VIEWER_MONITOR_STATE_CORRUPT",
+        "VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED",
+        "VIEWER_MONITOR_STATE_UNAVAILABLE",
         "VIEWER_MONITOR_STATE_WRITE_FAILED",
         "VIEWER_MONITOR_CYCLE_FAILED",
         "VIEWER_SETTINGS_WRITE_FAILED",

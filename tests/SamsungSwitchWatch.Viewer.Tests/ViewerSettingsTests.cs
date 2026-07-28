@@ -489,11 +489,37 @@ public sealed class ViewerSettingsTests
     {
         var settings = new ViewerSettings { StartMinimizedToTray = true };
 
-        Assert.False(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: false));
-        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: true));
+        Assert.False(StartupWindowPolicy.ShouldShowMainWindow(
+            settings,
+            needsConnection: false,
+            ViewerMonitoringLoadStatus.Ok));
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
+            settings,
+            needsConnection: true,
+            ViewerMonitoringLoadStatus.Ok));
 
         settings.StartMinimizedToTray = false;
-        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection: false));
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
+            settings,
+            needsConnection: false,
+            ViewerMonitoringLoadStatus.Ok));
+    }
+
+    [Theory]
+    [InlineData("Corrupt")]
+    [InlineData("VersionUnsupported")]
+    [InlineData("StorageUnavailable")]
+    public void StartupWindowPolicy_MonitoringLoadFailureOverridesTrayStart(
+        string monitoringLoadStatusName)
+    {
+        var settings = new ViewerSettings { StartMinimizedToTray = true };
+        var monitoringLoadStatus =
+            Enum.Parse<ViewerMonitoringLoadStatus>(monitoringLoadStatusName);
+
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
+            settings,
+            needsConnection: false,
+            monitoringLoadStatus));
     }
 
     [Fact]

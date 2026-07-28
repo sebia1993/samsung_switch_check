@@ -91,6 +91,58 @@ public sealed class ViewerDiagnosticLogTests
     }
 
     [Fact]
+    public void DiagnosticLog_PreservesMonitorStateRecoveryCodesWithoutSensitiveContext()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(
+                folder,
+                applicationVersion: "password=login-secret");
+            var expectedCodes = new[]
+            {
+                "VIEWER_MONITOR_STATE_CORRUPT",
+                "VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED",
+                "VIEWER_MONITOR_STATE_UNAVAILABLE"
+            };
+
+            foreach (var code in expectedCodes)
+            {
+                log.Write(
+                    "monitoring-store-startup host=192.0.2.10 user=operator command=show-port-status",
+                    code);
+            }
+
+            var content = File.ReadAllText(log.CurrentPath);
+            Assert.DoesNotContain("192.0.2.10", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator", content, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("login-secret", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("show-port-status", content, StringComparison.OrdinalIgnoreCase);
+
+            var lines = File.ReadAllLines(log.CurrentPath);
+            Assert.Equal(expectedCodes.Length, lines.Length);
+            for (var index = 0; index < expectedCodes.Length; index++)
+            {
+                using var document = JsonDocument.Parse(lines[index]);
+                Assert.Equal(4, document.RootElement.EnumerateObject().Count());
+                Assert.Equal(
+                    "diagnostic",
+                    document.RootElement.GetProperty("stage").GetString());
+                Assert.Equal(
+                    expectedCodes[index],
+                    document.RootElement.GetProperty("errorCode").GetString());
+                Assert.Equal(
+                    "unknown",
+                    document.RootElement.GetProperty("appVersion").GetString());
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void DiagnosticLog_RotatesToOneBackupAtConfiguredLimit()
     {
         var folder = TemporaryFolder();

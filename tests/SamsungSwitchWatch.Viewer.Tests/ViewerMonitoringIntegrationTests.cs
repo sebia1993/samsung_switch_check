@@ -10,6 +10,296 @@ namespace SamsungSwitchWatch.Viewer.Tests;
 
 public sealed class ViewerMonitoringIntegrationTests
 {
+    [Theory]
+    [InlineData(
+        "Corrupt",
+        "VIEWER_MONITOR_STATE_CORRUPT")]
+    [InlineData(
+        "VersionUnsupported",
+        "VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED")]
+    [InlineData(
+        "StorageUnavailable",
+        "VIEWER_MONITOR_STATE_UNAVAILABLE")]
+    public async Task NonOperationalMonitoringState_FailsClosedButKeepsManualQueryAvailable(
+        string expectedStatusName,
+        string expectedErrorCode)
+    {
+        var expectedStatus = Enum.Parse<ViewerMonitoringLoadStatus>(expectedStatusName);
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var persistence = MonitoringLoadFailurePersistence.For(expectedStatus);
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"),
+                persistence);
+            var client = new RecordingClient();
+            var viewModel = CreateViewModel(folder, devices, client, monitoringStore);
+            try
+            {
+                Assert.Equal(expectedStatus, monitoringStore.LastLoadStatus);
+                Assert.False(monitoringStore.IsOperational);
+                Assert.Equal(expectedErrorCode, monitoringStore.LoadErrorCode);
+
+                await viewModel.InitializeAsync();
+                await viewModel.RunMonitoringCycleAsync();
+                await Task.Delay(100);
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal(expectedErrorCode, device.CollectionErrorCode);
+                Assert.Equal(0, viewModel.MonitoredCount);
+                Assert.Equal(1, viewModel.UnmonitoredCount);
+                Assert.Equal(
+                    "Agent 연결됨 · 자동 감시 중지됨",
+                    viewModel.MiniCurrentStatusText);
+                Assert.Equal(
+                    "자동 감시 저장소 확인 필요",
+                    viewModel.MiniIssueTitle);
+                Assert.Contains(expectedErrorCode, viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains(
+                    ViewerConnectionMessages.ForCode(expectedErrorCode),
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    client.ExecuteRequests,
+                    request => request.Purpose.Equals("monitor", StringComparison.Ordinal));
+
+                viewModel.SelectedDevice = device;
+                viewModel.ReadOnlyQueryCommand = "show version";
+
+                Assert.True(viewModel.ReadOnlyQueriesEnabled);
+                Assert.True(viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null));
+
+                viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+                await WaitUntilAsync(() =>
+                    !viewModel.IsReadOnlyQueryRunning
+                    && client.ExecuteRequests.Count(request =>
+                        request.Purpose.Equals("manual", StringComparison.Ordinal)) == 1);
+
+                Assert.Equal("manual-output", viewModel.ReadOnlyQueryOutput);
+                Assert.DoesNotContain(
+                    client.ExecuteRequests,
+                    request => request.Purpose.Equals("monitor", StringComparison.Ordinal));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task BeginSessionWriteFailure_StillInitializesAgentAndKeepsManualQueryAvailable()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var persistence = new FailAfterWritesMonitoringPersistence(
+                successfulWritesBeforeFailure: 0);
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"),
+                persistence);
+            var client = new RecordingClient();
+            var viewModel = CreateViewModel(folder, devices, client, monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+
+                Assert.Equal(
+                    ViewerMonitoringLoadStatus.StorageUnavailable,
+                    monitoringStore.LastLoadStatus);
+                Assert.False(monitoringStore.IsOperational);
+                Assert.Equal(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    monitoringStore.LoadErrorCode);
+                Assert.Equal(AgentConnectionState.Demo, viewModel.ConnectionState);
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal("StoreUnavailable", device.CollectionState);
+                Assert.Equal(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    device.CollectionErrorCode);
+                Assert.Equal(0, viewModel.MonitoredCount);
+                Assert.Equal(1, viewModel.UnmonitoredCount);
+                Assert.Equal(
+                    "Agent 연결됨 · 자동 감시 중지됨",
+                    viewModel.MiniCurrentStatusText);
+                Assert.Equal(
+                    "자동 감시 저장소 확인 필요",
+                    viewModel.MiniIssueTitle);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    viewModel.MiniIssueDetail,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    client.ExecuteRequests,
+                    request => request.Purpose.Equals(
+                        "monitor",
+                        StringComparison.Ordinal));
+
+                Assert.Contains(
+                    viewModel.OperationalStatuses,
+                    status =>
+                        status.Code == "VIEWER_MONITOR_STATE_UNAVAILABLE"
+                        && status.Health == DeviceHealth.Warning);
+                Assert.Contains(
+                    viewModel.CollectorHealth,
+                    metric =>
+                        metric.Label == "Viewer 감시"
+                        && metric.Value.Contains(
+                            "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                            StringComparison.Ordinal)
+                        && metric.Health == DeviceHealth.Warning);
+
+                viewModel.SelectedDevice = device;
+                viewModel.ReadOnlyQueryCommand = "show version";
+                Assert.True(viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null));
+
+                viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+                await WaitUntilAsync(() =>
+                    !viewModel.IsReadOnlyQueryRunning
+                    && client.ExecuteRequests.Count(request =>
+                        request.Purpose.Equals(
+                            "manual",
+                            StringComparison.Ordinal)) == 1);
+
+                Assert.Equal("manual-output", viewModel.ReadOnlyQueryOutput);
+                Assert.DoesNotContain(
+                    client.ExecuteRequests,
+                    request => request.Purpose.Equals(
+                        "monitor",
+                        StringComparison.Ordinal));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeWriteFailure_StopsLaterMonitoringAndRefreshesUnavailablePresentation()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var persistence = new FailAfterWritesMonitoringPersistence(
+                successfulWritesBeforeFailure: 1);
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"),
+                persistence);
+            var client = new RecordingClient();
+            var viewModel = CreateViewModel(folder, devices, client, monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    monitoringStore.LastLoadStatus
+                        == ViewerMonitoringLoadStatus.StorageUnavailable
+                    && viewModel.Devices.SingleOrDefault()?.CollectionState
+                        == "StoreUnavailable");
+
+                var monitorRequestsAfterFailure = client.ExecuteRequests.Count(
+                    request => request.Purpose.Equals(
+                        "monitor",
+                        StringComparison.Ordinal));
+                Assert.True(monitorRequestsAfterFailure > 0);
+
+                await viewModel.RunMonitoringCycleAsync();
+                await viewModel.RunMonitoringCycleSafelyAsync(
+                    CancellationToken.None);
+                await Task.Delay(100);
+
+                Assert.Equal(
+                    monitorRequestsAfterFailure,
+                    client.ExecuteRequests.Count(request =>
+                        request.Purpose.Equals(
+                            "monitor",
+                            StringComparison.Ordinal)));
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal("StoreUnavailable", device.CollectionState);
+                Assert.Equal(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    device.CollectionErrorCode);
+                Assert.Equal(0, viewModel.MonitoredCount);
+                Assert.Equal(1, viewModel.UnmonitoredCount);
+                Assert.Equal(
+                    "Agent 연결됨 · 자동 감시 중지됨",
+                    viewModel.MiniCurrentStatusText);
+                Assert.Equal(
+                    "자동 감시 저장소 확인 필요",
+                    viewModel.MiniIssueTitle);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    viewModel.MiniIssueDetail,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    viewModel.OperationalStatuses,
+                    status =>
+                        status.Code == "VIEWER_MONITOR_STATE_UNAVAILABLE"
+                        && status.Health == DeviceHealth.Warning);
+                Assert.Contains(
+                    viewModel.CollectorHealth,
+                    metric =>
+                        metric.Label == "Viewer 감시"
+                        && metric.Value.Contains(
+                            "VIEWER_MONITOR_STATE_UNAVAILABLE",
+                            StringComparison.Ordinal)
+                        && metric.Health == DeviceHealth.Warning);
+
+                viewModel.SelectedDevice = device;
+                viewModel.ReadOnlyQueryCommand = "show version";
+                Assert.True(viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null));
+
+                viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+                await WaitUntilAsync(() =>
+                    !viewModel.IsReadOnlyQueryRunning
+                    && client.ExecuteRequests.Count(request =>
+                        request.Purpose.Equals(
+                            "manual",
+                            StringComparison.Ordinal)) == 1);
+
+                Assert.Equal("manual-output", viewModel.ReadOnlyQueryOutput);
+                Assert.Equal(
+                    monitorRequestsAfterFailure,
+                    client.ExecuteRequests.Count(request =>
+                        request.Purpose.Equals(
+                            "monitor",
+                            StringComparison.Ordinal)));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
     [Fact]
     public void CorruptProtectedCredentials_AreDisabledAndCanBeReentered()
     {
@@ -1180,7 +1470,88 @@ public sealed class ViewerMonitoringIntegrationTests
             CancellationToken cancellationToken)
         {
             ExecuteRequests.Enqueue(request);
-            return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+            var outputs = request.Purpose.Equals("manual", StringComparison.Ordinal)
+                ? (IReadOnlyList<TelnetCommandOutputDto>)
+                [
+                    new(request.Commands[0], "manual-output", false, DateTimeOffset.UtcNow)
+                ]
+                : NormalOutputs(request);
+            return Task.FromResult(Result(request.RequestId, outputs));
+        }
+    }
+
+    private sealed class MonitoringLoadFailurePersistence : IViewerMonitoringPersistence
+    {
+        private readonly string? _content;
+        private readonly Exception? _readException;
+
+        private MonitoringLoadFailurePersistence(string? content, Exception? readException)
+        {
+            _content = content;
+            _readException = readException;
+        }
+
+        public static MonitoringLoadFailurePersistence For(ViewerMonitoringLoadStatus status) =>
+            status switch
+            {
+                ViewerMonitoringLoadStatus.Corrupt =>
+                    new("{not-json", null),
+                ViewerMonitoringLoadStatus.VersionUnsupported =>
+                    new("""{"SchemaVersion": 999}""", null),
+                ViewerMonitoringLoadStatus.StorageUnavailable =>
+                    new(null, new UnauthorizedAccessException("simulated read denial")),
+                _ => throw new ArgumentOutOfRangeException(nameof(status), status, null)
+            };
+
+        public string? ReadIfExists(string path)
+        {
+            if (_readException is not null) throw _readException;
+            return _content;
+        }
+
+        public void WriteAtomically(string path, string content) =>
+            throw new InvalidOperationException("A non-operational store must not write.");
+
+        public void Quarantine(string path, string destination)
+        {
+        }
+    }
+
+    private sealed class FailAfterWritesMonitoringPersistence(
+        int successfulWritesBeforeFailure) : IViewerMonitoringPersistence
+    {
+        private readonly object _sync = new();
+        private string? _content;
+        private int _successfulWrites;
+
+        public string? ReadIfExists(string path)
+        {
+            lock (_sync)
+            {
+                return _content;
+            }
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            lock (_sync)
+            {
+                if (_successfulWrites >= successfulWritesBeforeFailure)
+                {
+                    throw new IOException("simulated monitoring state write failure");
+                }
+
+                _content = content;
+                _successfulWrites++;
+            }
+        }
+
+        public void Quarantine(string path, string destination)
+        {
+            lock (_sync)
+            {
+                _content = null;
+            }
         }
     }
 

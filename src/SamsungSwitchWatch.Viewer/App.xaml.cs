@@ -53,19 +53,32 @@ public partial class App : Application
             _diagnosticLog.Write);
         var settings = _settingsStore.Load();
         _deviceStore = new ManagedDeviceStore();
+        var monitoringLoadStatus = ViewerMonitoringLoadStatus.Missing;
         try
         {
             _monitoringStore = new ViewerMonitoringStore();
+            monitoringLoadStatus = _monitoringStore.LastLoadStatus;
+            if (!_monitoringStore.IsOperational
+                && _monitoringStore.LoadErrorCode is { } monitoringErrorCode)
+            {
+                _diagnosticLog.Write(
+                    "monitoring-store-startup",
+                    monitoringErrorCode);
+                _startupWarning =
+                    $"{ViewerConnectionMessages.ForCode(monitoringErrorCode)} "
+                    + $"· {monitoringErrorCode}";
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             _monitoringStore = null;
+            monitoringLoadStatus = ViewerMonitoringLoadStatus.StorageUnavailable;
             _diagnosticLog.Write(
                 "monitoring-store-startup",
-                "VIEWER_MONITOR_STATE_WRITE_FAILED");
+                "VIEWER_MONITOR_STATE_UNAVAILABLE");
             _startupWarning =
                 $"감시 이력을 열 수 없어 주기 감시를 시작하지 않았습니다. "
-                + ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_WRITE_FAILED");
+                + ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_UNAVAILABLE");
         }
         _viewModel = new DashboardViewModel(
             settings,
@@ -90,7 +103,10 @@ public partial class App : Application
                 or ViewerSettingsLoadStatus.Corrupt
                 or ViewerSettingsLoadStatus.StorageUnavailable
                            || (!settings.DemoMode && !ViewerSettingsSanitizer.IsValidForLiveConnection(settings, out _));
-        if (StartupWindowPolicy.ShouldShowMainWindow(settings, needsConnection))
+        if (StartupWindowPolicy.ShouldShowMainWindow(
+                settings,
+                needsConnection,
+                monitoringLoadStatus))
         {
             _mainWindow.Show();
         }
@@ -357,6 +373,13 @@ public partial class App : Application
 
 internal static class StartupWindowPolicy
 {
-    public static bool ShouldShowMainWindow(ViewerSettings settings, bool needsConnection) =>
-        needsConnection || !settings.StartMinimizedToTray;
+    public static bool ShouldShowMainWindow(
+        ViewerSettings settings,
+        bool needsConnection,
+        ViewerMonitoringLoadStatus monitoringLoadStatus) =>
+        needsConnection
+        || monitoringLoadStatus is ViewerMonitoringLoadStatus.Corrupt
+            or ViewerMonitoringLoadStatus.VersionUnsupported
+            or ViewerMonitoringLoadStatus.StorageUnavailable
+        || !settings.StartMinimizedToTray;
 }
