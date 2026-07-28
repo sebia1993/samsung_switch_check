@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.9 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.23-poc"
+VERSION = "0.10.0-poc"
 DOCUMENT_DATE = "2026-07-28"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -643,7 +643,7 @@ def build_manual(output_path: Path, images_dir: Path):
 
     core = doc.core_properties
     core.title = "Samsung Switch Watch 사용자 설명서"
-    core.subject = "v0.9 Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
+    core.subject = "v0.10 Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
     core.author = "Samsung Switch Watch Project"
     core.keywords = "Samsung Switch Watch, Telnet, Windows Service, Viewer, Agent"
     core.comments = "Sanitized offline manual; contains no company credentials or device data."
@@ -678,8 +678,9 @@ def build_manual(output_path: Path, images_dir: Path):
     add_steps(
         doc,
         [
-            "원격 PC에서 Agent ZIP을 풀고 Install-or-Update-Agent.cmd를 실행합니다.",
-            "Viewer PC에서 Viewer ZIP을 풀고 Install-or-Update-Viewer.cmd를 실행한 뒤 UAC를 승인합니다.",
+            "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
+            "고정 Viewer IPv4를 입력하고 자동 검색된 스위치 관리망 1~2개를 선택해 Agent 서비스를 설치합니다.",
+            "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
             "Viewer가 열리면 Agent를 설치한 원격 PC의 주소만 입력합니다. HTTPS/18443은 자동입니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
@@ -712,7 +713,7 @@ Viewer PC                 Agent PC                    Samsung Switch
         ["구간", "고정 통신", "운영 제한"],
         [
             ("Viewer → Agent", "HTTPS/TCP 18443", "설치 시 지정한 Viewer PC IPv4만 기본 허용"),
-            ("Agent → Switch", "Telnet/TCP 23", "설치 시 지정한 스위치 관리 IPv4만 기본 허용"),
+            ("Agent → Switch", "Telnet/TCP 23", "설치 시 선택한 관리망만 허용"),
         ],
         [1900, 2100, 5360],
     )
@@ -722,7 +723,7 @@ Viewer PC                 Agent PC                    Samsung Switch
             "Agent는 Windows 서비스로 실행되어 RDP 종료나 사용자 로그오프 뒤에도 계속 대기합니다.",
             "Agent는 장비 목록, Telnet 계정, 수동 명령 원문, 스위치 출력 원문을 보관하지 않습니다.",
             "일반 사용자가 볼 수 있는 Agent 창이나 트레이 아이콘은 없습니다.",
-            "Viewer 프로그램은 Program Files에 설치되지만 일반 사용자 권한으로 실행하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
+            "Viewer는 압축 해제한 폴더에서 포터블로 실행하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
         ],
         bullet_num_id,
     )
@@ -734,20 +735,36 @@ Viewer PC                 Agent PC                    Samsung Switch
     )
     add_heading(doc, "Agent와 Viewer 설치·연결", 1, heading_num_id)
     add_heading(doc, "Agent 설치", 2, heading_num_id)
+    add_callout(
+        doc,
+        "반입 파일 확인",
+        "0.10.0-poc는 코드 서명되지 않은 시험판입니다. 압축을 풀기 전에 Agent와 Viewer ZIP의 "
+        "SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교하고 사내 보안 반입 절차를 "
+        "완료하세요. SmartScreen 또는 EDR 경고를 우회하지 않습니다.",
+        "danger",
+    )
     add_steps(
         doc,
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
-            "Install-or-Update-Agent.cmd를 더블클릭하고 UAC 관리자 승인을 합니다.",
-            "신규 설치에서는 Viewer PC IPv4와 스위치 관리 IPv4를 입력합니다. CIDR 계산은 필요하지 않습니다.",
-            "SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
+            "SamsungSwitchWatch.Agent.Setup.exe를 실행하고 UAC 관리자 승인을 합니다.",
+            "고정 Viewer PC IPv4를 입력하고 자동 검색된 직접 연결 사설 관리망 1~2개를 선택합니다.",
+            "검사를 실행한 뒤 설치/업데이트를 누르고 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
+    )
+    add_image(
+        doc,
+        images_dir / "00-agent-setup.png",
+        width=4.5,
+        title="Agent Setup 화면",
+        alt_text="고정 Viewer IPv4와 자동 검색된 직접 연결 관리망을 선택하는 Agent Setup 화면",
+        caption="그림 1. Agent 서비스 설치와 네트워크 범위 선택",
     )
     add_code_block(
         doc,
         """
-Viewer PC IPv4 예     : 192.0.2.25
-스위치 관리 IPv4 예  : 198.51.100.11,198.51.100.12
+Viewer PC IPv4 예     : 10.20.30.25
+선택 관리망 예       : 10.50.0.0/24
 서비스 이름          : SamsungSwitchWatchAgent
 서비스 계정          : NT SERVICE\\SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
@@ -755,109 +772,101 @@ Viewer PC IPv4 예     : 192.0.2.25
     )
     add_callout(
         doc,
-        "기존 폴더 신뢰 검사",
-        "설치·업데이트·제거는 install/data 폴더의 owner SID와 junction·symlink를 먼저 "
-        "검사합니다. DataDirectory는 정확히 %ProgramData%\\SamsungSwitchWatch만 허용하며, "
-        "신규 설치에서는 빈 선점 폴더도 채택하지 않습니다. "
-        "AGENT_DIRECTORY_TRUST_INVALID가 표시되면 삭제나 강제 소유권 변경으로 우회하지 "
-        "말고 Windows 관리자에게 확인을 요청하세요.",
+        "고정 설치 위치",
+        "Agent 프로그램은 %ProgramFiles%\\SamsungSwitchWatch\\Agent, HTTPS 신원과 데이터는 "
+        "%ProgramData%\\SamsungSwitchWatch에 둡니다. Setup이 경로 신뢰 검사를 통과하지 못하면 "
+        "설치를 중단합니다. 폴더를 강제로 삭제하거나 소유권을 바꿔 우회하지 말고 Windows "
+        "관리자에게 실패 코드를 전달하세요.",
         "danger",
     )
-    doc.add_page_break()
     add_callout(
         doc,
         "업데이트 안정성",
-        "패키지는 SYSTEM·Administrators 전용 staging으로 복사한 뒤 SHA-256을 다시 확인합니다. "
-        "install receipt는 관리자 전용 설치 증거이고, 허용 정책은 검증된 설정과 제품 소유 방화벽에서 "
-        "가져옵니다. rollback 선행 단계가 실패하면 후속 파일 변경을 멈추고 snapshot·archive·journal을 "
-        "보존합니다.",
+        "Setup은 BUILD-MANIFEST.json과 Agent 실행 파일 SHA-256을 확인하고, Program Files의 "
+        "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램·방화벽 변경 중 "
+        "실패하면 설치 전 상태로 자동 복구하고, 완전히 복구하지 못하면 "
+        "SETUP_ROLLBACK_FAILED를 표시합니다.",
         "info",
     )
     add_callout(
         doc,
-        "허용 IP 변경",
-        "Viewer PC 또는 스위치 주소가 바뀌면 현재 Agent와 같은 버전 ZIP의 "
-        "Configure-Agent-Allowed-IPs.cmd를 실행합니다. 일반 IPv4만 입력하며 내부에서 "
-        "정확한 /32 정책으로 변환합니다. DHCP 또는 32대를 넘는 장비는 INSTALL_KO.md의 "
-        "고급 CIDR 절차를 사용하세요. 기존 값과 같아도 서비스, TCP/18443 listener, "
-        "방화벽, 활성 프로필과 live/ready를 확인해 정상일 때만 변경 없음으로 끝납니다.",
+        "네트워크 정책 변경",
+        "Viewer PC 주소나 스위치 관리망이 바뀌면 같은 Release의 Agent Setup을 다시 열어 "
+        "고정 Viewer IPv4와 자동 검색된 관리망을 검토합니다. 사용자가 CIDR을 계산하거나 "
+        "사설망 전체를 직접 허용하지 않습니다. 검사에서 서비스, TCP/18443 listener, "
+        "방화벽, 활성 프로필과 live/ready를 확인합니다.",
         "info",
     )
     add_callout(
         doc,
         "설치 실패와 Viewer 연결 거부",
-        "관리자 설치 창에 Agent installation failed가 표시되면 Cause 줄을 먼저 확인하세요. "
+        "Agent Setup에 설치 실패가 표시되면 실패 단계와 Cause를 먼저 확인하세요. "
         "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP, Viewer PC 주소 또는 "
         "localhost가 아니라 Agent를 설치한 PC 주소를 입력했는지 먼저 확인하세요. 그 다음 "
-        "SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. 서비스를 수동 등록하지 말고 "
-        f"{VERSION} Agent 설치기를 사용하세요.",
+        "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
+        f"서비스를 수동 등록하지 말고 {VERSION} Agent Setup을 사용하세요.",
         "danger",
     )
-    add_heading(doc, "Viewer 설치", 2, heading_num_id)
+    add_heading(doc, "Viewer 실행", 2, heading_num_id)
+    add_callout(
+        doc,
+        "0.9 설치형 Viewer에서 전환",
+        "이전 Viewer가 실행 중이면 새 Viewer는 같은 사용자 데이터를 동시에 쓰지 않도록 "
+        "실행을 차단하고 전환 순서를 표시합니다. 기존 트레이 아이콘에서 '프로그램 종료'를 "
+        "선택한 뒤 Win+R에서 shell:startup을 열어 'Samsung Switch Watch' 바로 가기를 "
+        "삭제합니다. 이어 shell:programs에서도 같은 이름의 이전 시작 메뉴 바로 가기를 "
+        "삭제하고 새 Viewer를 다시 실행하세요. 기존 Agent 연결과 장비 정보는 유지됩니다. "
+        "창이 바로 보이지 않으면 알림 영역에서 대시보드를 열고 실행 경로가 새 v0.10 "
+        "폴더인지 확인하세요.",
+        "warning",
+    )
     add_steps(
         doc,
         [
-            "Viewer 릴리스 ZIP을 운영자 PC의 임시 폴더에 압축 해제합니다.",
-            "Install-or-Update-Viewer.cmd를 더블클릭하고 Program Files 설치를 위한 UAC를 승인합니다.",
-            "설치 완료 뒤 Viewer가 일반 사용자 권한으로 실행되고 다음 Windows 로그인부터 자동 시작되는지 확인합니다.",
+            "Viewer 릴리스 ZIP을 운영자 PC에서 계속 사용할 로컬 폴더에 압축 해제합니다.",
+            "SamsungSwitchWatch.Viewer.exe를 더블클릭합니다.",
+            "Viewer는 일반 사용자 권한으로 실행하며 설치, UAC와 Windows 로그인 자동 시작을 수행하지 않습니다.",
         ],
     )
     add_callout(
         doc,
         "프로그램과 사용자 데이터 분리",
-        "프로그램은 C:\\Program Files\\SamsungSwitchWatch\\Viewer에 설치합니다. 장비 목록, "
-        "DPAPI 자격 증명, 감시 이력과 화면 설정은 설치를 시작한 원래 사용자의 "
-        "%LOCALAPPDATA%\\SamsungSwitchWatch에 그대로 보존합니다. 관리자 단계가 성공한 "
-        "뒤에만 원래 사용자 단계에서 바로 가기와 자동 시작을 반영합니다. 이전 Program Files "
-        "버전과 기존 사용자별 프로그램 폴더는 자동 삭제하지 않습니다.",
+        "Viewer는 압축 해제한 폴더에서 실행합니다. 장비 목록, DPAPI 자격 증명, 감시 이력과 화면 설정은 "
+        "%LOCALAPPDATA%\\SamsungSwitchWatch에 보존됩니다. Viewer 폴더를 교체해도 자료는 유지되지만 "
+        "항상 Agent와 같은 Release를 사용하세요.",
         "info",
     )
     add_callout(
         doc,
-        "Viewer 설치가 복구된 경우",
-        "설치 창의 Cause, Detail, 선택적 ExitCode, Recovery와 두 진단 경로를 확인하세요. "
-        "PREVIOUS_VIEWER_RESTORED이면 "
-        "시작 메뉴에서 Viewer를 다시 실행합니다. ROLLBACK_INCOMPLETE이면 백업과 진단 파일을 "
-        "보존하고 Windows 관리자에게 전달하세요. Program Files 실행이 차단되면 보안 정책을 "
-        "우회하거나 파일 차단을 해제하지 말고 해당 코드를 EDR·AppLocker·WDAC 담당자에게 "
-        "전달하세요. 사용자 단계 실패 뒤에는 이전 Program Files 버전 복구 UAC가 한 번 더 "
-        "표시될 수 있습니다. 취소하거나 실패하면 Viewer.__rollback을 삭제하지 마세요. "
-        "업데이트 직전에는 정상 현재 버전을 새 rollback 기준으로 회전하므로 실패하면 정확히 "
-        "직전 버전을 복원합니다. 각 관리자 설치는 고유 작업 ID와 활성·rollback manifest SHA-256을 "
-        "Administrators 전용 marker에 결속하므로, 같은 ZIP을 다시 설치했더라도 앞선 작업의 늦은 "
-        "복구는 VIEWER_ROLLBACK_ACTIVE_CHANGED로 중단하고 최신 설치·rollback 슬롯·marker를 보존합니다. "
-        "기존 Viewer 자체점검만 일시적으로 실패한 경우에도 VIEWER_CURRENT_SELF_CHECK_FAILED로 "
-        "자동 강등하지 않습니다. "
-        "새 설치 파일이나 매니페스트가 EDR에 의해 격리 또는 손상돼도 보호된 현재 설치를 "
-        "격리한 뒤 검증된 rollback 슬롯을 먼저 복원합니다. 제거 중 Viewer 프로세스나 활성 "
-        "프로그램 폴더가 남으면 rollback 슬롯을 삭제하지 않습니다. "
-        "자세한 코드는 INSTALL_KO.md를 확인하세요.",
+        "Viewer가 실행되지 않는 경우",
+        "0.10.0-poc는 코드 서명되지 않아 SmartScreen이나 사내 EDR이 차단할 수 있습니다. ZIP을 완전히 "
+        "압축 해제하고 Viewer EXE와 제공된 DLL이 같은 폴더에 있는지 확인하세요. EDR·AppLocker·WDAC가 "
+        "차단하면 우회하지 말고 공식 ZIP의 버전·해시와 차단 기록을 보안 담당자에게 전달하세요.",
         "danger",
     )
     add_callout(
         doc,
-        "고급 설치",
-        "설치 전 검사, 설치 위치 또는 자동 시작 상태를 직접 지정할 때만 INSTALL_KO.md의 "
-        "install-viewer.ps1 옵션을 사용하세요. 기존 사용자별 설치는 -PerUser를 명시하는 "
-        "호환 경로이며 기본 설치가 아닙니다.",
+        "포터블 운영",
+        "공개 Viewer 패키지에는 설치 스크립트와 자동 시작 기능이 없습니다. 필요하면 사용자가 "
+        "직접 바로 가기를 만들고, 감시가 필요할 때 Viewer를 실행해 두세요.",
         "info",
     )
     add_heading(doc, "Viewer에서 Agent 연결", 2, heading_num_id)
     add_image(
         doc,
         images_dir / "02-agent-connection.png",
-        width=2.8,
+        width=2.4,
         title="Agent 연결 창",
         alt_text="Agent 주소만 입력하고 HTTPS 포트 18443을 자동 사용하는 연결 설정 창",
-        caption="그림 1. Agent 주소만 입력하는 연결 설정",
+        caption="그림 2. Agent 주소만 입력하는 연결 설정",
     )
     add_bullets(
         doc,
         [
-            "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다.",
-            "스위치 IP, Viewer PC 주소와 localhost는 Agent와 Viewer가 같은 PC가 아닌 한 입력하지 않습니다.",
-            "https://, 포트, 인증서 SHA-256 지문, 페어링 토큰은 입력하지 않습니다.",
-            "정상 Agent 교체나 재설치가 확실할 때만 '이 Agent로 다시 연결'을 사용합니다.",
+            "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다. 스위치 IP, Viewer PC 주소와 "
+            "localhost는 두 프로그램이 같은 PC가 아닌 한 입력하지 않습니다.",
+            "https://, 포트, 인증서 지문과 페어링 토큰은 입력하지 않습니다. 정상 Agent 교체나 재설치가 "
+            "확실할 때만 '이 Agent로 다시 연결'을 사용합니다.",
         ],
         bullet_num_id,
     )
@@ -868,7 +877,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         width=5.5,
         title="장비 관리 창",
         alt_text="장비명, 모델, IPv4, 계정 ID, 로그인 비밀번호, enable 비밀번호와 감시 설정을 입력하는 창",
-        caption="그림 2. Viewer가 보관하는 장비 및 계정 입력 화면",
+        caption="그림 3. Viewer가 보관하는 장비 및 계정 입력 화면",
     )
     add_table(
         doc,
@@ -876,7 +885,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         [
             ("장비명", "예", "운영자가 구분하기 쉬운 표시 이름"),
             ("모델", "예", "IES4224GP, IES4028XP, IES4226XP"),
-            ("장비 IPv4", "예", "Agent 설치 또는 허용 IP 설정 도구에 등록한 관리 IP"),
+            ("장비 IPv4", "예", "Agent Setup에서 선택한 관리망에 속한 스위치 관리 IPv4"),
             ("계정 ID", "예", "Telnet 로그인 계정"),
             ("로그인 PW", "예", "현재 Windows 사용자 DPAPI로 보호"),
             ("enable PW", "아니요", "로그인 후 프롬프트가 >인 장비에서만 사용"),
@@ -902,15 +911,15 @@ Viewer PC IPv4 예     : 192.0.2.25
         images_dir / "04-command-output.png",
         width=4.35,
         title="장비 명령 실행 화면",
-        alt_text="show running-config를 입력하고 데모 스위치의 익명화된 결과를 확인하는 장비 명령 탭",
-        caption="그림 3. 한 줄 show 명령 실행과 메모리 내 결과 확인",
+        alt_text="show port status를 입력하고 데모 스위치의 익명화된 결과를 확인하는 장비 명령 탭",
+        caption="그림 4. 한 줄 show 명령 실행과 메모리 내 결과 확인",
     )
     add_table(
         doc,
         ["구분", "예시", "처리"],
         [
             ("허용", "한 줄짜리 show ...", "조회 명령 실행"),
-            ("허용", "show running-config", "실행, 민감정보 주의"),
+            ("허용", "show port status", "실행, 포트 상태 확인"),
             ("차단", "구분자 또는 설정 명령", "한 줄 show 명령이 아님"),
         ],
         [1300, 3500, 4560],
@@ -926,7 +935,7 @@ Viewer PC IPv4 예     : 192.0.2.25
     )
     add_callout(
         doc,
-        "show running-config",
+        "민감한 show 명령",
         "결과에 비밀번호 해시, SNMP 문자열, IP/VLAN과 망 구성이 포함될 수 있습니다. "
         "복사한 출력은 사내 보안 기준에 따라 취급하고 메신저나 일반 문서로 전달하지 마세요.",
         "danger",
@@ -1002,7 +1011,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         width=5.2,
         title="Viewer 대시보드",
         alt_text="장비 목록, 선택 장비 상태, 최근 이벤트와 Viewer 감시 상태를 보여 주는 대시보드",
-        caption="그림 4. Viewer 중심 대시보드 전체 화면",
+        caption="그림 5. Viewer 중심 대시보드 전체 화면",
     )
     add_table(
         doc,
@@ -1037,7 +1046,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         width=3.25,
         title="항상 위 미니 창",
         alt_text="정상, 경고, 장애 수와 최근 문제를 보여 주는 작은 항상 위 창",
-        caption="그림 5. 반복 운영용 미니 창",
+        caption="그림 6. 반복 운영용 미니 창",
     )
     add_image(
         doc,
@@ -1045,7 +1054,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         width=3.45,
         title="장애 알림 팝업",
         alt_text="데모 업링크 포트 Down 장애와 발생 시각을 보여 주는 알림 팝업",
-        caption="그림 6. 새 장애 알림 팝업",
+        caption="그림 7. 새 장애 알림 팝업",
     )
     add_bullets(
         doc,
@@ -1063,7 +1072,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         doc,
         ["데이터", "위치", "보호/수명"],
         [
-            ("Viewer 프로그램", "C:\\Program Files\\\nSamsungSwitchWatch\\Viewer", "UAC 설치, 일반 사용자 권한으로 실행"),
+            ("Viewer 프로그램", "사용자가 압축 해제한\n로컬 폴더", "포터블, 일반 사용자 권한으로 실행"),
             ("장비명·모델·IPv4", "Viewer 사용자 프로필", "현재 Windows 사용자 범위"),
             ("ID·로그인 PW·enable PW", "Viewer 사용자 프로필", "DPAPI CurrentUser 암호화"),
             ("주기 감시 기준 해시·이벤트", "Viewer 사용자 프로필", "원문 없이 로컬 저장"),
@@ -1074,9 +1083,9 @@ Viewer PC IPv4 예     : 192.0.2.25
                 "DPAPI LocalMachine + SYSTEM/Administrators/서비스 SID ACL",
             ),
             (
-                "Agent 설치 영수증",
-                "%ProgramData%\\\nSamsungSwitchWatch",
-                "Administrators owner + SYSTEM/Administrators 전용 ACL",
+                "Agent 실행 설정",
+                "%ProgramFiles%\\SamsungSwitchWatch\\Agent",
+                "Viewer 주소와 선택 관리망에 맞춰 Setup이 생성",
             ),
             ("장비 계정·스위치 출력", "Agent", "저장하지 않음"),
         ],
@@ -1085,12 +1094,11 @@ Viewer PC IPv4 예     : 192.0.2.25
     add_bullets(
         doc,
         [
-            "Viewer 설정 파일을 다른 PC나 다른 Windows 사용자에게 복사해도 계정은 복호화되지 않습니다.",
-            "진단 파일에는 IP, ID, 비밀번호, 호스트명과 수동 명령 원문을 넣지 않습니다.",
-            "레거시 백업은 SYSTEM과 로컬 Administrators만 접근할 수 있으며 Agent 서비스 SID에는 권한을 주지 않습니다.",
-            "대상 정책은 설치 설정, Viewer 접근 정책은 제품 소유 방화벽 규칙이 권한원이며 설치 영수증에서 복원하지 않습니다.",
-            "Agent 방화벽은 등록한 Viewer PC IPv4 또는 고급 관리 CIDR만 HTTPS/18443에 접근하도록 제한합니다.",
-            "Agent는 등록한 스위치 IPv4 또는 고급 대상 CIDR과 고정 Telnet/23만 허용합니다.",
+            "Viewer 설정을 다른 PC나 Windows 사용자에게 복사해도 계정은 복호화되지 않으며, 진단 파일에는 "
+            "IP·ID·비밀번호·호스트명·수동 명령 원문을 넣지 않습니다.",
+            "기존 Agent HTTPS 신원과 유효한 실행 설정은 같은 PC의 업데이트에서 보존합니다.",
+            "방화벽은 고정 Viewer IPv4의 HTTPS/18443만 허용하고, Agent는 Setup에서 선택한 직접 연결 "
+            "관리망의 Telnet/23만 사용합니다.",
         ],
         bullet_num_id,
     )
@@ -1111,45 +1119,19 @@ Viewer PC IPv4 예     : 192.0.2.25
         doc,
         ["표시 코드/증상", "확인 순서"],
         [
-            ("DEPLOYMENT_ALREADY_RUNNING", "먼저 시작한 같은 제품의 설치·제거가 끝난 뒤 다시 실행"),
-            ("DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED", "변경 전에 중단됨. 자동 복구가 아니므로 서비스·설치 폴더 상태 확인 후 다시 실행"),
-            ("DEPLOYMENT_LOCK_UNAVAILABLE", "Agent 관리자 권한 또는 Viewer 동일 사용자 확인 → 보안 프로그램·정책 점검"),
-            ("AGENT_DEPLOYMENT_RECOVERY_REQUIRED", "이전 Agent 설치·제거 미완료 또는 rollback 오류. journal·백업을 보존하고 관리자 확인"),
-            ("AGENT_DEPLOYMENT_JOURNAL_INVALID", "Agent 작업 기록 손상 또는 미지원 형식. 기록을 삭제해 우회하지 말고 관리자 확인"),
-            ("AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID", "작업 기록 폴더 소유자·ACL·파일 구성이 안전하지 않음. 관리자와 보안 정책 확인"),
-            ("AGENT_DIRECTORY_TRUST_INVALID", "활성 Agent install/data 트리의 owner 또는 reparse 구성을 신뢰할 수 없음. 삭제·강제 소유권 변경 없이 Windows 관리자 확인"),
-            ("AGENT_RECEIPT_TRUST_INVALID", "영구 삭제용 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. 영수증과 데이터 보존 후 관리자 확인"),
-            ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer PC 허용 IP 방화벽"),
-            ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → 서비스 → 허용 IP 설정 도구 → Viewer PC의 원격 TCP/18443"),
+            ("AGENT_DNS_FAILED", "입력한 Agent PC 이름 → 사내 DNS → IPv4 직접 입력"),
+            ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → Agent Setup 검사 → 고정 Viewer IP → 원격 TCP/18443"),
+            ("AGENT_UNREACHABLE", "Viewer와 Agent PC 사이 라우팅 → 방화벽 → EDR 차단"),
+            ("AGENT_VERSION_MISMATCH", "같은 Release의 Agent ZIP과 Viewer ZIP으로 함께 업데이트"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
-            ("VIEWER_SOURCE_ACCESS_DENIED", "UAC 관리자도 읽을 수 있는 승인된 임시 폴더에 공식 ZIP 다시 압축 해제"),
-            ("VIEWER_INSTALL_PATH_EXECUTION_BLOCKED", "Program Files 실행 정책 → AppLocker·WDAC·EDR 기록 → 보안 담당자"),
-            ("VIEWER_USER_PHASE_FAILED", "원래 사용자 실행 검사·바로 가기 → 복구 UAC → Recovery 결과"),
-            ("VIEWER_CURRENT_SELF_CHECK_FAILED", "현재·rollback 설치는 보존됨 → EDR·AppLocker·WDAC 지연·차단 확인 → 재시도"),
-            ("VIEWER_ROLLBACK_ACTIVE_CHANGED", "다른 Viewer 설치가 먼저 완료됨 → 두 설치 증거 보존 → 최신 ZIP으로 다시 설치"),
-            ("VIEWER_ROLLBACK_TRANSACTION_MISSING", "관리자 전용 작업 marker 없음 → 설치·slot 보존 → 최신 ZIP으로 관리자 재설치"),
-            ("VIEWER_ROLLBACK_TRANSACTION_INVALID", "marker 작업 ID·해시·slot 결속 불일치 → 증거 삭제 금지 → 관리자 확인"),
-            ("VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID", "marker ACL·소유권 신뢰 불가 → ACL 우회 금지 → 관리자·보안 담당자 확인"),
-            ("VIEWER_ROLLBACK_TRANSACTION_CONSUME_FAILED", "복원 뒤 marker 제거 실패 → 복원된 Viewer 보존 → 관리자 재설치"),
-            ("VIEWER_ROLLBACK_TRANSACTION_WRITE_FAILED", "새 marker 확정 실패 → Recovery 결과 → 설치·slot·marker 증거 보존"),
-            ("VIEWER_MACHINE_ROLLBACK_INCOMPLETE", "현재 설치와 Viewer.__rollback 보존 → Windows 관리자 확인"),
-            ("VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED", "복구 UAC 취소 여부 → rollback 슬롯 보존 → 관리자 재시도"),
-            ("VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE", "Viewer를 설치할 동일 Windows 사용자 → 시작 메뉴·시작프로그램 폴더 쓰기 권한 → 보안 정책"),
-            ("VIEWER_SHORTCUT_SETUP_FAILED", "Recovery 결과 → 바로 가기 생성 권한 → 보안 프로그램 차단"),
-            ("VIEWER_SMOKE_CHECK_FAILED", "Detail·ExitCode → 기존 Viewer 복구 → 설치 journal·Viewer 진단 로그 → 보안 프로그램"),
-            ("VIEWER_PACKAGE_FILE_MISSING", "공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록 확인"),
-            ("VIEWER_PACKAGE_HASH_MISMATCH", "변조 파일 실행 중지 → 공식 ZIP·매니페스트와 보안 프로그램 기록 확인"),
-            ("VIEWER_UNSUPPORTED_ARCHITECTURE", "64비트 Windows PC에서 win-x64 Viewer 설치"),
-            ("VIEWER_SELF_CHECK_START_FAILED", "Windows x64 → AppLocker·WDAC·EDR 실행 차단 확인"),
-            ("VIEWER_SELF_CHECK_WAIT_FAILED", "설치 journal → Windows Application 로그 → 다시 설치"),
-            ("VIEWER_SELF_CHECK_EXITED_NONZERO", "표시된 ExitCode → Windows Application 로그·EDR 기록 확인"),
-            ("VIEWER_SELF_CHECK_ACCESS_DENIED", "Program Files 실행 권한 → EDR·AppLocker·WDAC 기록 확인"),
-            ("FILE_MISSING", "설치 파일 누락 또는 EDR 격리 기록 확인"),
-            ("BAD_IMAGE", "Windows x64 → 파일 손상·격리와 실행 파일 형식 확인"),
-            ("TIMEOUT", "20초 자체점검 제한 → 남은 프로세스·보안 프로그램 지연 확인"),
-            ("VIEWER_UNINSTALL_ROLLBACK_PRESERVED", "Viewer 프로세스·활성 프로그램 폴더 정리 → 관리자 제거 재실행"),
-            ("VIEWER_UNINSTALL_TRANSACTION_PRESERVED", "활성 프로그램·rollback slot 제거 미확인 → marker 보존 → 관리자 제거 재실행"),
-            ("TARGET_NOT_ALLOWED", "장비 IPv4가 등록된 허용 IP인지 → Agent 허용 IP 설정 도구"),
+            ("AGENT_PROTOCOL_MISMATCH / TLS_IDENTITY_INVALID", "Agent Setup의 준비 상태 → PC 교체 여부 → HTTPS 신원 파일"),
+            ("SETUP_PACKAGE_NOT_FOUND", "Agent ZIP 전체 압축 해제 → Setup과 Agent EXE·BUILD-MANIFEST 존재 확인"),
+            ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
+            ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
+            ("SETUP_FIREWALL_FAILED", "Windows 방화벽 서비스 → 동명 비소유 규칙 → 보안 정책"),
+            ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
+            ("SETUP_ROLLBACK_FAILED", "재실행하지 말고 표시 단계와 보존된 백업을 Windows 관리자에게 전달"),
+            ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택한 관리망 내부인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
@@ -1177,10 +1159,9 @@ Viewer PC IPv4 예     : 192.0.2.25
     add_callout(
         doc,
         "Agent 폴더 신뢰 오류",
-        "AGENT_DIRECTORY_TRUST_INVALID는 작업 journal 오류가 아니라 활성 install/data 트리의 "
-        "소유권 또는 reparse 검사가 실패했다는 뜻입니다. DataDirectory는 정확히 "
+        "SETUP_PATH_INVALID는 활성 install/data 트리의 "
+        "소유권 또는 junction·symlink 검사가 실패했다는 뜻입니다. DataDirectory는 정확히 "
         "%ProgramData%\\SamsungSwitchWatch만 허용하고 신규 설치의 빈 선점 폴더도 거부합니다. "
-        "이전 릴리스의 owner가 현재 실행한 관리자와 다를 때도 fail-closed로 중단될 수 있습니다. "
         "폴더와 설치 이력을 보존한 채 사내 Windows 관리자에게 확인하세요.",
         "danger",
     )
@@ -1188,22 +1169,19 @@ Viewer PC IPv4 예     : 192.0.2.25
     spacer.paragraph_format.space_after = Pt(2)
     add_callout(
         doc,
-        "Agent 중단 기록 보존",
-        "%ProgramData%\\SamsungSwitchWatch-Operations, .__staging_*, .__backup_*와 legacy 백업은 "
-        "자동 복구 자료가 아니라 관리자 판단 증거입니다. 작업 기록 루트는 부모부터 "
-        "Administrators 소유와 SYSTEM·Administrators 전용 ACL로 이관하며, 64KiB를 넘는 "
-        "journal은 파싱하지 않습니다. 이전 기록이 현재 실행한 관리자와 다른 계정 소유면 "
-        "자동 이관하지 않습니다. 서비스 중지·삭제나 legacy 이동이 완결되지 않으면 후속 파일 "
-        "복구를 차단하고 snapshot·archive를 보존합니다. 오류가 표시되면 삭제·이동·이름 변경하지 "
-        "마세요.",
+        "자동 복구 실패 시",
+        "설치 도중 실패하면 Setup이 이전 프로그램·서비스·방화벽 상태를 되돌립니다. "
+        "SETUP_ROLLBACK_FAILED가 표시되면 남은 .__staging_, .__backup_, .__failed_ 폴더를 "
+        "삭제·이동·이름 변경하지 말고 표시된 단계와 오류 코드를 사내 Windows 관리자에게 "
+        "전달하세요.",
         "danger",
     )
-    add_heading(doc, "현장 진단 파일", 2, heading_num_id)
-    add_code_block(
+    add_heading(doc, "현장 진단", 2, heading_num_id)
+    add_body(
         doc,
-        r"""
-.\diagnose-agent.ps1 -OutputPath "$env:TEMP\ssw-diagnostic.json"
-""",
+        "Agent PC에서는 Agent Setup을 다시 열고 검사를 실행합니다. Viewer에서는 Agent 연결 "
+        "진단을 실행합니다. 두 화면의 단계와 안정 오류 코드만 기록하고 실제 IP, 계정, 비밀번호와 "
+        "장비 원문은 외부로 전달하지 않습니다.",
     )
     add_table(
         doc,
@@ -1215,11 +1193,11 @@ Viewer PC IPv4 예     : 192.0.2.25
             ),
             (
                 "Agent PC",
-                "service.status=Running, listener.status=Listening, firewall.enabled/exact=true, 지원 프로필 포함, health.live=LIVE, health.ready=READY인지 확인합니다.",
+                "Agent Setup의 사전 점검에서 패키지, 서비스, 방화벽과 Agent 준비 상태를 확인합니다.",
             ),
             (
                 "Viewer PC",
-                "Test-NetConnection <Agent-PC-주소> -Port 18443을 실행합니다. 실패하면 Viewer PC 허용 IP, Domain/Private 방화벽, 라우팅과 EDR을 확인합니다.",
+                "연결 설정의 주소 → DNS/IPv4 → TCP/18443 → HTTPS → Agent API/버전 단계 중 처음 실패한 항목을 확인합니다.",
             ),
         ],
         [1900, 7460],
@@ -1245,25 +1223,23 @@ Viewer PC IPv4 예     : 192.0.2.25
         doc,
         [
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
-            "Agent PC에서 Install-or-Update-Agent.cmd를 실행합니다. 기존 허용 정책은 기본적으로 보존됩니다.",
-            "Viewer PC에서 새 Viewer 패키지의 Install-or-Update-Viewer.cmd를 실행합니다.",
+            "Agent PC에서 SamsungSwitchWatch.Agent.Setup.exe를 실행합니다. 기존 신원과 유효한 정책은 보존됩니다.",
+            "Viewer PC에서 새 Viewer 패키지의 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
             "Agent 연결, 장비 목록, 접속 시험, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
     )
     add_heading(doc, "Agent 제거", 2, heading_num_id)
-    add_code_block(
+    add_body(
         doc,
-        r"""
-.\uninstall-agent.ps1
-
-# HTTPS 신원과 설치 데이터를 영구 삭제할 때만
-.\uninstall-agent.ps1 -RemoveData
-""",
+        "서비스와 방화벽을 변경하므로 Agent 제거는 사내 Windows 관리자가 승인된 관리 절차로 "
+        "수행합니다. 공개 패키지에는 제거 스크립트를 포함하지 않습니다. HTTPS 신원과 "
+        "%ProgramData% 데이터의 영구 삭제는 Viewer의 신원 변경 경고를 발생시키므로 별도 승인 없이 "
+        "삭제하지 않습니다.",
     )
     add_callout(
         doc,
         "데이터 삭제",
-        "-RemoveData를 사용하면 Agent HTTPS 신원이 복구되지 않습니다. 이후 Viewer에서 신원 변경 경고가 발생합니다.",
+        "Agent HTTPS 신원과 설치 데이터를 삭제하면 복구할 수 없고 이후 Viewer에서 신원 변경 경고가 발생합니다.",
         "danger",
     )
     add_heading(

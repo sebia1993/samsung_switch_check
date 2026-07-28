@@ -125,7 +125,10 @@ public sealed record AgentIdentityDto(
     string CertificatePublicKeySha256,
     string Protocol,
     int MaxCommandsPerRequest,
-    int MaxOutputBytes);
+    int MaxOutputBytes)
+{
+    public string? ProductVersion { get; init; }
+}
 
 public static class ManagedDeviceValidator
 {

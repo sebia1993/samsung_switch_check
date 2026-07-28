@@ -1,193 +1,123 @@
 # Samsung Switch Watch
 
-삼성 `IES4224GP`, `IES4028XP`, `IES4226XP` 스위치에 Telnet으로 접속해 조회 명령을
-실행하고, 결과와 변경점을 운영자 PC에서 확인하는 Windows 전용 도구입니다.
+원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
+Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.9.23-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
-운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
+현재 버전은 `v0.10.0-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
-```text
-운영자 PC                                      스위치 접근용 원격 PC
-SamsungSwitchWatch.Viewer                     SamsungSwitchWatch.Agent
-- 장비 IP·모델 저장                           - 창 없는 Windows 서비스
-- ID·PW·enable PW를 사용자 DPAPI로 보호       - 전달받은 정보로 실제 Telnet 접속
-- 수동 show 명령과 주기 감시                  - 로그인·enable·명령·로그아웃
-- 출력·변경·감시 공백 표시                    - 결과 반환 후 즉시 폐기
-             └──────── HTTPS/18443 ────────>            │
-                                                       └── Telnet/23 ──> 스위치
-```
-
-## 핵심 원칙
-
-- Viewer가 장비, 자격 증명, 감시 일정과 이력의 소유자입니다.
-- Agent는 장비나 자격 증명을 저장하지 않는 Telnet 실행 대행자입니다.
-- Agent는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정의 Windows
-  서비스로 실행되어 사용자 화면에 창이나 트레이 아이콘을 표시하지 않습니다.
-- 매 요청마다 새 Telnet 세션을 열고 종료하므로 장비의 짧은 `exec-timeout`에 의존하지 않습니다.
-- 명령 실행 중 장비가 연결을 끊으면 완료된 명령은 반복하지 않고 남은 명령만 새 세션에서
-  1회 재시도합니다. 인증·enable 실패와 명령 타임아웃은 자동 재시도하지 않습니다.
-- 한 줄짜리 `show` 명령을 실행할 수 있으며 `show running-config`도 허용됩니다.
-- 수동 명령과 원문 출력은 Viewer 메모리에서만 사용하고 Agent/Viewer DB나 진단 파일에
-  저장·내보내지 않습니다.
-- Viewer가 꺼져 있으면 주기 감시도 중단됩니다. 다시 실행하면 해당 시간을 `감시 공백`으로
-  표시하며 공백 중 발생한 이벤트를 복원할 수 없습니다.
-
-수동 명령 결과에는 사용한 Telnet 세션 수와 재연결 횟수가 함께 표시됩니다.
-
-주요 현장 명령은 다음과 같습니다. 모델이나 펌웨어에서 지원하지 않으면 장비 장애가 아니라
-`명령 미지원`으로 구분합니다.
+## 한눈에 보는 구조
 
 ```text
-show port status
-show sylog tail num 100
-show syslog tail num 100
+Viewer PC                                  Agent PC                          Switch
+SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
+장비 IP·ID·PW·enable PW 입력 ─ HTTPS/18443 → 창 없는 실행 중계 ─ Telnet/23 → show 명령
+결과·변경점·감시 이력 표시                 장비 정보와 결과를 저장하지 않음
 ```
 
-## 설치
+- Agent는 최초 한 번만 관리자 권한으로 설치하고 이후 창이나 트레이 아이콘 없이 서비스로
+  실행합니다.
+- Viewer는 ZIP을 풀어 EXE를 직접 실행하는 포터블 프로그램입니다. 설치, UAC, 자동 시작
+  등록이 없습니다.
+- Viewer가 장비·자격 증명·감시 일정과 이력을 소유합니다. 자격 증명은 현재 Windows
+  사용자 DPAPI로 보호합니다.
+- Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으로 장비를 조회하지 않습니다.
+- 수동 입력은 줄바꿈이나 구분자가 없는 한 줄 `show` 명령만 허용합니다. 설정 변경 명령은
+  Viewer와 Agent 양쪽에서 차단합니다.
+- 수동 명령과 원문 출력은 Viewer 메모리에서만 사용하고 저장하거나 내보내지 않습니다.
 
-GitHub Release의 Assets에서 아래 두 ZIP만 받습니다.
+## 배포 파일
 
-- `SamsungSwitchWatch-Agent-0.9.23-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.23-poc-win-x64.zip`
+공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-두 ZIP에는 바로 열어 볼 수 있는 `SamsungSwitchWatch_User_Manual_KO.pdf`가 포함됩니다.
-편집용 DOCX는 배포 ZIP에 넣지 않습니다.
+- `SamsungSwitchWatch-Agent-0.10.0-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.0-poc-win-x64.zip`
 
-Agent ZIP을 원격 PC에 풀고 `Install-or-Update-Agent.cmd`를 더블클릭합니다.
-UAC를 승인한 뒤 CIDR 계산 없이 다음 두 주소 목록을 입력합니다.
+두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
+않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-1. Viewer PC IPv4
-2. Agent가 Telnet으로 접속할 스위치 관리 IPv4
+### 1. Agent PC
 
-설치기는 각 주소를 정확한 `/32` 허용 정책으로 변환하고 신규 설치와 기존 서비스를 자동
-판별합니다. 업데이트라면 기존 설정의 스위치 대상 정책과 제품 소유 방화벽 규칙의 Viewer
-접근 정책, `%ProgramData%\SamsungSwitchWatch`의 HTTPS 신원 자료를 보존하고, 검증 실패 시
-이전 버전으로 복구합니다. 허용 IP를 변경할 때는 같은 버전 Agent ZIP의
-`Configure-Agent-Allowed-IPs.cmd`를 사용합니다. install receipt는 SYSTEM·Administrators만
-접근하는 설치 증거이며 정책 권한원으로 사용하지 않습니다.
+1. Agent ZIP을 로컬 임시 폴더에 완전히 압축 해제합니다.
+2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행하고 UAC를 한 번 승인합니다.
+3. Viewer PC가 Agent에 접속할 때 사용하는 고정 IPv4 한 개를 입력합니다.
+4. 자동 검색된 직접 연결 사설망 중 스위치 관리망 1~2개를 선택합니다.
+5. `검사`에서 서비스·HTTPS/18443·방화벽 상태를 확인한 뒤 `설치/업데이트`를 실행합니다.
 
-설치·업데이트·제거는 설치 폴더와 데이터 폴더의 소유자 SID와 reparse point를 먼저 검사합니다.
-DataDirectory는 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용하며, 신규 설치에서는 이
-경로가 비어 있더라도 기존 폴더를 채택하지 않고 중단합니다. 검사에 통과한 기존 제품 트리만
-루트부터 Administrators 소유와 폐쇄형 ACL로 잠그며, 비신뢰 소유자나 junction·symlink가
-발견되면 `AGENT_DIRECTORY_TRUST_INVALID`로 중단합니다. 폴더를 삭제하거나 소유권을 강제로
-바꾸어 우회하지 말고 Windows 관리자에게 확인을 요청하십시오.
+설치 후 `SamsungSwitchWatchAgent` 서비스가 자동 시작됩니다. 일반 사용자의 바탕 화면,
+작업 표시줄과 트레이에는 Agent 창이 나타나지 않습니다. 로컬 관리자는 Windows 관리
+정책상 서비스를 중지할 수 있으므로 관리자 계정 자체를 통제해야 합니다.
 
-설치 패키지는 관리자 전용 staging으로 복사한 뒤 매니페스트 SHA-256을 다시 확인하고 프로그램을
-교체합니다. rollback 중 서비스 중지·삭제나 선행 복구를 확인하지 못하면 후속 파일
-삭제·복구를 중단하고 snapshot, legacy archive와 작업 증거를 보존합니다.
+### 2. Viewer PC
 
-Agent와 Viewer의 설치·업데이트·제거는 제품별 잠금으로 겹쳐 실행되지 않습니다. 다른 작업이
-진행 중이면 즉시 중단하고 먼저 시작한 작업이 끝난 뒤 다시 실행하도록 안내합니다.
-Agent는 재부팅 뒤에도 남는 설치·제거 journal을 서로 교차 검사합니다. 미완료·오류·손상 기록이
-있으면 서비스나 파일을 더 변경하지 않고 중단합니다. 이번 보호는 자동 복구가 아니므로
-`AGENT_DEPLOYMENT_RECOVERY_REQUIRED`, `AGENT_DEPLOYMENT_JOURNAL_INVALID` 또는
-`AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`가 표시되면 작업 기록과 백업을 삭제하지 말고
-관리자 확인을 받아야 합니다.
+0.9 설치형 Viewer를 사용했다면 먼저 기존 트레이 메뉴에서 프로그램을 완전히 종료하고
+`Win+R` → `shell:startup`과 `shell:programs`에서 이전 자동 시작·시작 메뉴 바로 가기를
+삭제합니다. 새 Viewer는 이전 버전과 같은 사용자 데이터를 동시에 쓰지 않도록 동시 실행을
+차단하고 이 전환 순서를 안내합니다.
 
-Viewer ZIP을 운영자 PC에 풀고 `Install-or-Update-Viewer.cmd`를 더블클릭한 뒤 UAC를
-승인합니다. 프로그램 파일은 `C:\Program Files\SamsungSwitchWatch\Viewer`에 설치하지만,
-시작 메뉴·로그인 자동 시작과 `%LOCALAPPDATA%\SamsungSwitchWatch`의 장비·계정·감시
-데이터는 설치를 시작한 원래 Windows 사용자에게 유지됩니다. 설치기는 매니페스트에 선언된
-전체 파일을 두 번 검증하고, 설치된 파일의 SHA-256과 Agent 연결을 하지 않는 무화면
-자체점검을 통과한 뒤 설치를 확정합니다.
+1. Viewer ZIP을 항상 사용할 로컬 폴더에 완전히 압축 해제합니다.
+2. `SamsungSwitchWatch.Viewer.exe`를 실행합니다.
+3. Agent PC의 IPv4 또는 사내 DNS 이름을 입력하고 연결 진단을 완료합니다.
+4. 장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW와 선택적 enable PW를 등록합니다.
+5. 접속 시험 후 `show port status`, `show syslog tail num 100` 또는 장비에서 지원하는
+   읽기 전용 명령을 실행합니다.
 
-이전 Program Files 버전은 다음 업데이트까지 관리자 보호 rollback 슬롯에 남습니다. 다음
-업데이트에서는 정상인 현재 버전을 새 rollback 기준으로 회전하므로 실패 시 정확히 직전
-버전을 복원합니다. 원래 사용자 권한의 실행 검사나 바로 가기 반영이 실패하면 복구 UAC를
-통해 이전 버전을 되돌립니다. 각 관리자 설치는 고유 작업 ID와 활성·rollback 매니페스트
-해시를 관리자 전용 marker에 결속합니다. 같은 ZIP을 다시 설치한 경우에도 늦은 복구 요청은
-작업 ID 불일치로 중단하고 두 설치 증거를 보존합니다. 새 설치 파일이 보안 제품에 의해 격리되거나 손상된
-경우에도 검증된 rollback 슬롯을 먼저 복원합니다. 제거 중 실행 프로세스나 활성 프로그램
-폴더를 정리하지 못하면 rollback 슬롯과 작업 marker를 삭제하지 않습니다.
-검증된 기존 사용자별 프로그램 폴더와 `%LOCALAPPDATA%\SamsungSwitchWatch`의 사용자
-데이터는 자동 삭제하지 않습니다.
+인증서 SHA-256 지문이나 페어링 토큰을 입력하는 절차는 없습니다. Viewer는 최초 연결에서
+Agent의 공개 신원을 내부적으로 자동 저장하고, 같은 주소의 신원이 실제로 바뀐 경우에만
+보호를 위해 연결을 중단합니다.
 
-설치 전 검사 또는 자동 시작 상태를 직접 지정하는 관리자는 PowerShell 경로를 사용할 수
-있습니다. 기존 사용자별 프로그램 설치는 사내 정책상 필요한 경우에만 `-PerUser`를
-명시하는 고급 호환 경로입니다.
+상세 절차와 연결 실패 단계는 [설치 및 운영 안내](docs/INSTALL_KO.md)를 확인하십시오.
 
-```powershell
-.\install-viewer.ps1 -SourceDirectory . -StartWithWindows -Preflight
-.\install-viewer.ps1 -SourceDirectory . -StartWithWindows
-.\install-viewer.ps1 -SourceDirectory . -StartWithWindows -PerUser
-```
+## 연결 문제 확인 순서
 
-`-StartWithWindows`를 생략하면 기존 자동 시작 상태를 보존합니다. 자동 시작을 끌 때만
-`-DisableStartWithWindows`를 지정합니다.
+Viewer의 연결 진단은 다음 순서로 표시됩니다.
 
-Viewer에서 Agent 주소를 연결한 뒤 장비 IP, 모델, ID, 로그인 PW, 선택적 enable PW를
-등록합니다. 인증서 SHA-256 지문이나 페어링 토큰을 사용자가 입력하는 과정은 없습니다.
+1. Agent 주소·DNS
+2. TCP/18443
+3. HTTPS와 Agent 신원
+4. Agent API와 준비 상태
+5. Agent·Viewer 버전
 
-상세 절차는 [설치 및 운영 안내](docs/INSTALL_KO.md)를 확인하십시오.
-
-## 개발과 검증
-
-Windows x64와 `global.json`에 고정된 .NET 10 SDK가 필요합니다.
-
-```powershell
-dotnet restore .\SamsungSwitchWatch.sln --locked-mode
-.\scripts\validate.ps1 -Configuration Release
-```
-
-회사망 자료 없이 합성 Telnet 서버와 sanitized fixture로 검증합니다. 합성 테스트 통과를
-실제 펌웨어 검증으로 표현하지 않습니다.
-
-릴리스 패키지는 깨끗한 Git 작업 트리에서 만듭니다.
-
-```powershell
-.\scripts\build-release.ps1 -Version 0.9.23-poc
-```
-
-`artifacts\release` 내부에는 ZIP 2개와 내부 검증용 매니페스트·SBOM·해시 파일이 생깁니다.
-GitHub Release의 사용자 정의 Assets에는 Agent ZIP과 Viewer ZIP, 정확히 두 개만 게시합니다.
+`AGENT_CONNECTION_REFUSED`가 표시되면 Agent PC에서 Agent Setup을 다시 열고 `검사`를
+실행하십시오. 서비스, 수신 포트와 방화벽 중 어느 단계가 실패했는지 확인한 뒤 Viewer에
+실제 Agent PC 주소를 입력했는지 확인합니다. 스위치 IP나 Viewer PC 주소를 Agent 주소
+입력란에 넣지 않습니다.
 
 ## 보안 경계
 
-- Agent–Viewer 구간은 고정 `HTTPS/18443`을 사용합니다.
-- Agent가 만든 ECDSA P-256 신원은 Agent 데이터 폴더에 영구 저장되고 Windows DPAPI
-  LocalMachine 범위로 보호됩니다.
-- Viewer는 첫 연결에서 Agent 신원을 자동 신뢰하고 이후 변경을 감지합니다.
-- 애플리케이션 로그인은 없습니다. Windows 방화벽의 Viewer 허용 IP 또는 고급 관리 CIDR이
-  API 접근 경계입니다.
-- Agent는 설치 시 지정한 스위치 IPv4 또는 고급 대상 CIDR의 `Telnet/23`으로만 접속합니다.
-- 같은 허용 관리망의 다른 API 클라이언트도 Agent를 호출할 수 있으므로 사용자 VLAN, 공용 Wi-Fi,
-  인터넷 또는 신뢰하지 않는 중계망에 노출하면 안 됩니다.
-- Telnet의 ID, PW, enable PW와 명령 내용은 암호화되지 않으므로 Agent와 스위치 사이를 격리된
-  관리망으로 제한해야 합니다.
+- Viewer→Agent는 HTTPS/TCP 18443을 사용합니다.
+- Agent Setup은 입력한 고정 Viewer IPv4만 Windows 방화벽에서 `/32`로 허용합니다.
+- Agent→스위치는 선택한 관리망의 IPv4와 Telnet/TCP 23만 허용합니다.
+- Agent API에는 별도 로그인이나 페어링 토큰이 없습니다. 고정 Viewer IP 방화벽 정책이
+  접근 경계이므로 사용자 VLAN·공용 Wi-Fi·인터넷에 노출하면 안 됩니다.
+- Agent가 만드는 ECDSA P-256 신원은 `%ProgramData%\SamsungSwitchWatch`에 보관하고
+  DPAPI LocalMachine으로 보호합니다.
+- Telnet 구간은 암호화되지 않습니다. Agent와 스위치는 격리된 관리망에서만 사용합니다.
+- 실제 IP, 계정, 비밀번호, 장비 출력과 회사 데이터는 저장소·테스트·이슈에 올리지 않습니다.
 
-자세한 내용은 [보안 설계](docs/SECURITY.md)를 확인하십시오.
+## 개발과 검증
+
+```powershell
+dotnet restore SamsungSwitchWatch.sln --locked-mode
+dotnet build SamsungSwitchWatch.sln -c Release --no-restore
+dotnet test SamsungSwitchWatch.sln -c Release --no-build
+.\scripts\validate.ps1 -Configuration Release
+.\scripts\build-release.ps1 -Version 0.10.0-poc
+```
+
+실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
+검증으로 표현하지 않습니다.
+
+PowerShell/CMD 설치·제거·진단 스크립트는 개발과 레거시 복구를 위해 저장소에만 유지하며
+공개 ZIP에는 포함하지 않습니다. GitHub Release의 사용자 정의 Assets는 Agent ZIP과 Viewer
+ZIP 정확히 두 개입니다.
 
 ## 문서
 
 - [설치 및 운영 안내](docs/INSTALL_KO.md)
-- [아키텍처와 API](docs/ARCHITECTURE.md)
-- [보안 설계](docs/SECURITY.md)
-- [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
+- [구조 설명](docs/ARCHITECTURE.md)
+- [보안 모델](docs/SECURITY.md)
+- [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.9.23-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.23_POC_KO.md)
-- [0.9.22-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.22_POC_KO.md)
-- [0.9.21-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.21_POC_KO.md)
-- [0.9.20-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.20_POC_KO.md)
-- [0.9.19-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.19_POC_KO.md)
-- [0.9.18-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.18_POC_KO.md)
-- [0.9.17-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.17_POC_KO.md)
-- [0.9.16-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.16_POC_KO.md)
-- [0.9.15-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.15_POC_KO.md)
-- [0.9.14-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.14_POC_KO.md)
-- [0.9.13-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.13_POC_KO.md)
-- [0.9.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.12_POC_KO.md)
-- [0.9.11-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.11_POC_KO.md)
-- [0.9.10-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.10_POC_KO.md)
-- [0.9.9-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.9_POC_KO.md)
-- [0.9.8-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.8_POC_KO.md)
-- [0.9.7-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.7_POC_KO.md)
-- [0.9.6-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.6_POC_KO.md)
-- [0.9.5-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.5_POC_KO.md)
-- [0.9.4-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.4_POC_KO.md)
-- [0.9.3-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.3_POC_KO.md)
-- [0.9.2-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.2_POC_KO.md)
-- [Figma handoff](docs/figma/README.md)
-
-Figma source of truth:
-[Samsung Switch Watch](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)
+- [0.10.0-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.0_POC_KO.md)
+- [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)

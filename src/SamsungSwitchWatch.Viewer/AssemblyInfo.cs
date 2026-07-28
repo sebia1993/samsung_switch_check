@@ -2,6 +2,7 @@ using System.Windows;
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("SamsungSwitchWatch.Viewer.Tests")]
+[assembly: InternalsVisibleTo("SamsungSwitchWatch.ManualCapture")]
 
 [assembly: ThemeInfo(
     ResourceDictionaryLocation.None,            //where theme specific resource dictionaries are located

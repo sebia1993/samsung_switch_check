@@ -63,6 +63,61 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
+    public void CertificatePin_FirstUseReportsAcceptedTlsExactlyOnce()
+    {
+        using var certificate = CreateCertificate();
+        var acceptedCount = 0;
+        var settings = new ViewerSettings
+        {
+            AgentUri = "https://agent.example.test:18443"
+        };
+        var validator = new CertificatePinValidator(
+            settings,
+            () => acceptedCount++);
+        using var request = new HttpRequestMessage(HttpMethod.Get, settings.AgentUri);
+
+        Assert.True(validator.Validate(
+            request,
+            certificate,
+            null,
+            SslPolicyErrors.RemoteCertificateChainErrors));
+        Assert.True(validator.Validate(
+            request,
+            certificate,
+            null,
+            SslPolicyErrors.RemoteCertificateChainErrors));
+
+        Assert.Equal(1, acceptedCount);
+        Assert.False(validator.IdentityChanged);
+    }
+
+    [Fact]
+    public void CertificatePin_MismatchDoesNotReportAcceptedTls()
+    {
+        using var expectedCertificate = CreateCertificate();
+        using var changedCertificate = CreateCertificate();
+        var acceptedCount = 0;
+        var settings = new ViewerSettings
+        {
+            AgentUri = "https://agent.example.test:18443"
+        };
+        settings.SetAgentTrustPin(CertificatePinValidator.GetSpkiSha256(expectedCertificate));
+        var validator = new CertificatePinValidator(
+            settings,
+            () => acceptedCount++);
+        using var request = new HttpRequestMessage(HttpMethod.Get, settings.AgentUri);
+
+        Assert.False(validator.Validate(
+            request,
+            changedCertificate,
+            null,
+            SslPolicyErrors.None));
+
+        Assert.Equal(0, acceptedCount);
+        Assert.True(validator.IdentityChanged);
+    }
+
+    [Fact]
     public void ReadOnlyQuery_CoversTwoMaximumTelnetSessionsAndRetryOverhead()
     {
         Assert.Equal(TimeSpan.FromSeconds(510), HttpAgentClient.ReadOnlyQueryTimeout);
@@ -532,6 +587,7 @@ public sealed class ViewerConnectionTests
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
     [InlineData("AGENT_PROTOCOL_MISMATCH", "최신")]
+    [InlineData("AGENT_VERSION_MISMATCH", "같은 릴리스")]
     public void ConnectionMessages_AreActionableAndDoNotRequestSecrets(string code, string expected)
     {
         var message = ViewerConnectionMessages.ForCode(code);

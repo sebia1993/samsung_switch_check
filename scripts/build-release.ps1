@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.9.23-poc',
+    [string]$Version = '0.10.0-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,
@@ -47,11 +47,13 @@ if (-not $SkipTests) {
 }
 
 $agentProject = Join-Path $repoRoot 'src\SamsungSwitchWatch.Agent\SamsungSwitchWatch.Agent.csproj'
+$agentSetupProject = Join-Path $repoRoot 'src\SamsungSwitchWatch.Agent.Setup\SamsungSwitchWatch.Agent.Setup.csproj'
 $viewerProject = Join-Path $repoRoot 'src\SamsungSwitchWatch.Viewer\SamsungSwitchWatch.Viewer.csproj'
 $agentOut = Join-Path $publishRoot 'Agent'
+$agentSetupOut = Join-Path $publishRoot 'AgentSetup'
 $viewerOut = Join-Path $publishRoot 'Viewer'
 
-foreach ($project in @($agentProject, $viewerProject)) {
+foreach ($project in @($agentProject, $agentSetupProject, $viewerProject)) {
     Write-SswStep "RID 전용 NuGet 잠금 복원: $(Split-Path -Leaf $project)"
     & $dotnet restore $project -r win-x64 --locked-mode -p:NuGetLockFilePath=packages.win-x64.lock.json
     if ($LASTEXITCODE -ne 0) { throw "win-x64 잠금 복원 실패: $project" }
@@ -68,32 +70,45 @@ Get-ChildItem -LiteralPath $agentOut -File |
     Where-Object { $_.Name -ne 'SamsungSwitchWatch.Agent.exe' } |
     Remove-Item -Force
 
+Write-SswStep 'Agent Setup self-contained publish'
+& $dotnet publish $agentSetupProject -c Release -r win-x64 --self-contained true --no-restore `
+    -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebugType=None -p:Version=$Version `
+    -p:ContinuousIntegrationBuild=true -p:NuGetLockFilePath=packages.win-x64.lock.json -o $agentSetupOut
+if ($LASTEXITCODE -ne 0) { throw 'Agent Setup publish 실패' }
+
 Write-SswStep 'Viewer self-contained publish'
 & $dotnet publish $viewerProject -c Release -r win-x64 --self-contained true --no-restore `
     -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebugType=None -p:Version=$Version `
     -p:ContinuousIntegrationBuild=true -p:NuGetLockFilePath=packages.win-x64.lock.json -o $viewerOut
 if ($LASTEXITCODE -ne 0) { throw 'Viewer publish 실패' }
 
-$agentScripts = @(
-    'Install-or-Update-Agent.cmd',
-    'Configure-Agent-Allowed-IPs.cmd',
-    'common.ps1',
-    'install-agent.ps1',
-    'uninstall-agent.ps1',
-    'diagnose-agent.ps1'
+$wpfRuntimeFiles = @(
+    'D3DCompiler_47_cor3.dll',
+    'PenImc_cor3.dll',
+    'PresentationNative_cor3.dll',
+    'vcruntime140_cor3.dll',
+    'wpfgfx_cor3.dll'
 )
-$viewerScripts = @(
-    'Install-or-Update-Viewer.cmd',
-    'common.ps1',
-    'install-viewer.ps1',
-    'uninstall-viewer.ps1'
-)
+$agentSetupFiles = @('SamsungSwitchWatch.Agent.Setup.exe') + $wpfRuntimeFiles
+$viewerRuntimeFiles = @('SamsungSwitchWatch.Viewer.exe') + $wpfRuntimeFiles
+Get-ChildItem -LiteralPath $agentSetupOut -File |
+    Where-Object { $_.Name -notin $agentSetupFiles } |
+    Remove-Item -Force
+Get-ChildItem -LiteralPath $viewerOut -File |
+    Where-Object { $_.Name -notin $viewerRuntimeFiles } |
+    Remove-Item -Force
+foreach ($file in $agentSetupFiles) {
+    $source = Join-Path $agentSetupOut $file
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Agent Setup 런타임 파일이 없습니다: $file"
+    }
+    Copy-Item -LiteralPath $source -Destination $agentOut
+}
+
 $userManualPdf = Join-Path $repoRoot 'docs\SamsungSwitchWatch_User_Manual_KO.pdf'
 if (-not (Test-Path -LiteralPath $userManualPdf -PathType Leaf)) {
     throw "최종 PDF 사용설명서가 없습니다: $userManualPdf"
 }
-foreach ($script in $agentScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $agentOut }
-foreach ($script in $viewerScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\$script") -Destination $viewerOut }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $agentOut
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\INSTALL_KO.md') -Destination $viewerOut
 Copy-Item -LiteralPath $userManualPdf -Destination $agentOut
@@ -130,7 +145,7 @@ if ($signed) {
             ForEach-Object { $_.EnhancedKeyUsages } | Where-Object { $_.Value -eq '1.3.6.1.5.5.7.3.3' })
         if ($codeSigningEku.Count -eq 0) { throw '인증서에 Code Signing EKU가 없습니다.' }
         $signingThumbprint = $certificate.Thumbprint
-        $signTargets = @(Get-ChildItem -LiteralPath $agentOut, $viewerOut -File | Where-Object { $_.Extension -in @('.exe', '.ps1') })
+        $signTargets = @(Get-ChildItem -LiteralPath $agentOut, $viewerOut -File | Where-Object { $_.Extension -eq '.exe' })
         foreach ($target in $signTargets) {
             $signature = Set-AuthenticodeSignature -LiteralPath $target.FullName -Certificate $certificate `
                 -HashAlgorithm SHA256 -TimestampServer $TimestampUrl
@@ -149,7 +164,7 @@ function Write-PackageManifest {
     param([string]$Directory, [string]$PackageKind, [string]$ExecutableName)
     $files = @(Get-ChildItem -LiteralPath $Directory -File | Where-Object { $_.Name -ne 'BUILD-MANIFEST.json' } |
         Sort-Object Name | ForEach-Object {
-            $signature = if ($_.Extension -in @('.exe', '.ps1')) { Get-AuthenticodeSignature -LiteralPath $_.FullName } else { $null }
+            $signature = if ($_.Extension -eq '.exe') { Get-AuthenticodeSignature -LiteralPath $_.FullName } else { $null }
             [ordered]@{
                 name = $_.Name
                 size = $_.Length
@@ -178,7 +193,7 @@ function Write-PackageManifest {
     [IO.File]::WriteAllText((Join-Path $Directory 'BUILD-MANIFEST.json'), ($manifest | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
 }
 
-Write-PackageManifest -Directory $agentOut -PackageKind 'Agent' -ExecutableName 'SamsungSwitchWatch.Agent.exe'
+Write-PackageManifest -Directory $agentOut -PackageKind 'Agent' -ExecutableName 'SamsungSwitchWatch.Agent.Setup.exe'
 Write-PackageManifest -Directory $viewerOut -PackageKind 'Viewer' -ExecutableName 'SamsungSwitchWatch.Viewer.exe'
 
 $agentZip = Join-Path $releaseRoot "SamsungSwitchWatch-Agent-$Version-win-x64.zip"

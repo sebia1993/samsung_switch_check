@@ -9,6 +9,8 @@ namespace SamsungSwitchWatch.Viewer;
 
 public partial class App : Application
 {
+    internal static bool SuppressRuntimeStartupForManualCapture { get; set; }
+
     private ViewerSettingsStore? _settingsStore;
     private ViewerSettingsSaveCoordinator? _settingsSaveCoordinator;
     private DashboardViewModel? _viewModel;
@@ -28,6 +30,12 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (SuppressRuntimeStartupForManualCapture)
+        {
+            base.OnStartup(e);
+            return;
+        }
+
         if (ViewerInstallSmokeCheck.IsRequested(e.Args))
         {
             Shutdown(ViewerInstallSmokeCheck.Run(Resources));
@@ -39,9 +47,26 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
         _singleInstance = new SingleInstanceCoordinator();
-        if (!_singleInstance.TryAcquire())
+        var instanceResult = _singleInstance.TryAcquire();
+        if (instanceResult != SingleInstanceAcquireResult.Acquired)
         {
-            try { SingleInstanceCoordinator.NotifyExistingAsync().GetAwaiter().GetResult(); } catch { }
+            if (instanceResult == SingleInstanceAcquireResult.DifferentVersionRunning)
+            {
+                MessageBox.Show(
+                    "이전 버전 Viewer가 이미 실행 중입니다.\n\n"
+                    + "1. 작업 표시줄 알림 영역의 기존 Viewer 아이콘에서 '프로그램 종료'를 선택하세요.\n"
+                    + "2. Win+R에서 shell:startup을 열고 'Samsung Switch Watch' 바로 가기를 삭제하세요.\n"
+                    + "3. Win+R에서 shell:programs를 열고 같은 이름의 이전 시작 메뉴 바로 가기도 삭제하세요.\n"
+                    + "4. 이 포터블 Viewer를 다시 실행하세요.\n\n"
+                    + "저장된 Agent 연결과 장비 정보는 그대로 유지됩니다.",
+                    "이전 Viewer 종료 필요",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            else
+            {
+                try { SingleInstanceCoordinator.NotifyExistingAsync().GetAwaiter().GetResult(); } catch { }
+            }
             Shutdown();
             return;
         }

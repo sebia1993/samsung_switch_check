@@ -87,15 +87,16 @@ try {
         [pscustomobject]@{
             Name = 'Agent'
             ZipName = $agentZipName
-            Exe = 'SamsungSwitchWatch.Agent.exe'
+            Exe = 'SamsungSwitchWatch.Agent.Setup.exe'
+            AdditionalExecutables = @('SamsungSwitchWatch.Agent.exe')
             Required = @(
+                'SamsungSwitchWatch.Agent.Setup.exe',
                 'SamsungSwitchWatch.Agent.exe',
-                'Install-or-Update-Agent.cmd',
-                'Configure-Agent-Allowed-IPs.cmd',
-                'common.ps1',
-                'install-agent.ps1',
-                'uninstall-agent.ps1',
-                'diagnose-agent.ps1',
+                'D3DCompiler_47_cor3.dll',
+                'PenImc_cor3.dll',
+                'PresentationNative_cor3.dll',
+                'vcruntime140_cor3.dll',
+                'wpfgfx_cor3.dll',
                 'INSTALL_KO.md',
                 'SamsungSwitchWatch_User_Manual_KO.pdf',
                 $releaseNotesName,
@@ -121,6 +122,7 @@ try {
             Name = 'Viewer'
             ZipName = $viewerZipName
             Exe = 'SamsungSwitchWatch.Viewer.exe'
+            AdditionalExecutables = @()
             Required = @(
                 'SamsungSwitchWatch.Viewer.exe',
                 'D3DCompiler_47_cor3.dll',
@@ -128,10 +130,6 @@ try {
                 'PresentationNative_cor3.dll',
                 'vcruntime140_cor3.dll',
                 'wpfgfx_cor3.dll',
-                'Install-or-Update-Viewer.cmd',
-                'common.ps1',
-                'install-viewer.ps1',
-                'uninstall-viewer.ps1',
                 'INSTALL_KO.md',
                 'SamsungSwitchWatch_User_Manual_KO.pdf',
                 $releaseNotesName,
@@ -160,6 +158,10 @@ try {
         }
         finally { $archive.Dispose() }
         Expand-Archive -LiteralPath $zipPath -DestinationPath $expanded -Force
+        $nestedDirectories = @(Get-ChildItem -LiteralPath $expanded -Directory -Recurse)
+        if ($nestedDirectories.Count -gt 0) {
+            throw "$($package.Name) ZIP must contain a flat root-only payload."
+        }
 
         foreach ($name in $package.Required) {
             if (-not (Test-Path -LiteralPath (Join-Path $expanded $name) -PathType Leaf)) {
@@ -208,6 +210,14 @@ try {
         if ($actualProductVersion -ne $expectedProductVersion) {
             throw "$($package.Name) executable product version differs from the release identity."
         }
+        foreach ($additionalExecutable in @($package.AdditionalExecutables)) {
+            $additionalProductVersion =
+                [Diagnostics.FileVersionInfo]::GetVersionInfo(
+                    (Join-Path $expanded $additionalExecutable)).ProductVersion
+            if ($additionalProductVersion -ne $expectedProductVersion) {
+                throw "$($package.Name) executable product version differs from the release identity: $additionalExecutable"
+            }
+        }
         $payloadNames = @(Get-ChildItem -LiteralPath $expanded -File |
             Where-Object { $_.Name -ne 'BUILD-MANIFEST.json' } | ForEach-Object { $_.Name } | Sort-Object)
         $declaredNames = @($manifest.files | ForEach-Object { [string]$_.name } | Sort-Object)
@@ -229,11 +239,20 @@ try {
         })
         if ($sensitive.Count -gt 0) { throw "$($package.Name) ZIP contains a runtime secret or database file." }
 
-        foreach ($script in Get-ChildItem -LiteralPath $expanded -Filter '*.ps1' -File) {
-            $tokens = $null
-            $errors = $null
-            [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$errors) | Out-Null
-            if ($errors) { throw "$($package.Name) PowerShell parse failed: $($script.Name)" }
+        $publicScripts = @(Get-ChildItem -LiteralPath $expanded -File | Where-Object {
+            $_.Extension -in @('.ps1', '.cmd', '.bat')
+        })
+        if ($publicScripts.Count -gt 0) {
+            throw "$($package.Name) ZIP contains a source-only script: $($publicScripts.Name -join ', ')"
+        }
+        $sourceOnlyLauncherPattern =
+            '(?i)(Install-or-Update-(?:Agent|Viewer)\.cmd|' +
+            'Configure-Agent-Allowed-IPs\.cmd|install-(?:agent|viewer)\.ps1)'
+        foreach ($document in Get-ChildItem -LiteralPath $expanded -Filter '*.md' -File) {
+            $documentText = Get-Content -LiteralPath $document.FullName -Raw -Encoding UTF8
+            if ($documentText -match $sourceOnlyLauncherPattern) {
+                throw "$($package.Name) documentation advertises a source-only launcher: $($document.Name)"
+            }
         }
 
         if ($package.Name -eq 'Agent') {
@@ -242,40 +261,12 @@ try {
                     throw "Public Agent ZIP is not service-only: $($entry.Name)"
                 }
             }
-            foreach ($launcherName in @(
-                'Install-or-Update-Agent.cmd',
-                'Configure-Agent-Allowed-IPs.cmd'
-            )) {
-                $launcherText = Get-Content -LiteralPath (Join-Path $expanded $launcherName) `
-                    -Raw -Encoding UTF8
-                if ($launcherText.Contains('-ExecutionPolicy Bypass') -or
-                    $launcherText.Contains('Unblock-File')) {
-                    throw "Public Agent launcher bypasses Windows security policy: $launcherName"
-                }
-            }
+            $removedLauncherPattern = '(?i)(install-agent-background|run-agent-background|--background)'
             foreach ($document in Get-ChildItem -LiteralPath $expanded -Filter '*.md' -File) {
                 $documentText = Get-Content -LiteralPath $document.FullName -Raw -Encoding UTF8
-                if ($documentText -match '(?i)install-agent-background|run-agent-background|--background') {
-                    throw "Public Agent documentation advertises a non-service runtime: $($document.Name)"
+                if ($documentText -match $removedLauncherPattern) {
+                    throw "Public Agent documentation advertises a removed launcher or non-service runtime: $($document.Name)"
                 }
-            }
-            $installer = Get-Content -LiteralPath (Join-Path $expanded 'install-agent.ps1') -Raw -Encoding UTF8
-            foreach ($requiredText in @(
-                'https://0.0.0.0:18443',
-                '[string[]]$ClientManagementCidrs',
-                '[string[]]$AllowedTargetCidrs',
-                '[string[]]$ClientManagementAddresses',
-                '[string[]]$AllowedTargetAddresses',
-                '[switch]$ReconfigureAddresses',
-                '--service',
-                'Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps',
-                'Restore-SswAgentFirewallSnapshots',
-                'receiptVersion = 3',
-                'Stop and unregister exact owned current-user Agent task',
-                'Register-ScheduledTask -TaskName $legacyBackgroundTaskName',
-                'legacyBackgroundTaskMigrated'
-            )) {
-                if (-not $installer.Contains($requiredText)) { throw "Agent install contract is missing: $requiredText" }
             }
         }
     }

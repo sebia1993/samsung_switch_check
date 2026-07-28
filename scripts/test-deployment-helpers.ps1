@@ -620,7 +620,7 @@ Assert-DeploymentTest -Condition (
     $dependencyState.IndependentCleanupRan
 ) -Message 'Best-effort plans must preserve independent cleanup while dependency gates block destructive follow-up.'
 
-Write-SswStep 'Simple UAC launcher and package contract'
+Write-SswStep 'Legacy recovery launchers and current native package contract'
 Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
     'install-agent.ps1',
     'Start-Process',
@@ -645,8 +645,10 @@ Assert-DeploymentTest -Condition (-not $launcher.Contains('Unblock-File')) `
 Assert-DeploymentTest -Condition (
     $build -match "\[string\]\`$Version\s*=\s*'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?'") `
     -Message 'Release build default must be a semantic version.'
-Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Agent.cmd'") `
-    -Message 'Agent package must include the one-click UAC launcher.'
+Assert-DeploymentTest -Condition (
+    $build.Contains("'SamsungSwitchWatch.Agent.Setup.exe'") -and
+    -not $build.Contains("'Install-or-Update-Agent.cmd'")
+) -Message 'Public Agent package must use the native Setup EXE and exclude the legacy CMD launcher.'
 Assert-ContainsAll -Name 'Viewer launcher' -Text $viewerLauncher -Needles @(
     'install-viewer.ps1',
     'SSW_POWERSHELL_PATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
@@ -658,8 +660,10 @@ Assert-DeploymentTest -Condition (-not ($viewerLauncher -match '(?im)^\s*powersh
     -Message 'Viewer launcher must not resolve Windows PowerShell through the current directory or PATH.'
 Assert-DeploymentTest -Condition (-not $viewerLauncher.Contains('-Verb RunAs')) `
     -Message 'Per-user Viewer launcher must not request administrator elevation.'
-Assert-DeploymentTest -Condition $build.Contains("'Install-or-Update-Viewer.cmd'") `
-    -Message 'Viewer package must include the one-click per-user launcher.'
+Assert-DeploymentTest -Condition (
+    $build.Contains("'SamsungSwitchWatch.Viewer.exe'") -and
+    -not $build.Contains("'Install-or-Update-Viewer.cmd'")
+) -Message 'Public Viewer package must be portable and exclude the legacy CMD launcher.'
 Assert-DeploymentTest -Condition $build.Contains("'docs\SamsungSwitchWatch_User_Manual_KO.pdf'") `
     -Message 'Both release packages must include the final PDF user manual.'
 Assert-DeploymentTest -Condition (-not $build.Contains('SamsungSwitchWatch_User_Manual_KO.docx')) `

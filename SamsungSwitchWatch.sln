@@ -19,6 +19,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SamsungSwitchWatch.Viewer",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SamsungSwitchWatch.Viewer.Tests", "tests\SamsungSwitchWatch.Viewer.Tests\SamsungSwitchWatch.Viewer.Tests.csproj", "{E4DB99A6-20C1-4825-8FC6-52E657AF9D72}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SamsungSwitchWatch.Agent.Setup", "src\SamsungSwitchWatch.Agent.Setup\SamsungSwitchWatch.Agent.Setup.csproj", "{58EC0136-37A9-4175-A96D-A707A514E44B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SamsungSwitchWatch.Agent.Setup.Tests", "tests\SamsungSwitchWatch.Agent.Setup.Tests\SamsungSwitchWatch.Agent.Setup.Tests.csproj", "{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -101,6 +105,30 @@ Global
 		{E4DB99A6-20C1-4825-8FC6-52E657AF9D72}.Release|x64.Build.0 = Release|Any CPU
 		{E4DB99A6-20C1-4825-8FC6-52E657AF9D72}.Release|x86.ActiveCfg = Release|Any CPU
 		{E4DB99A6-20C1-4825-8FC6-52E657AF9D72}.Release|x86.Build.0 = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|x64.Build.0 = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Debug|x86.Build.0 = Debug|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|x64.ActiveCfg = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|x64.Build.0 = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|x86.ActiveCfg = Release|Any CPU
+		{58EC0136-37A9-4175-A96D-A707A514E44B}.Release|x86.Build.0 = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|x64.Build.0 = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Debug|x86.Build.0 = Debug|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|x64.ActiveCfg = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|x64.Build.0 = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|x86.ActiveCfg = Release|Any CPU
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -112,5 +140,7 @@ Global
 		{657C6BA6-2D24-4701-BCB5-1FFFF3D5DF2B} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{AD4072D1-DB2E-445B-A680-2E9A751CDBD4} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{E4DB99A6-20C1-4825-8FC6-52E657AF9D72} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{58EC0136-37A9-4175-A96D-A707A514E44B} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{DE2B7075-1F31-406D-82CE-89B9C4A55DA4} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

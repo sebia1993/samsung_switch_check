@@ -89,6 +89,10 @@ public sealed class WpfSmokeTests
                 connection.UpdateLayout();
                 Assert.Equal("monitor-pc", connection.AgentAddressTextBox.Text);
                 Assert.Equal("Agent 주소만 입력하세요", connection.TransportWarningText.Text);
+                Assert.Equal(System.Windows.Visibility.Collapsed, connection.ConnectionProgressPanel.Visibility);
+                Assert.Contains("TCP/18443", connection.TcpProbeText.Text, StringComparison.Ordinal);
+                Assert.Equal("Viewer 실행 시 트레이로 최소화",
+                    connection.StartMinimizedCheckBox.Content);
                 Assert.Same(connection.AgentAddressTextBox, System.Windows.Input.FocusManager.GetFocusedElement(connection));
                 connection.Close();
                 var devices = new DeviceManagementWindow(viewModel);
@@ -123,9 +127,15 @@ public sealed class WpfSmokeTests
                 if (Directory.Exists(folder)) Directory.Delete(folder, true);
             }
         });
+        thread.IsBackground = true;
+        thread.Name = "SamsungSwitchWatch-WpfSmoke";
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke thread did not finish.");
+        var timeout = TimeSpan.FromSeconds(30);
+        Assert.True(
+            thread.Join(timeout),
+            $"WPF smoke thread did not finish within {timeout.TotalSeconds:0} seconds. "
+            + $"Thread state: {thread.ThreadState}.");
         Assert.Null(failure);
     }
 

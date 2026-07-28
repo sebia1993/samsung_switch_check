@@ -25,11 +25,11 @@ foreach ($path in @(
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required release file is missing: $path" }
 }
 
-$workflow = Get-Content -LiteralPath $workflowPath -Raw
-$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
-$packageContract = Get-Content -LiteralPath $packageContractPath -Raw
+$workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw -Encoding UTF8
+$packageContract = Get-Content -LiteralPath $packageContractPath -Raw -Encoding UTF8
 $releaseProcess = Get-Content -LiteralPath $releaseProcessPath -Raw -Encoding UTF8
-$windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw
+$windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw -Encoding UTF8
 $agents = Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8
 $readme = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
 $install = Get-Content -LiteralPath $installPath -Raw -Encoding UTF8
@@ -92,6 +92,8 @@ Assert-Pattern $workflow '\$publicAssetNames\s*=\s*@\(' 'The exact two-file publ
 Assert-Pattern $workflow '\$arguments\s*=\s*@\(\$tag\)\s*\+\s*\$publicAssets' 'Only the explicit public ZIP allowlist may be passed to GitHub Release creation.'
 Assert-Pattern $workflow '\$remoteNames\s+-join\s+''\|''\)\s+-ne\s+\(\$publicAssetNames\s+-join\s+''\|''' 'Remote draft assets must match the public ZIP allowlist.'
 Assert-Pattern $workflow 'Exact release notes are missing' 'Publishing must require exact-version release notes.'
+Assert-Pattern $workflow '\$hashRows\s*=\s*@\(\$publicAssetNames\s*\|\s*ForEach-Object' 'Release notes must derive SHA-256 rows from the exact public asset allowlist.'
+Assert-Pattern $workflow '''--notes-file'',\s*\$releaseNotesWithHashes' 'Published release notes must include the generated public asset hashes.'
 Assert-Pattern $workflow 'gh release create @arguments' 'Release assets must be staged through the GitHub CLI.'
 Assert-Pattern $workflow '\$draftCreateOutput\s*=\s*@\(gh release create @arguments\)' 'Draft creation output must be captured without retrying creation.'
 Assert-Pattern $workflow "'--verify-tag',\s*'--draft'" 'Assets must be staged in a draft before immutable publication.'
@@ -311,8 +313,20 @@ Assert-Pattern $buildScript 'RELEASE_NOTES_\$\{releaseNotesToken\}_KO\.md' 'Buil
 if ($buildScript -match 'RELEASE_NOTES_0\.[0-9]+\.[0-9]+_POC_KO\.md') {
     throw 'Build must not silently fall back to another version release note.'
 }
+Assert-Pattern $buildScript 'SamsungSwitchWatch\.Agent\.Setup\\SamsungSwitchWatch\.Agent\.Setup\.csproj' `
+    'Release build must publish the native Agent Setup project.'
+Assert-Pattern $buildScript "Write-PackageManifest.+SamsungSwitchWatch\.Agent\.Setup\.exe" `
+    'Agent package manifest must name Agent Setup as the public entrypoint.'
+if ($buildScript -match '\$(?:agent|viewer)Scripts\s*=' -or
+    $buildScript -match 'Copy-Item.+scripts\\') {
+    throw 'Public release build must not copy PowerShell or CMD deployment scripts.'
+}
 Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must require the exact-version release note.'
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
+Assert-Pattern $packageContract "SamsungSwitchWatch\.Agent\.Setup\.exe" `
+    'Package contract must require the native Agent Setup entrypoint.'
+Assert-Pattern $packageContract "\.Extension\s+-in\s+@\('\.ps1',\s*'\.cmd',\s*'\.bat'\)" `
+    'Package contract must reject every public PowerShell, CMD and BAT file.'
 
 if ($workflow -notmatch 'default:\s*(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)') {
     throw 'Manual build default version is missing or invalid.'

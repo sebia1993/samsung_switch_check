@@ -56,7 +56,39 @@ public static class AgentContractMapper
         {
             throw new JsonException("AGENT_IDENTITY_INVALID");
         }
-        return result with { CertificatePublicKeySha256 = result.CertificatePublicKeySha256.ToUpperInvariant() };
+        return result with
+        {
+            CertificatePublicKeySha256 = result.CertificatePublicKeySha256.ToUpperInvariant(),
+            ProductVersion = NormalizeOptionalProductVersion(root)
+        };
+    }
+
+    private static string? NormalizeOptionalProductVersion(JsonElement root)
+    {
+        if (!root.TryGetProperty("productVersion", out var property))
+        {
+            return null;
+        }
+        if (property.ValueKind != JsonValueKind.String)
+        {
+            throw new JsonException("AGENT_IDENTITY_INVALID");
+        }
+
+        var value = property.GetString();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var normalized = AgentProductVersionPolicy.Normalize(value);
+        if (normalized.Length is < 1 or > 64
+            || normalized.Any(character =>
+                !(char.IsLetterOrDigit(character) || character is '.' or '-' or '_')))
+        {
+            throw new JsonException("AGENT_IDENTITY_INVALID");
+        }
+
+        return normalized;
     }
 
     public static TelnetExecutionResultDto MapTelnetExecutionResultV4(string json) =>

@@ -1,0 +1,176 @@
+<Window x:Class="SamsungSwitchWatch.Agent.Setup.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Samsung Switch Watch Agent Setup"
+        Width="760"
+        Height="700"
+        MinWidth="680"
+        MinHeight="620"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,18">
+            <TextBlock Text="Agent 설치 및 점검"
+                       FontSize="24"
+                       FontWeight="SemiBold" />
+            <TextBlock x:Name="ModeDescription"
+                       Margin="0,6,0,0"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       Text="Agent는 설치 후 창 없이 Windows 서비스로 실행됩니다." />
+        </StackPanel>
+
+        <Border Grid.Row="1" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+            <StackPanel>
+                <TextBlock Text="1. Viewer PC 고정 IPv4"
+                           FontSize="15"
+                           FontWeight="SemiBold" />
+                <TextBlock Margin="0,4,0,10"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           Text="이 주소의 Viewer만 Agent HTTPS/18443에 연결할 수 있습니다." />
+                <TextBox x:Name="ViewerIpTextBox"
+                         Height="36"
+                         Padding="10,6"
+                         VerticalContentAlignment="Center"
+                         ToolTip="예: 10.20.30.41" />
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="2. 스위치 관리망 선택"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <Button Grid.Column="1"
+                            x:Name="RefreshNetworksButton"
+                            Style="{StaticResource SecondaryButton}"
+                            Padding="12,5"
+                            MinHeight="30"
+                            Click="RefreshNetworksButton_Click"
+                            Content="다시 검색" />
+                </Grid>
+                <TextBlock Margin="0,4,0,10"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           Text="Agent PC에 직접 연결된 사설 IPv4 관리망을 1~2개 선택하세요." />
+                <ItemsControl x:Name="NetworkItemsControl">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="0,1,0,0"
+                                    Padding="4,9">
+                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Checked="NetworkSelectionChanged"
+                                          Unchecked="NetworkSelectionChanged">
+                                    <StackPanel>
+                                        <TextBlock>
+                                            <Run Text="{Binding InterfaceName, Mode=OneWay}" FontWeight="SemiBold" />
+                                            <Run Text="  " />
+                                            <Run Text="{Binding Cidr, Mode=OneWay}" />
+                                        </TextBlock>
+                                        <TextBlock FontSize="11"
+                                                   Foreground="{StaticResource MutedTextBrush}">
+                                            <Run Text="이 PC 주소: " />
+                                            <Run Text="{Binding Address, Mode=OneWay}" />
+                                            <Run Text=" · " />
+                                            <Run Text="{Binding Description, Mode=OneWay}" />
+                                        </TextBlock>
+                                    </StackPanel>
+                                </CheckBox>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="NoNetworksText"
+                           Margin="4,8,4,0"
+                           Foreground="#B45309"
+                           Visibility="Collapsed"
+                           Text="선택할 수 있는 직접 연결 사설 IPv4 관리망을 찾지 못했습니다." />
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="점검 및 설치 결과"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <TextBlock Grid.Column="1"
+                               x:Name="OperationStateText"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               Text="대기" />
+                </Grid>
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="ResultItemsControl">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="22" />
+                                        <ColumnDefinition Width="130" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="{Binding Symbol}"
+                                               Foreground="{Binding Brush}"
+                                               FontWeight="Bold" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Label}"
+                                               FontWeight="SemiBold" />
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Text="{Binding Message}" />
+                                        <TextBlock Text="{Binding Code}"
+                                                   Margin="0,2,0,0"
+                                                   FontFamily="Consolas"
+                                                   FontSize="10"
+                                                   Foreground="{StaticResource MutedTextBrush}" />
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <DockPanel Grid.Row="4">
+            <Button DockPanel.Dock="Right"
+                    Style="{StaticResource SecondaryButton}"
+                    Margin="8,0,0,0"
+                    Click="CloseButton_Click"
+                    Content="닫기" />
+            <Button DockPanel.Dock="Right"
+                    x:Name="InstallButton"
+                    Style="{StaticResource PrimaryButton}"
+                    Margin="8,0,0,0"
+                    Click="InstallButton_Click"
+                    Content="설치 / 업데이트" />
+            <Button DockPanel.Dock="Right"
+                    x:Name="CheckButton"
+                    Style="{StaticResource SecondaryButton}"
+                    Click="CheckButton_Click"
+                    Content="사전 점검" />
+            <TextBlock VerticalAlignment="Center"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       Text="설정 변경은 설치 버튼을 누른 뒤에만 수행됩니다." />
+        </DockPanel>
+    </Grid>
+</Window>

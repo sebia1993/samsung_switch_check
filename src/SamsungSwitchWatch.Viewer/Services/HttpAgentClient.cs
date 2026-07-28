@@ -561,10 +561,16 @@ public sealed class HttpAgentClient : IAgentClient
 internal sealed class CertificatePinValidator
 {
     private readonly ViewerSettings _settings;
+    private readonly Action? _certificateAccepted;
+    private int _certificateAcceptedReported;
     private int _identityChanged;
     private string? _observedPin;
 
-    public CertificatePinValidator(ViewerSettings settings) => _settings = settings;
+    public CertificatePinValidator(ViewerSettings settings, Action? certificateAccepted = null)
+    {
+        _settings = settings;
+        _certificateAccepted = certificateAccepted;
+    }
 
     public bool IdentityChanged => Volatile.Read(ref _identityChanged) != 0;
 
@@ -580,11 +586,19 @@ internal sealed class CertificatePinValidator
         catch (CryptographicException) { return false; }
 
         Volatile.Write(ref _observedPin, pin);
-        if (!_settings.TryGetAgentTrustPin(out var expected)) return true;
+        if (!_settings.TryGetAgentTrustPin(out var expected))
+        {
+            ReportCertificateAccepted();
+            return true;
+        }
         var matches = FixedTimeEquals(expected, pin);
         if (!matches)
         {
             Interlocked.Exchange(ref _identityChanged, 1);
+        }
+        else
+        {
+            ReportCertificateAccepted();
         }
         return matches;
     }
@@ -604,6 +618,22 @@ internal sealed class CertificatePinValidator
         }
         _settings.SetAgentTrustPin(identityPin.ToUpperInvariant());
         return true;
+    }
+
+    private void ReportCertificateAccepted()
+    {
+        if (Interlocked.Exchange(ref _certificateAcceptedReported, 1) == 0)
+        {
+            try
+            {
+                _certificateAccepted?.Invoke();
+            }
+            catch
+            {
+                // Progress reporting is observational and must never make a
+                // valid TLS connection fail.
+            }
+        }
     }
 
     public static string GetSpkiSha256(X509Certificate2 certificate)
