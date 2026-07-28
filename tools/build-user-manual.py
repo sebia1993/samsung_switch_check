@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.1 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.0-poc"
-DOCUMENT_DATE = "2026-07-28"
+VERSION = "0.10.1-poc"
+DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -643,7 +643,7 @@ def build_manual(output_path: Path, images_dir: Path):
 
     core = doc.core_properties
     core.title = "Samsung Switch Watch 사용자 설명서"
-    core.subject = "v0.10 Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
+    core.subject = f"{VERSION} Viewer 중심 원격 삼성 스위치 점검 운영 가이드"
     core.author = "Samsung Switch Watch Project"
     core.keywords = "Samsung Switch Watch, Telnet, Windows Service, Viewer, Agent"
     core.comments = "Sanitized offline manual; contains no company credentials or device data."
@@ -738,7 +738,7 @@ Viewer PC                 Agent PC                    Samsung Switch
     add_callout(
         doc,
         "반입 파일 확인",
-        "0.10.0-poc는 코드 서명되지 않은 시험판입니다. 압축을 풀기 전에 Agent와 Viewer ZIP의 "
+        f"{VERSION}는 코드 서명되지 않은 시험판입니다. 압축을 풀기 전에 Agent와 Viewer ZIP의 "
         "SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교하고 사내 보안 반입 절차를 "
         "완료하세요. SmartScreen 또는 EDR 경고를 우회하지 않습니다.",
         "danger",
@@ -816,7 +816,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         "선택한 뒤 Win+R에서 shell:startup을 열어 'Samsung Switch Watch' 바로 가기를 "
         "삭제합니다. 이어 shell:programs에서도 같은 이름의 이전 시작 메뉴 바로 가기를 "
         "삭제하고 새 Viewer를 다시 실행하세요. 기존 Agent 연결과 장비 정보는 유지됩니다. "
-        "창이 바로 보이지 않으면 알림 영역에서 대시보드를 열고 실행 경로가 새 v0.10 "
+        f"창이 바로 보이지 않으면 알림 영역에서 대시보드를 열고 실행 경로가 새 {VERSION} "
         "폴더인지 확인하세요.",
         "warning",
     )
@@ -839,7 +839,7 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_callout(
         doc,
         "Viewer가 실행되지 않는 경우",
-        "0.10.0-poc는 코드 서명되지 않아 SmartScreen이나 사내 EDR이 차단할 수 있습니다. ZIP을 완전히 "
+        f"{VERSION}는 코드 서명되지 않아 SmartScreen이나 사내 EDR이 차단할 수 있습니다. ZIP을 완전히 "
         "압축 해제하고 Viewer EXE와 제공된 DLL이 같은 폴더에 있는지 확인하세요. EDR·AppLocker·WDAC가 "
         "차단하면 우회하지 말고 공식 ZIP의 버전·해시와 차단 기록을 보안 담당자에게 전달하세요.",
         "danger",
@@ -999,6 +999,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         """
 매 요청: TCP 연결 → 로그인 → 필요 시 enable → 명령 실행 → exit/logout → 소켓 종료
 최대 세션 시간: 240초
+명령 합산 예산이 240초를 넘는 경우: 순서를 유지한 여러 세션으로 미리 분할
 명령 단계에서 세션 종료: 완료 명령은 반복하지 않고 남은 명령만 새 세션으로 1회 재시도
 자동 재시도 없음: 인증/enable 실패, 명령 타임아웃
 완료 표시: 세션 횟수와 재연결 횟수
