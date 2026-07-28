@@ -304,9 +304,9 @@ jobs:
           })
           $hashSection = @(
             ''
-            '## 공개 Asset SHA-256'
+            '## Public Asset SHA-256'
             ''
-            '아래 값은 이 Release에 게시된 두 ZIP의 SHA-256입니다.'
+            'The values below are the SHA-256 digests of the two ZIP files published in this release.'
             ''
             $hashRows
             ''
