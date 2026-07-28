@@ -174,6 +174,9 @@ for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
     $scriptText = (($body | ForEach-Object {
         if ($_.Length -ge $bodyIndent) { $_.Substring($bodyIndent) } else { '' }
     }) -join "`r`n")
+    if ($scriptText -match '[^\u0000-\u007F]') {
+        throw "Embedded release PowerShell must remain ASCII near workflow line $($lineIndex + 1)."
+    }
     $tokens = $null
     $parseErrors = $null
     [Management.Automation.Language.Parser]::ParseInput($scriptText, [ref]$tokens, [ref]$parseErrors) | Out-Null
