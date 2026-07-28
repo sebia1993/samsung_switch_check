@@ -200,6 +200,8 @@ public sealed class AgentDeploymentOrchestratorTests
             operation => operation is "apply" || operation.StartsWith("remove:", StringComparison.Ordinal));
         Assert.Empty(fixture.FileSystem.AccessRequests);
         Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        var pathStep = Assert.Single(result.Steps, step => step.Code == "PATHS_READY");
+        Assert.Contains("실제 쓰기 권한", pathStep.Message, StringComparison.Ordinal);
     }
 
     [Fact]
