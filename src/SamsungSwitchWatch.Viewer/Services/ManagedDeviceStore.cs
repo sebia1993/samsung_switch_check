@@ -64,7 +64,10 @@ public class ManagedDeviceStore
         }
     }
 
-    public ManagedDeviceProfile Save(ManagedDeviceDraft draft)
+    public ManagedDeviceProfile Save(ManagedDeviceDraft draft) =>
+        SaveWithOutcome(draft).Profile;
+
+    internal ManagedDeviceSaveOutcome SaveWithOutcome(ManagedDeviceDraft draft)
     {
         ArgumentNullException.ThrowIfNull(draft);
         lock (_sync)
@@ -138,7 +141,7 @@ public class ManagedDeviceStore
             if (existing is null) devices.Add(profile);
             else devices[devices.IndexOf(existing)] = profile;
             SaveUnsafe(devices);
-            return profile.Copy();
+            return new ManagedDeviceSaveOutcome(profile.Copy(), connectionChanged);
         }
     }
 
@@ -484,6 +487,10 @@ public class ManagedDeviceStore
     {
     }
 }
+
+internal sealed record ManagedDeviceSaveOutcome(
+    ManagedDeviceProfile Profile,
+    bool ConnectionIdentityChanged);
 
 public enum ManagedDeviceLoadStatus
 {
