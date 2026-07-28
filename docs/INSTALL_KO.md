@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.22-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.23-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.22-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.22-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.23-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.23-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -197,10 +197,24 @@ UAC는 Program Files의 프로그램 파일을 설치하거나 업데이트하�
 2. 원래 사용자 단계: 시작 메뉴와 로그인 자동 시작 바로 가기를 반영하고 Viewer를
    일반 사용자 권한으로 실행합니다.
 
+다음 업데이트를 시작할 때 현재 Viewer와 기존 rollback 슬롯을 모두 검증합니다. 현재
+Viewer가 정상이라면 staging 검증과 실행 중 Viewer 종료가 끝날 때까지 두 버전을 보존한
+뒤, 실제 폴더 교체 직전에 현재 Viewer를 새 rollback 슬롯으로 회전합니다. 따라서 새
+Viewer 설치가 실패하면 두 세대 전 버전이 아니라 정확히 직전 버전을 복원합니다.
+
 원래 사용자 실행 검사 또는 바로 가기 단계가 실패하면 이전 Program Files 버전을 되돌리기
 위한 UAC가 한 번 더 표시될 수 있습니다. 이 복구 UAC를 취소하거나 복구가 실패하면
 rollback 슬롯을 자동 삭제하지 않습니다. 설치 폴더나 rollback 슬롯을 수동 정리하지 말고
 표시된 `Recovery`와 진단 코드를 Windows 관리자에게 전달하십시오.
+
+각 관리자 설치는 고유한 32자리 작업 ID와 활성·rollback manifest SHA-256을 설치 폴더
+옆의 Administrators 전용 `Viewer.__rollback-transaction.json` marker에 기록합니다.
+같은 ZIP을 다시 설치해 manifest SHA-256이 같더라도 다른 설치가 먼저 완료되면 이전
+작업의 늦은 복구 요청은 작업 ID 불일치로 `VIEWER_ROLLBACK_ACTIVE_CHANGED`에서
+중단됩니다. 이 경우 더 최신 Viewer, rollback 슬롯과 marker를 모두 보존하며, 폴더를
+수동 교체하지 말고 설치를 다시 시작합니다.
+현재 Viewer의 무화면 실행 점검만 일시적으로 실패한 경우에도 자동으로 구버전으로 내리지
+않고 `VIEWER_CURRENT_SELF_CHECK_FAILED`로 두 버전을 보존합니다.
 
 현재 설치의 실행 파일이나 매니페스트가 EDR 격리 또는 파일 손상으로 사라져도 자동 복구는
 현재 설치의 정상 패키지 검증을 요구하지 않습니다. 보호된 정확한 설치 경로를 격리한 뒤
@@ -443,6 +457,13 @@ Agent 신원 불일치가 발생합니다.
 | `VIEWER_SOURCE_ACCESS_DENIED` | UAC에 사용한 관리자 계정이 압축 해제 원본을 읽을 수 없음. ACL을 완화하지 말고 관리자도 읽을 수 있는 승인된 임시 폴더에 공식 ZIP을 다시 압축 해제 |
 | `VIEWER_INSTALL_PATH_EXECUTION_BLOCKED` | Program Files에 설치된 Viewer 실행이 AppLocker·WDAC·EDR 등에 의해 차단됨. 보안 정책 담당자에게 설치 진단 코드와 배포 파일 해시 전달 |
 | `VIEWER_USER_PHASE_FAILED` | 원래 사용자 권한의 실행 검사 또는 바로 가기 반영 실패. 이어지는 복구 UAC를 승인하고 `Recovery` 결과 확인 |
+| `VIEWER_CURRENT_SELF_CHECK_FAILED` | 기존 Viewer 무화면 실행 점검이 실패했지만 현재 설치와 rollback 슬롯은 보존됨. EDR·AppLocker·WDAC 지연·차단을 확인하고 폴더를 수동 삭제하지 않은 채 재시도 |
+| `VIEWER_ROLLBACK_ACTIVE_CHANGED` | 사용자 단계 실패 뒤 복구를 시작하기 전에 다른 Viewer 패키지가 활성화됨. 최신 설치를 되돌리지 않고 중단했으므로 설치 폴더와 rollback 슬롯을 보존한 채 다시 설치 |
+| `VIEWER_ROLLBACK_TRANSACTION_MISSING` | 현재 설치 작업의 관리자 전용 rollback marker가 없음. 활성 설치와 rollback 슬롯을 변경하지 말고 최신 공식 ZIP으로 설치를 다시 시작 |
+| `VIEWER_ROLLBACK_TRANSACTION_INVALID` | rollback marker의 제품·작업 ID·해시 또는 실제 rollback 슬롯 결속이 맞지 않음. 설치·slot·marker를 삭제하지 말고 관리자 확인 |
+| `VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID` | rollback marker가 Administrators 전용 일반 파일이 아니어서 신뢰할 수 없음. ACL을 완화하거나 marker를 재작성하지 말고 관리자·보안 담당자 확인 |
+| `VIEWER_ROLLBACK_TRANSACTION_CONSUME_FAILED` | 이전 버전 복원 뒤 완료된 작업 marker를 제거하지 못함. 복원된 Viewer를 임의 삭제하지 말고 최신 ZIP으로 관리자 설치 재실행 |
+| `VIEWER_ROLLBACK_TRANSACTION_WRITE_FAILED` | 새 Viewer 자체점검 뒤 관리자 전용 rollback marker 확정에 실패함. 설치기는 이전 상태 복구를 시도하므로 `Recovery` 결과와 보존된 증거 확인 |
 | `VIEWER_MACHINE_ROLLBACK_INCOMPLETE` | 이전 Program Files 버전 자동 복구가 완료되지 않음. 현재 설치와 `Viewer.__rollback`을 삭제하지 말고 관리자 확인 |
 | `VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED` | 사용자 단계 실패 뒤 복구 UAC가 취소되었거나 시작되지 않음. rollback 슬롯을 보존하고 관리자에게 재시도 요청 |
 | `VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE` | 시작 메뉴 또는 시작프로그램 폴더를 만들 수 없음. Viewer를 설치할 동일 Windows 사용자로 실행했는지와 폴더 쓰기 권한·보안 정책 확인 |
@@ -459,6 +480,7 @@ Agent 신원 불일치가 발생합니다.
 | `BAD_IMAGE` | 설치된 실행 파일을 현재 Windows에서 로드하지 못함. win-x64 환경과 파일 손상·격리 여부 확인 |
 | `TIMEOUT` | 무화면 자체점검이 20초 안에 끝나지 않음. 남은 프로세스와 보안 프로그램 지연·차단 확인 |
 | `VIEWER_UNINSTALL_ROLLBACK_PRESERVED` | 실행 중 Viewer 또는 활성 프로그램 폴더를 제거하지 못해 rollback 슬롯을 보존함. 잠긴 Viewer를 정상 종료하고 관리자 제거를 다시 실행 |
+| `VIEWER_UNINSTALL_TRANSACTION_PRESERVED` | 활성 프로그램과 rollback 슬롯 제거가 모두 확인되지 않아 작업 marker를 보존함. 남은 경로를 수동 삭제하지 말고 관리자 제거를 다시 실행 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 스위치 IP 또는 고급 대상 CIDR 밖임. Agent ZIP의 허용 IP 설정 도구로 갱신 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |

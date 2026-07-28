@@ -167,6 +167,7 @@ if (-not $PerUser -and -not $MachinePhase) {
 
 if ($MachinePhase) { Assert-SswAdministrator }
 $machineRollbackSlot = $null
+$machineRollbackTransactionMarker = $null
 $deploymentLock = if ($MachinePhase) {
     Enter-SswViewerMachineUninstallLock
 }
@@ -177,15 +178,33 @@ try {
 if ($MachinePhase) {
     $installParent = Split-Path $install -Parent
     $machineRollbackSlot = "$install.__rollback"
+    $machineRollbackTransactionMarker = "$install.__rollback-transaction.json"
     Assert-SswChildPath -Parent $installParent -Child $machineRollbackSlot
+    Assert-SswChildPath -Parent $installParent -Child $machineRollbackTransactionMarker
     if ((Split-Path $machineRollbackSlot -Parent) -cne $installParent) {
         throw 'VIEWER_ROLLBACK_SLOT_INVALID: Viewer rollback slot은 설치 폴더와 같은 보호된 부모에 있어야 합니다.'
+    }
+    if ((Split-Path $machineRollbackTransactionMarker -Parent) -cne $installParent) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker는 설치 폴더와 같은 보호된 부모에 있어야 합니다.'
     }
     if (Test-Path -LiteralPath $install) {
         Assert-SswTrustedDirectoryRootOwner -Path $install | Out-Null
     }
     if (Test-Path -LiteralPath $machineRollbackSlot) {
         Assert-SswTrustedDirectoryRootOwner -Path $machineRollbackSlot | Out-Null
+    }
+    if (Test-Path -LiteralPath $machineRollbackTransactionMarker) {
+        if (-not (Test-Path -LiteralPath $machineRollbackTransactionMarker -PathType Leaf)) {
+            throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker가 일반 파일이 아닙니다.'
+        }
+        try {
+            Assert-SswAdministratorsOnlyFileAcl -Path $machineRollbackTransactionMarker
+        }
+        catch {
+            throw [InvalidOperationException]::new(
+                'VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID: rollback 작업 marker의 소유권 또는 ACL을 신뢰할 수 없어 제거를 중단했습니다.',
+                $_.Exception)
+        }
     }
 }
 $links = @(
@@ -205,6 +224,7 @@ Write-SswOperationJournal -Path $journalPath -Operation 'viewer-uninstall' -Tran
 $uninstallState = [pscustomobject]@{
     ViewerStopped = $false
     ActiveProgramRemoved = $false
+    RollbackSlotRemoved = $false
 }
 $errors = @(Invoke-SswBestEffortPlan -Plan @(
     [pscustomobject]@{ Name = 'stop-viewer'; Action = {
@@ -230,11 +250,29 @@ $errors = @(Invoke-SswBestEffortPlan -Plan @(
         $uninstallState.ActiveProgramRemoved = $true
     } },
     [pscustomobject]@{ Name = 'remove-machine-rollback-slot'; Action = {
-        if ($MachinePhase -and (Test-Path -LiteralPath $machineRollbackSlot)) {
-            if (-not $uninstallState.ActiveProgramRemoved) {
-                throw 'VIEWER_UNINSTALL_ROLLBACK_PRESERVED: 활성 Viewer 프로그램 제거가 확인되지 않아 rollback slot을 보존합니다.'
+        if ($MachinePhase) {
+            if (Test-Path -LiteralPath $machineRollbackSlot) {
+                if (-not $uninstallState.ActiveProgramRemoved) {
+                    throw 'VIEWER_UNINSTALL_ROLLBACK_PRESERVED: 활성 Viewer 프로그램 제거가 확인되지 않아 rollback slot을 보존합니다.'
+                }
+                Remove-Item -LiteralPath $machineRollbackSlot -Recurse -Force
             }
-            Remove-Item -LiteralPath $machineRollbackSlot -Recurse -Force
+            if (Test-Path -LiteralPath $machineRollbackSlot) {
+                throw 'VIEWER_UNINSTALL_ROLLBACK_REMOVE_FAILED: Viewer rollback slot이 남아 있어 작업 marker를 보존합니다.'
+            }
+            $uninstallState.RollbackSlotRemoved = $true
+        }
+    } },
+    [pscustomobject]@{ Name = 'remove-machine-rollback-transaction'; Action = {
+        if ($MachinePhase -and (Test-Path -LiteralPath $machineRollbackTransactionMarker)) {
+            if (-not $uninstallState.ActiveProgramRemoved -or
+                -not $uninstallState.RollbackSlotRemoved) {
+                throw 'VIEWER_UNINSTALL_TRANSACTION_PRESERVED: 활성 Viewer와 rollback slot 제거가 확인되지 않아 작업 marker를 보존합니다.'
+            }
+            Remove-Item -LiteralPath $machineRollbackTransactionMarker -Force
+            if (Test-Path -LiteralPath $machineRollbackTransactionMarker) {
+                throw 'VIEWER_UNINSTALL_TRANSACTION_REMOVE_FAILED: rollback 작업 marker를 제거하지 못했습니다.'
+            }
         }
     } },
     [pscustomobject]@{ Name = 'remove-shortcuts'; Action = {

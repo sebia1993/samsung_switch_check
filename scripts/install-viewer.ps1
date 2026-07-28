@@ -7,7 +7,9 @@
     [switch]$Preflight,
     [switch]$PerUser,
     [switch]$MachinePhase,
-    [switch]$MachineRollbackPhase
+    [switch]$MachineRollbackPhase,
+    [string]$InstallTransactionId,
+    [string]$ExpectedActiveManifestSha256
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -202,6 +204,242 @@ function Get-SswViewerMachineRollbackSlot {
     return $slot
 }
 
+function Get-SswViewerRollbackTransactionPath {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    $resolvedInstall = [IO.Path]::GetFullPath($InstallDirectory)
+    $installParent = Split-Path $resolvedInstall -Parent
+    $marker = "$resolvedInstall.__rollback-transaction.json"
+    Assert-SswChildPath -Parent $installParent -Child $marker
+    if ((Split-Path $marker -Parent) -cne $installParent) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker는 설치 폴더와 같은 보호된 부모에 있어야 합니다.'
+    }
+    return $marker
+}
+
+function Write-SswViewerRollbackTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [Parameter(Mandatory = $true)][string]$ActiveManifestSha256,
+        [AllowNull()][string]$RollbackManifestSha256
+    )
+
+    if ($TransactionId -notmatch '^[0-9a-fA-F]{32}$' -or
+        $ActiveManifestSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        (-not [string]::IsNullOrWhiteSpace($RollbackManifestSha256) -and
+            $RollbackManifestSha256 -notmatch '^[0-9a-fA-F]{64}$')) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 ID 또는 manifest SHA-256 형식이 올바르지 않습니다.'
+    }
+
+    $markerPath = Get-SswViewerRollbackTransactionPath `
+        -InstallDirectory $InstallDirectory
+    $markerParent = Split-Path $markerPath -Parent
+    Assert-SswTrustedDirectoryRootOwner -Path $markerParent | Out-Null
+    if (Test-Path -LiteralPath $markerPath) {
+        if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+            throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker가 일반 파일이 아닙니다.'
+        }
+        try {
+            Assert-SswAdministratorsOnlyFileAcl -Path $markerPath
+        }
+        catch {
+            throw [InvalidOperationException]::new(
+                'VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID: 기존 rollback 작업 marker를 신뢰할 수 없어 덮어쓰지 않았습니다.',
+                $_.Exception)
+        }
+    }
+
+    $payload = [ordered]@{
+        formatVersion = 1
+        product = 'SamsungSwitchWatch'
+        operation = 'viewer-install-rollback'
+        transactionId = $TransactionId.ToLowerInvariant()
+        activeManifestSha256 = $ActiveManifestSha256.ToLowerInvariant()
+        rollbackManifestSha256 = if (
+            [string]::IsNullOrWhiteSpace($RollbackManifestSha256)) {
+            $null
+        }
+        else {
+            $RollbackManifestSha256.ToLowerInvariant()
+        }
+    } | ConvertTo-Json -Depth 3
+    $temporary = "$markerPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    $replaceBackup = "$markerPath.$([Guid]::NewGuid().ToString('N')).bak"
+    Assert-SswChildPath -Parent $markerParent -Child $temporary
+    Assert-SswChildPath -Parent $markerParent -Child $replaceBackup
+    try {
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        $payloadBytes = $utf8.GetBytes($payload)
+        $stream = [IO.File]::Open(
+            $temporary,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None)
+        try {
+            $stream.Write($payloadBytes, 0, $payloadBytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        Set-SswAdministratorsOnlyFileAcl -Path $temporary
+        Assert-SswAdministratorsOnlyFileAcl -Path $temporary
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+            [IO.File]::Replace($temporary, $markerPath, $replaceBackup, $true)
+        }
+        else {
+            Move-Item -LiteralPath $temporary -Destination $markerPath
+        }
+        Set-SswAdministratorsOnlyFileAcl -Path $markerPath
+        Assert-SswAdministratorsOnlyFileAcl -Path $markerPath
+    }
+    finally {
+        foreach ($artifact in @($temporary, $replaceBackup)) {
+            if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+                Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Read-SswViewerRollbackTransaction {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    $markerPath = Get-SswViewerRollbackTransactionPath `
+        -InstallDirectory $InstallDirectory
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_MISSING: 현재 설치 작업의 rollback marker가 없어 자동 복구를 중단했습니다.'
+    }
+    try {
+        Assert-SswAdministratorsOnlyFileAcl -Path $markerPath
+    }
+    catch {
+        throw [InvalidOperationException]::new(
+            'VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID: rollback 작업 marker의 소유권 또는 ACL을 신뢰할 수 없습니다.',
+            $_.Exception)
+    }
+    $markerItem = Get-Item -LiteralPath $markerPath -Force
+    if (($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $markerItem.Length -gt 8192) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker 형식이나 크기가 올바르지 않습니다.'
+    }
+    try {
+        $markerText = [IO.File]::ReadAllText(
+            $markerPath,
+            (New-Object Text.UTF8Encoding($false, $true)))
+        $marker = $markerText | ConvertFrom-Json
+    }
+    catch {
+        throw [InvalidOperationException]::new(
+            'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker를 UTF-8 JSON으로 읽지 못했습니다.',
+            $_.Exception)
+    }
+    if ($null -eq $marker -or
+        $marker -is [Array] -or
+        $marker -isnot [pscustomobject]) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker는 단일 JSON object여야 합니다.'
+    }
+    $propertyNames = @($marker.PSObject.Properties | ForEach-Object { $_.Name })
+    $expectedProperties = @(
+        'formatVersion',
+        'product',
+        'operation',
+        'transactionId',
+        'activeManifestSha256',
+        'rollbackManifestSha256')
+    $validFormatVersion = (
+        $marker.formatVersion -is [int] -and
+        [int]$marker.formatVersion -eq 1)
+    if ($propertyNames.Count -ne $expectedProperties.Count -or
+        @($expectedProperties | Where-Object { $_ -notin $propertyNames }).Count -ne 0 -or
+        -not $validFormatVersion -or
+        [string]$marker.product -cne 'SamsungSwitchWatch' -or
+        [string]$marker.operation -cne 'viewer-install-rollback' -or
+        [string]$marker.transactionId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$marker.activeManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+        (-not [string]::IsNullOrWhiteSpace([string]$marker.rollbackManifestSha256) -and
+            [string]$marker.rollbackManifestSha256 -notmatch '^[0-9a-f]{64}$')) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 작업 marker의 제품, 필드 또는 값이 올바르지 않습니다.'
+    }
+    return $marker
+}
+
+function Confirm-SswViewerRollbackTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedActiveManifestSha256
+    )
+
+    if ($TransactionId -notmatch '^[0-9a-fA-F]{32}$' -or
+        $ExpectedActiveManifestSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback 요청의 작업 ID 또는 manifest SHA-256 형식이 올바르지 않습니다.'
+    }
+    $marker = Read-SswViewerRollbackTransaction -InstallDirectory $InstallDirectory
+    if ([string]$marker.transactionId -cne $TransactionId.ToLowerInvariant() -or
+        [string]$marker.activeManifestSha256 -cne
+            $ExpectedActiveManifestSha256.ToLowerInvariant()) {
+        throw 'VIEWER_ROLLBACK_ACTIVE_CHANGED: 다른 Viewer 설치 작업이 활성화되어 이전 작업의 rollback을 중단했습니다.'
+    }
+
+    if (Test-Path -LiteralPath $InstallDirectory -PathType Container) {
+        try {
+            $activePackage = Get-SswValidatedViewerPackage -Directory $InstallDirectory `
+                -ManifestPath (Join-Path $InstallDirectory 'BUILD-MANIFEST.json')
+            if ($activePackage.ManifestSha256 -ne [string]$marker.activeManifestSha256) {
+                throw 'VIEWER_ROLLBACK_ACTIVE_CHANGED: 현재 Viewer가 rollback 요청 작업의 설치본과 일치하지 않습니다.'
+            }
+        }
+        catch {
+            if ($_.Exception.Message -like 'VIEWER_ROLLBACK_ACTIVE_CHANGED:*') { throw }
+            # marker가 작업 소유권을 입증하므로 EDR 격리나 손상된 현재 설치도
+            # 검증된 rollback slot로 복구할 수 있습니다.
+        }
+    }
+
+    $rollbackSlot = Get-SswViewerMachineRollbackSlot `
+        -InstallDirectory $InstallDirectory
+    $markerRollbackHash = [string]$marker.rollbackManifestSha256
+    if ([string]::IsNullOrWhiteSpace($markerRollbackHash)) {
+        if (Test-Path -LiteralPath $rollbackSlot) {
+            throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: 첫 설치 rollback marker와 달리 rollback slot이 존재합니다.'
+        }
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $rollbackSlot -PathType Container)) {
+            throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback marker가 지정한 이전 Viewer slot이 없습니다.'
+        }
+        $rollbackPackage = Get-SswValidatedViewerRollbackPackage `
+            -RollbackSlot $rollbackSlot
+        if ($rollbackPackage.ManifestSha256 -ne $markerRollbackHash) {
+            throw 'VIEWER_ROLLBACK_TRANSACTION_INVALID: rollback slot이 작업 marker의 이전 Viewer와 일치하지 않습니다.'
+        }
+    }
+
+}
+
+function Remove-SswViewerRollbackTransaction {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$TransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedActiveManifestSha256
+    )
+
+    $marker = Read-SswViewerRollbackTransaction -InstallDirectory $InstallDirectory
+    if ([string]$marker.transactionId -cne $TransactionId.ToLowerInvariant() -or
+        [string]$marker.activeManifestSha256 -cne
+            $ExpectedActiveManifestSha256.ToLowerInvariant()) {
+        throw 'VIEWER_ROLLBACK_ACTIVE_CHANGED: rollback 완료 전 작업 marker가 바뀌어 제거하지 않았습니다.'
+    }
+    $markerPath = Get-SswViewerRollbackTransactionPath `
+        -InstallDirectory $InstallDirectory
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $markerPath) {
+        throw 'VIEWER_ROLLBACK_TRANSACTION_CONSUME_FAILED: 완료된 rollback 작업 marker를 제거하지 못했습니다.'
+    }
+}
+
 function Get-SswValidatedViewerRollbackPackage {
     param([Parameter(Mandatory = $true)][string]$RollbackSlot)
 
@@ -231,12 +469,65 @@ function Initialize-SswViewerMachineRollbackSlot {
         return $rollbackSlot
     }
 
-    $recovery = Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory
-    if ($recovery -cne 'PREVIOUS_VIEWER_RESTORED') {
-        throw "VIEWER_ROLLBACK_RESTORE_INVALID: 다음 업데이트 전 rollback 복구 결과가 올바르지 않습니다: $recovery"
+    try {
+        $currentPackage = Get-SswValidatedViewerPackage -Directory $InstallDirectory `
+            -ManifestPath (Join-Path $InstallDirectory 'BUILD-MANIFEST.json')
+        Assert-SswTrustedDirectoryRootOwner -Path $InstallDirectory | Out-Null
     }
-    Write-SswStep '다음 업데이트 전 검증된 Viewer rollback slot 우선 복원 완료'
+    catch {
+        $recovery = Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory
+        if ($recovery -cne 'PREVIOUS_VIEWER_RESTORED') {
+            throw "VIEWER_ROLLBACK_RESTORE_INVALID: 손상된 현재 설치의 rollback 복구 결과가 올바르지 않습니다: $recovery"
+        }
+        Write-SswStep '손상된 현재 설치 대신 검증된 Viewer rollback slot 복원 완료'
+        return $rollbackSlot
+    }
+    try {
+        Invoke-SswViewerSelfCheck `
+            -ViewerExecutable (Join-Path $InstallDirectory 'SamsungSwitchWatch.Viewer.exe') `
+            -WorkingDirectory $InstallDirectory
+    }
+    catch {
+        throw [InvalidOperationException]::new(
+            'VIEWER_CURRENT_SELF_CHECK_FAILED: 현재 Viewer 실행 점검이 실패했습니다. 현재 설치와 rollback slot을 모두 보존했습니다.',
+            $_.Exception)
+    }
+
+    # 정상 현재 설치와 한 세대 전 slot을 모두 staging 검증과 프로세스 종료까지
+    # 보존합니다. 실제 교체 직전에만 slot을 현재 버전으로 회전합니다.
+    Write-SswStep (
+        "검증된 현재 Viewer $([string]$currentPackage.Manifest.version)을(를) " +
+        '다음 rollback 기준으로 준비')
     return $rollbackSlot
+}
+
+function Move-SswViewerCurrentInstallToRollbackSlot {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][ref]$MovedToRollbackSlot
+    )
+
+    $MovedToRollbackSlot.Value = $false
+    $rollbackSlot = Get-SswViewerMachineRollbackSlot -InstallDirectory $InstallDirectory
+    $previousPackage = Get-SswValidatedViewerPackage -Directory $InstallDirectory `
+        -ManifestPath (Join-Path $InstallDirectory 'BUILD-MANIFEST.json')
+    Assert-SswTrustedDirectoryRootOwner -Path $InstallDirectory | Out-Null
+
+    if (Test-Path -LiteralPath $rollbackSlot) {
+        Get-SswValidatedViewerRollbackPackage -RollbackSlot $rollbackSlot | Out-Null
+        Remove-Item -LiteralPath $rollbackSlot -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $rollbackSlot) {
+            throw 'VIEWER_ROLLBACK_SLOT_REFRESH_FAILED: 오래된 Viewer rollback slot을 비우지 못했습니다.'
+        }
+    }
+
+    Move-Item -LiteralPath $InstallDirectory -Destination $rollbackSlot -ErrorAction Stop
+    $MovedToRollbackSlot.Value = $true
+    $rollbackPackage = Get-SswValidatedViewerRollbackPackage -RollbackSlot $rollbackSlot
+    if ($rollbackPackage.ManifestSha256 -ne $previousPackage.ManifestSha256) {
+        throw 'VIEWER_ROLLBACK_SLOT_INVALID: 이동한 이전 Viewer가 검증된 설치와 일치하지 않습니다.'
+    }
+    return $rollbackPackage
 }
 
 function Invoke-SswViewerMachineRollbackCore {
@@ -331,12 +622,24 @@ function Invoke-SswViewerMachineRollbackCore {
 }
 
 function Invoke-SswViewerMachineRollbackPhase {
-    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDirectory,
+        [Parameter(Mandatory = $true)][string]$InstallTransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedActiveManifestSha256
+    )
 
     Assert-SswAdministrator
     $lock = Enter-SswViewerMachineDeploymentLock
     try {
-        return Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory
+        Confirm-SswViewerRollbackTransaction -InstallDirectory $InstallDirectory `
+            -TransactionId $InstallTransactionId `
+            -ExpectedActiveManifestSha256 $ExpectedActiveManifestSha256
+        $recovery = Invoke-SswViewerMachineRollbackCore `
+            -InstallDirectory $InstallDirectory
+        Remove-SswViewerRollbackTransaction -InstallDirectory $InstallDirectory `
+            -TransactionId $InstallTransactionId `
+            -ExpectedActiveManifestSha256 $ExpectedActiveManifestSha256
+        return $recovery
     }
     finally {
         Exit-SswDeploymentLock -Lock $lock
@@ -578,7 +881,8 @@ function Invoke-SswViewerElevatedMachinePhase {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerPath,
         [Parameter(Mandatory = $true)][string]$PackageSource,
-        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory
+        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory,
+        [Parameter(Mandatory = $true)][string]$InstallTransactionId
     )
 
     $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -589,9 +893,10 @@ function Invoke-SswViewerElevatedMachinePhase {
     $installerLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallerPath
     $sourceLiteral = ConvertTo-SswPowerShellLiteral -Value $PackageSource
     $installLiteral = ConvertTo-SswPowerShellLiteral -Value $MachineInstallDirectory
+    $transactionLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallTransactionId
     $command = @"
 try {
-    & $installerLiteral -MachinePhase -SourceDirectory $sourceLiteral -InstallDirectory $installLiteral
+    & $installerLiteral -MachinePhase -SourceDirectory $sourceLiteral -InstallDirectory $installLiteral -InstallTransactionId $transactionLiteral
     exit 0
 }
 catch {
@@ -632,7 +937,9 @@ catch {
 function Invoke-SswViewerElevatedRollbackPhase {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerPath,
-        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory
+        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory,
+        [Parameter(Mandatory = $true)][string]$InstallTransactionId,
+        [Parameter(Mandatory = $true)][string]$ExpectedActiveManifestSha256
     )
 
     $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -641,9 +948,12 @@ function Invoke-SswViewerElevatedRollbackPhase {
     }
     $installerLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallerPath
     $installLiteral = ConvertTo-SswPowerShellLiteral -Value $MachineInstallDirectory
+    $transactionLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallTransactionId
+    $expectedHashLiteral = ConvertTo-SswPowerShellLiteral `
+        -Value $ExpectedActiveManifestSha256
     $command = @"
 try {
-    `$recovery = & $installerLiteral -MachineRollbackPhase -InstallDirectory $installLiteral
+    `$recovery = & $installerLiteral -MachineRollbackPhase -InstallDirectory $installLiteral -InstallTransactionId $transactionLiteral -ExpectedActiveManifestSha256 $expectedHashLiteral
     Write-Host ('Recovery: ' + `$recovery) -ForegroundColor Yellow
     exit 0
 }
@@ -709,9 +1019,25 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 if ($StartWithWindows -and $DisableStartWithWindows) {
     throw '-StartWithWindows와 -DisableStartWithWindows는 동시에 사용할 수 없습니다.'
 }
-if (($MachinePhase -and ($PerUser -or $MachineRollbackPhase)) -or
-    ($MachineRollbackPhase -and ($PerUser -or $Preflight -or
-        $StartWithWindows -or $DisableStartWithWindows))) {
+$validInstallTransactionId = (
+    -not [string]::IsNullOrWhiteSpace($InstallTransactionId) -and
+    $InstallTransactionId -match '^[0-9a-fA-F]{32}$')
+$validExpectedActiveHash = (
+    -not [string]::IsNullOrWhiteSpace($ExpectedActiveManifestSha256) -and
+    $ExpectedActiveManifestSha256 -match '^[0-9a-fA-F]{64}$')
+if (($MachinePhase -and (
+        $PerUser -or $MachineRollbackPhase -or $Preflight -or
+        $StartWithWindows -or $DisableStartWithWindows -or $DoNotStart -or
+        -not $validInstallTransactionId -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedActiveManifestSha256))) -or
+    ($MachineRollbackPhase -and (
+        $PerUser -or $Preflight -or $StartWithWindows -or
+        $DisableStartWithWindows -or $DoNotStart -or
+        -not $validInstallTransactionId -or
+        -not $validExpectedActiveHash)) -or
+    (-not $MachinePhase -and -not $MachineRollbackPhase -and (
+        -not [string]::IsNullOrWhiteSpace($InstallTransactionId) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedActiveManifestSha256)))) {
     throw 'VIEWER_INSTALL_MODE_INVALID: 내부 machine phase 옵션 또는 -PerUser 조합이 올바르지 않습니다.'
 }
 if ($PerUser) {
@@ -723,7 +1049,9 @@ else {
         -ProductRelativeRoot 'SamsungSwitchWatch\Viewer'
 }
 if ($MachineRollbackPhase) {
-    $machineRecovery = Invoke-SswViewerMachineRollbackPhase -InstallDirectory $install
+    $machineRecovery = Invoke-SswViewerMachineRollbackPhase -InstallDirectory $install `
+        -InstallTransactionId $InstallTransactionId `
+        -ExpectedActiveManifestSha256 $ExpectedActiveManifestSha256
     return $machineRecovery
 }
 
@@ -749,9 +1077,11 @@ if (-not $PerUser -and -not $MachinePhase) {
     if (Test-SswAdministrator) {
         throw 'VIEWER_ORIGINAL_USER_PHASE_REQUIRES_UNELEVATED: 기본 설치는 현재 사용자의 바로 가기와 자동 시작을 올바르게 구성하도록 승격되지 않은 창에서 시작해야 합니다.'
     }
+    $outerInstallTransactionId = [Guid]::NewGuid().ToString('N')
     Write-SswStep '관리자 권한으로 Viewer 시스템 프로그램 설치'
     Invoke-SswViewerElevatedMachinePhase -InstallerPath $PSCommandPath `
-        -PackageSource $source -MachineInstallDirectory $install
+        -PackageSource $source -MachineInstallDirectory $install `
+        -InstallTransactionId $outerInstallTransactionId
 
     $viewerExe = Join-Path $install 'SamsungSwitchWatch.Viewer.exe'
     try {
@@ -765,7 +1095,9 @@ if (-not $PerUser -and -not $MachinePhase) {
         Write-Warning 'VIEWER_USER_PHASE_FAILED: 원래 사용자 실행 확인 또는 바로 가기 설정이 실패해 이전 시스템 설치 복원을 요청합니다.'
         try {
             Invoke-SswViewerElevatedRollbackPhase -InstallerPath $PSCommandPath `
-                -MachineInstallDirectory $install
+                -MachineInstallDirectory $install `
+                -InstallTransactionId $outerInstallTransactionId `
+                -ExpectedActiveManifestSha256 $sourcePackage.ManifestSha256
             Write-Host 'Recovery: MACHINE_ROLLBACK_COMPLETED' -ForegroundColor Yellow
         }
         catch {
@@ -824,6 +1156,7 @@ $rollbackState = [pscustomobject]@{ ShortcutRestored = $false }
 $startMenuParentCreated = $false
 $startupParentCreated = $false
 $transactionCommitted = $false
+$previousInstallMovedToBackup = $false
 $failureCode = 'VIEWER_PACKAGE_PREPARE_FAILED'
 $failureDetailCode = $null
 $failureExitCode = $null
@@ -879,18 +1212,13 @@ try {
     $failureCode = 'VIEWER_PROGRAM_SWAP_FAILED'
     Write-SswStep 'Viewer 프로그램 폴더 원자적 교체'
     if (Test-Path -LiteralPath $install) {
-        $previousPackage = $null
         if ($MachinePhase) {
-            $previousPackage = Get-SswValidatedViewerPackage -Directory $install `
-                -ManifestPath (Join-Path $install 'BUILD-MANIFEST.json')
-            Assert-SswTrustedDirectoryRootOwner -Path $install
+            Move-SswViewerCurrentInstallToRollbackSlot -InstallDirectory $install `
+                -MovedToRollbackSlot ([ref]$previousInstallMovedToBackup) | Out-Null
         }
-        Move-Item -LiteralPath $install -Destination $backup
-        if ($MachinePhase) {
-            $rollbackPackage = Get-SswValidatedViewerRollbackPackage -RollbackSlot $backup
-            if ($rollbackPackage.ManifestSha256 -ne $previousPackage.ManifestSha256) {
-                throw 'VIEWER_ROLLBACK_SLOT_INVALID: 이동한 이전 Viewer가 검증된 설치와 일치하지 않습니다.'
-            }
+        else {
+            Move-Item -LiteralPath $install -Destination $backup
+            $previousInstallMovedToBackup = $true
         }
     }
     Move-Item -LiteralPath $staging -Destination $install
@@ -922,6 +1250,20 @@ try {
     $failureDetailCode = $null
     $failureExitCode = $null
     Write-SswStep 'Viewer 설치 전용 자체 점검을 통과했습니다.'
+
+    if ($MachinePhase) {
+        $failureCode = 'VIEWER_ROLLBACK_TRANSACTION_WRITE_FAILED'
+        $rollbackManifestSha256 = $null
+        if (Test-Path -LiteralPath $backup) {
+            $rollbackMarkerPackage = Get-SswValidatedViewerRollbackPackage `
+                -RollbackSlot $backup
+            $rollbackManifestSha256 = $rollbackMarkerPackage.ManifestSha256
+        }
+        Write-SswViewerRollbackTransaction -InstallDirectory $install `
+            -TransactionId $InstallTransactionId `
+            -ActiveManifestSha256 $installedPackage.ManifestSha256 `
+            -RollbackManifestSha256 $rollbackManifestSha256
+    }
 
     if (-not $MachinePhase) {
         $failureCode = 'VIEWER_SHORTCUT_SETUP_FAILED'
@@ -1001,7 +1343,9 @@ catch {
         } },
         [pscustomobject]@{ Name = 'restore-program'; Action = {
             if ($installSwapped -and (Test-Path -LiteralPath $install)) { Remove-Item -LiteralPath $install -Recurse -Force }
-            if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $install }
+            if ($previousInstallMovedToBackup -and (Test-Path -LiteralPath $backup)) {
+                Move-Item -LiteralPath $backup -Destination $install
+            }
             if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
         } },
         [pscustomobject]@{ Name = 'restore-shortcuts'; Action = {
@@ -1051,10 +1395,21 @@ catch {
         Write-Warning 'Viewer 실패 진단 기록을 저장하지 못했지만 최초 실패 원인은 유지합니다.'
     }
     if ($rollbackErrors.Count -eq 0) {
-        $recovery = if ($previousInstallExisted) { 'PREVIOUS_VIEWER_RESTORED' } else { 'PARTIAL_INSTALL_REMOVED' }
+        $recovery = if ($previousInstallMovedToBackup) {
+            'PREVIOUS_VIEWER_RESTORED'
+        }
+        elseif ($previousInstallExisted -and (Test-Path -LiteralPath $install -PathType Container)) {
+            'CURRENT_VIEWER_PRESERVED'
+        }
+        else {
+            'PARTIAL_INSTALL_REMOVED'
+        }
         Write-Host "Recovery: $recovery" -ForegroundColor Yellow
-        if ($previousInstallExisted) {
+        if ($recovery -ceq 'PREVIOUS_VIEWER_RESTORED') {
             Write-Warning '이전 Viewer 파일과 바로 가기를 복구했습니다. Viewer는 실행 중이 아니므로 시작 메뉴에서 다시 실행하세요.'
+        }
+        elseif ($recovery -ceq 'CURRENT_VIEWER_PRESERVED') {
+            Write-Warning '새 Viewer로 교체하기 전에 실패하여 현재 설치는 그대로 유지했습니다.'
         }
     }
     else {

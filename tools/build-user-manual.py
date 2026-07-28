@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.22-poc"
+VERSION = "0.9.23-poc"
 DOCUMENT_DATE = "2026-07-28"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -763,6 +763,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         "말고 Windows 관리자에게 확인을 요청하세요.",
         "danger",
     )
+    doc.add_page_break()
     add_callout(
         doc,
         "업데이트 안정성",
@@ -782,7 +783,6 @@ Viewer PC IPv4 예     : 192.0.2.25
         "방화벽, 활성 프로필과 live/ready를 확인해 정상일 때만 변경 없음으로 끝납니다.",
         "info",
     )
-    doc.add_page_break()
     add_callout(
         doc,
         "설치 실패와 Viewer 연결 거부",
@@ -822,6 +822,12 @@ Viewer PC IPv4 예     : 192.0.2.25
         "우회하거나 파일 차단을 해제하지 말고 해당 코드를 EDR·AppLocker·WDAC 담당자에게 "
         "전달하세요. 사용자 단계 실패 뒤에는 이전 Program Files 버전 복구 UAC가 한 번 더 "
         "표시될 수 있습니다. 취소하거나 실패하면 Viewer.__rollback을 삭제하지 마세요. "
+        "업데이트 직전에는 정상 현재 버전을 새 rollback 기준으로 회전하므로 실패하면 정확히 "
+        "직전 버전을 복원합니다. 각 관리자 설치는 고유 작업 ID와 활성·rollback manifest SHA-256을 "
+        "Administrators 전용 marker에 결속하므로, 같은 ZIP을 다시 설치했더라도 앞선 작업의 늦은 "
+        "복구는 VIEWER_ROLLBACK_ACTIVE_CHANGED로 중단하고 최신 설치·rollback 슬롯·marker를 보존합니다. "
+        "기존 Viewer 자체점검만 일시적으로 실패한 경우에도 VIEWER_CURRENT_SELF_CHECK_FAILED로 "
+        "자동 강등하지 않습니다. "
         "새 설치 파일이나 매니페스트가 EDR에 의해 격리 또는 손상돼도 보호된 현재 설치를 "
         "격리한 뒤 검증된 rollback 슬롯을 먼저 복원합니다. 제거 중 Viewer 프로세스나 활성 "
         "프로그램 폴더가 남으면 rollback 슬롯을 삭제하지 않습니다. "
@@ -1119,6 +1125,13 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("VIEWER_SOURCE_ACCESS_DENIED", "UAC 관리자도 읽을 수 있는 승인된 임시 폴더에 공식 ZIP 다시 압축 해제"),
             ("VIEWER_INSTALL_PATH_EXECUTION_BLOCKED", "Program Files 실행 정책 → AppLocker·WDAC·EDR 기록 → 보안 담당자"),
             ("VIEWER_USER_PHASE_FAILED", "원래 사용자 실행 검사·바로 가기 → 복구 UAC → Recovery 결과"),
+            ("VIEWER_CURRENT_SELF_CHECK_FAILED", "현재·rollback 설치는 보존됨 → EDR·AppLocker·WDAC 지연·차단 확인 → 재시도"),
+            ("VIEWER_ROLLBACK_ACTIVE_CHANGED", "다른 Viewer 설치가 먼저 완료됨 → 두 설치 증거 보존 → 최신 ZIP으로 다시 설치"),
+            ("VIEWER_ROLLBACK_TRANSACTION_MISSING", "관리자 전용 작업 marker 없음 → 설치·slot 보존 → 최신 ZIP으로 관리자 재설치"),
+            ("VIEWER_ROLLBACK_TRANSACTION_INVALID", "marker 작업 ID·해시·slot 결속 불일치 → 증거 삭제 금지 → 관리자 확인"),
+            ("VIEWER_ROLLBACK_TRANSACTION_TRUST_INVALID", "marker ACL·소유권 신뢰 불가 → ACL 우회 금지 → 관리자·보안 담당자 확인"),
+            ("VIEWER_ROLLBACK_TRANSACTION_CONSUME_FAILED", "복원 뒤 marker 제거 실패 → 복원된 Viewer 보존 → 관리자 재설치"),
+            ("VIEWER_ROLLBACK_TRANSACTION_WRITE_FAILED", "새 marker 확정 실패 → Recovery 결과 → 설치·slot·marker 증거 보존"),
             ("VIEWER_MACHINE_ROLLBACK_INCOMPLETE", "현재 설치와 Viewer.__rollback 보존 → Windows 관리자 확인"),
             ("VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED", "복구 UAC 취소 여부 → rollback 슬롯 보존 → 관리자 재시도"),
             ("VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE", "Viewer를 설치할 동일 Windows 사용자 → 시작 메뉴·시작프로그램 폴더 쓰기 권한 → 보안 정책"),
@@ -1135,6 +1148,7 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("BAD_IMAGE", "Windows x64 → 파일 손상·격리와 실행 파일 형식 확인"),
             ("TIMEOUT", "20초 자체점검 제한 → 남은 프로세스·보안 프로그램 지연 확인"),
             ("VIEWER_UNINSTALL_ROLLBACK_PRESERVED", "Viewer 프로세스·활성 프로그램 폴더 정리 → 관리자 제거 재실행"),
+            ("VIEWER_UNINSTALL_TRANSACTION_PRESERVED", "활성 프로그램·rollback slot 제거 미확인 → marker 보존 → 관리자 제거 재실행"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 등록된 허용 IP인지 → Agent 허용 IP 설정 도구"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
