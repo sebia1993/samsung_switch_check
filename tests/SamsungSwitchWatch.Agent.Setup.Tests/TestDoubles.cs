@@ -15,22 +15,57 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public string? AccessFailurePath { get; set; }
     public DirectoryAccessKind? AccessFailureKind { get; set; }
     public int AccessFailureOccurrence { get; set; } = 1;
+    public int JournalDeleteFailuresRemaining { get; set; }
+    public int RollbackMarkerWriteFailuresRemaining { get; set; }
+    public int FailedDirectoryCleanupFailuresRemaining { get; set; }
+    public int ActivationMoveFailuresRemaining { get; set; }
     private int MatchingAccessRequests { get; set; }
 
     public bool FileExists(string path) => _inner.FileExists(path);
     public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
     public string ReadAllText(string path) => _inner.ReadAllText(path);
-    public void WriteAllTextAtomic(string path, string contents) =>
+    public void WriteAllTextAtomic(string path, string contents)
+    {
+        if (RollbackMarkerWriteFailuresRemaining > 0 &&
+            contents.Contains("\"Stage\": \"rollback-completed\"", StringComparison.Ordinal))
+        {
+            RollbackMarkerWriteFailuresRemaining--;
+            throw new IOException("simulated rollback marker write failure");
+        }
+
         _inner.WriteAllTextAtomic(path, contents);
+    }
     public string ComputeSha256(string path) => _inner.ComputeSha256(path);
     public void CreateDirectory(string path) => _inner.CreateDirectory(path);
     public void CopyFile(string source, string destination, bool overwrite) =>
         _inner.CopyFile(source, destination, overwrite);
-    public void MoveDirectory(string source, string destination) =>
+    public void MoveDirectory(string source, string destination)
+    {
+        if (ActivationMoveFailuresRemaining > 0 &&
+            Path.GetFileName(source).Contains(".__staging_", StringComparison.Ordinal))
+        {
+            ActivationMoveFailuresRemaining--;
+            throw new IOException("simulated activation move failure");
+        }
+
         _inner.MoveDirectory(source, destination);
+    }
     public void DeleteDirectory(string path, bool recursive) =>
         DeleteDirectoryCore(path, recursive);
-    public void DeleteFile(string path) => File.Delete(path);
+    public void DeleteFile(string path)
+    {
+        if (JournalDeleteFailuresRemaining > 0 &&
+            string.Equals(
+                Path.GetFileName(path),
+                "agent-native-setup-transaction.json",
+                StringComparison.Ordinal))
+        {
+            JournalDeleteFailuresRemaining--;
+            throw new IOException("simulated journal delete failure");
+        }
+
+        File.Delete(path);
+    }
     public bool CanCreateUnder(string path) => true;
     public void EnsureDirectoryAccess(string path, DirectoryAccessKind accessKind)
     {
@@ -80,6 +115,13 @@ internal sealed class TestFileSystem : ISetupFileSystem
             Path.GetFileName(path).Contains(".__backup_", StringComparison.Ordinal))
         {
             throw new IOException("simulated cleanup failure");
+        }
+
+        if (FailedDirectoryCleanupFailuresRemaining > 0 &&
+            Path.GetFileName(path).Contains(".__failed_", StringComparison.Ordinal))
+        {
+            FailedDirectoryCleanupFailuresRemaining--;
+            throw new IOException("simulated failed directory cleanup failure");
         }
 
         _inner.DeleteDirectory(path, recursive);
