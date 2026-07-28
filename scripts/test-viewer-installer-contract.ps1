@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -96,7 +96,7 @@ function Assert-ViewerPreflightRejected {
 
     $actualFailure = $null
     try {
-        & $Installer -SourceDirectory $Source -InstallDirectory $InstallDirectory `
+        & $Installer -SourceDirectory $Source -InstallDirectory $InstallDirectory -PerUser `
             -Preflight | Out-Null
     }
     catch {
@@ -110,6 +110,10 @@ function Assert-ViewerPreflightRejected {
 
 $installer = Join-Path $PSScriptRoot 'install-viewer.ps1'
 $installerText = Get-Content -LiteralPath $installer -Raw -Encoding UTF8
+$uninstallerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uninstall-viewer.ps1') `
+    -Raw -Encoding UTF8
+$launcherText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Install-or-Update-Viewer.cmd') `
+    -Raw -Encoding UTF8
 $testId = [Guid]::NewGuid().ToString('N')
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "SamsungSwitchWatch-viewer-installer-$testId"
 $validFixture = Join-Path $testRoot 'valid'
@@ -120,7 +124,7 @@ try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     New-ViewerPackageFixture -Path $validFixture
 
-    & $installer -SourceDirectory $validFixture -InstallDirectory $installDirectory `
+    & $installer -SourceDirectory $validFixture -InstallDirectory $installDirectory -PerUser `
         -Preflight | Out-Null
 
     $missingPayload = Join-Path $testRoot 'missing-payload'
@@ -218,15 +222,36 @@ try {
     foreach ($needle in @(
         'Get-SswValidatedViewerPackage -Directory $source',
         'Get-SswValidatedViewerPackage -Directory $staging',
+        'Get-SswValidatedViewerPackage -Directory $install',
         '[Environment]::Is64BitOperatingSystem',
         '$stagedPackage.ManifestSha256 -ne $sourcePackage.ManifestSha256',
+        '$installedPackage.ManifestSha256 -ne $stagedPackage.ManifestSha256',
         'foreach ($file in @($sourcePackage.Files))',
         "-ArgumentList '--install-smoke-check'",
-        '$smokeProcess.WaitForExit(20000)',
-        "'VIEWER_SELF_CHECK_START_FAILED'",
-        "'VIEWER_SELF_CHECK_WAIT_FAILED'",
-        "'VIEWER_SELF_CHECK_TIMEOUT'",
-        "'VIEWER_SELF_CHECK_EXITED_NONZERO'",
+        '$process.WaitForExit(20000)',
+        "'VIEWER_INSTALL_PATH_EXECUTION_BLOCKED'",
+        "'VIEWER_SELF_CHECK_ACCESS_DENIED'",
+        "'FILE_MISSING'",
+        "'BAD_IMAGE'",
+        "'TIMEOUT:",
+        "'VIEWER_SOURCE_ACCESS_DENIED:",
+        'VIEWER_SELF_CHECK_START_FAILED',
+        'VIEWER_SELF_CHECK_WAIT_FAILED',
+        'VIEWER_SELF_CHECK_EXITED_NONZERO',
+        'Invoke-SswViewerElevatedMachinePhase -InstallerPath $PSCommandPath',
+        'Invoke-SswViewerElevatedRollbackPhase -InstallerPath $PSCommandPath',
+        '[switch]$MachineRollbackPhase',
+        'function Invoke-SswViewerMachineRollbackCore',
+        'function Get-SswValidatedViewerRollbackPackage',
+        '"$resolvedInstall.__rollback"',
+        'VIEWER_MACHINE_ROLLBACK_INCOMPLETE',
+        'Recovery: ROLLBACK_INCOMPLETE',
+        'Invoke-SswViewerUserIntegration -ViewerExecutable $viewerExe',
+        'Preserve-SswLegacyViewerInstall -LegacyDirectory $legacyInstall',
+        'VIEWER_LEGACY_INSTALL_PRESERVED_RECOVERABLE',
+        "Join-Path `$env:ProgramFiles 'SamsungSwitchWatch\Viewer'",
+        "Join-Path `$env:LOCALAPPDATA 'Programs\SamsungSwitchWatch\Viewer'",
+        'if ($MachinePhase) { Assert-SswAdministrator }',
         'Write-Host "Detail: $displayDetailCode"',
         'Write-Host "ExitCode: $failureExitCode"',
         '$diagnosticCodes += $failureDetailCode',
@@ -239,17 +264,176 @@ try {
     }
     Assert-ViewerInstallerTest -Condition (-not $installerText.Contains('Start-Sleep -Seconds 5')) `
         -Message 'The installer still uses the old five-second GUI smoke check.'
+    foreach ($forbidden in @('Unblock-File', 'icacls.exe', '-ExecutionPolicy Bypass')) {
+        Assert-ViewerInstallerTest -Condition (-not $installerText.Contains($forbidden)) `
+            -Message "The installer contains a forbidden security bypass: $forbidden"
+        Assert-ViewerInstallerTest -Condition (-not $launcherText.Contains($forbidden)) `
+            -Message "The Viewer launcher contains a forbidden security bypass: $forbidden"
+    }
+    Assert-ViewerInstallerTest -Condition $uninstallerText.Contains(
+        "Join-Path `$env:ProgramFiles 'SamsungSwitchWatch\Viewer'") `
+        -Message 'The Viewer uninstaller does not default to the machine program path.'
+    Assert-ViewerInstallerTest -Condition $uninstallerText.Contains(
+        'if (-not $PerUser -and -not $MachinePhase)') `
+        -Message 'The Viewer uninstaller is missing its original-user/elevated-machine split.'
+    foreach ($needle in @(
+        'function Test-SswOwnedViewerShortcut',
+        '$shortcut.TargetPath',
+        'SamsungSwitchWatch.Viewer.exe',
+        'VIEWER_SHORTCUT_PRESERVED_UNVERIFIED',
+        '$machineRollbackSlot = "$install.__rollback"',
+        'Assert-SswTrustedDirectoryRootOwner -Path $machineRollbackSlot',
+        "Name = 'remove-machine-rollback-slot'",
+        '$uninstallState.ActiveProgramRemoved',
+        'VIEWER_UNINSTALL_ROLLBACK_PRESERVED',
+        'VIEWER_UNINSTALL_SHORTCUTS_PRESERVED',
+        'VIEWER_UNINSTALL_SETTINGS_PRESERVED'
+    )) {
+        Assert-ViewerInstallerTest -Condition $uninstallerText.Contains($needle) `
+            -Message "Viewer uninstaller ownership contract is missing: $needle"
+    }
 
-    $smokeIndex = $installerText.IndexOf("-ArgumentList '--install-smoke-check'")
+    $swapIndex = $installerText.IndexOf('$installSwapped = $true')
+    $installedValidationIndex = $installerText.IndexOf(
+        'Get-SswValidatedViewerPackage -Directory $install', $swapIndex)
+    $smokeIndex = $installerText.IndexOf(
+        'Invoke-SswViewerSelfCheck -ViewerExecutable $viewerExe', $installedValidationIndex)
     $commitIndex = $installerText.IndexOf("-Stage 'completed' -Status 'succeeded'", $smokeIndex)
     $committedFlagIndex = $installerText.IndexOf('$transactionCommitted = $true', $commitIndex)
-    $normalStartIndex = $installerText.IndexOf('if (-not $DoNotStart)', $committedFlagIndex)
+    $normalStartIndex = $installerText.IndexOf(
+        'if (-not $MachinePhase -and -not $DoNotStart)', $committedFlagIndex)
     Assert-ViewerInstallerTest -Condition (
-        $smokeIndex -ge 0 -and
+        $swapIndex -ge 0 -and
+        $installedValidationIndex -gt $swapIndex -and
+        $smokeIndex -gt $installedValidationIndex -and
         $commitIndex -gt $smokeIndex -and
         $committedFlagIndex -gt $commitIndex -and
         $normalStartIndex -gt $committedFlagIndex
-    ) -Message 'The normal Viewer must start only after the smoke check and durable commit.'
+    ) -Message 'Installed revalidation, smoke, durable commit, and normal start are out of order.'
+
+    $outerFlowIndex = $installerText.IndexOf(
+        'if (-not $PerUser -and -not $MachinePhase) {')
+    $elevationIndex = $installerText.IndexOf(
+        'Invoke-SswViewerElevatedMachinePhase -InstallerPath $PSCommandPath', $outerFlowIndex)
+    $userIntegrationIndex = $installerText.IndexOf(
+        'Invoke-SswViewerUserIntegration -ViewerExecutable $viewerExe', $elevationIndex)
+    $legacyCleanupIndex = $installerText.IndexOf(
+        'Preserve-SswLegacyViewerInstall -LegacyDirectory $legacyInstall', $userIntegrationIndex)
+    Assert-ViewerInstallerTest -Condition (
+        $outerFlowIndex -ge 0 -and
+        $elevationIndex -gt $outerFlowIndex -and
+        $userIntegrationIndex -gt $elevationIndex -and
+        $legacyCleanupIndex -gt $userIntegrationIndex
+    ) -Message 'Current-user integration or verified legacy cleanup occurs before machine success.'
+
+    $outerRollbackIndex = $installerText.IndexOf(
+        'Invoke-SswViewerElevatedRollbackPhase -InstallerPath $PSCommandPath',
+        $userIntegrationIndex)
+    Assert-ViewerInstallerTest -Condition (
+        $outerRollbackIndex -gt $userIntegrationIndex -and
+        $outerRollbackIndex -lt $legacyCleanupIndex
+    ) -Message 'Original-user failure must request elevated rollback before legacy handling.'
+
+    $initializeStart = $installerText.IndexOf(
+        'function Initialize-SswViewerMachineRollbackSlot')
+    $coreStart = $installerText.IndexOf(
+        'function Invoke-SswViewerMachineRollbackCore', $initializeStart)
+    $initializeText = $installerText.Substring(
+        $initializeStart,
+        $coreStart - $initializeStart)
+    Assert-ViewerInstallerTest -Condition $initializeText.Contains(
+        'Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory') `
+        -Message 'A leftover rollback slot and current install must invoke core recovery.'
+    Assert-ViewerInstallerTest -Condition $initializeText.Contains(
+        "'PREVIOUS_VIEWER_RESTORED'") `
+        -Message 'Pre-update rollback recovery must require PREVIOUS_VIEWER_RESTORED.'
+    Assert-ViewerInstallerTest -Condition (-not $initializeText.Contains(
+        'Remove-Item -LiteralPath $rollbackSlot')) `
+        -Message 'Pre-update initialization must never delete a working rollback slot.'
+
+    $cleanupStart = $installerText.IndexOf("Name = 'cleanup-program-backup'")
+    $cleanupEnd = $installerText.IndexOf("Name = 'cleanup-shortcut-backup'", $cleanupStart)
+    $cleanupText = $installerText.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
+    Assert-ViewerInstallerTest -Condition $cleanupText.Contains('-not $MachinePhase') `
+        -Message 'Machine commit must retain its fixed rollback slot.'
+
+    $perUserMutationIndex = $installerText.IndexOf(
+        '$shortcutMutationStarted = $true', $smokeIndex)
+    $perUserIntegrationIndex = $installerText.IndexOf(
+        'Invoke-SswViewerUserIntegration -ViewerExecutable $viewerExe',
+        $perUserMutationIndex)
+    Assert-ViewerInstallerTest -Condition (
+        $perUserMutationIndex -gt $smokeIndex -and
+        $perUserIntegrationIndex -gt $perUserMutationIndex
+    ) -Message 'PerUser shortcut rollback state must be set immediately before integration.'
+
+    $legacyFunctionStart = $installerText.IndexOf(
+        'function Preserve-SswLegacyViewerInstall')
+    $legacyFunctionEnd = $installerText.IndexOf(
+        "Write-SswStep 'Viewer", $legacyFunctionStart)
+    $legacyFunctionText = $installerText.Substring(
+        $legacyFunctionStart,
+        $legacyFunctionEnd - $legacyFunctionStart)
+    Assert-ViewerInstallerTest -Condition (-not $legacyFunctionText.Contains(
+        'Remove-Item -LiteralPath $LegacyDirectory')) `
+        -Message 'Legacy per-user program files must remain recoverable.'
+
+    . $installer -SourceDirectory $validFixture -InstallDirectory $installDirectory `
+        -PerUser -Preflight | Out-Null
+    $fixtureMachineInstall = Join-Path $testRoot 'machine-layout\Viewer'
+    $fixtureRollbackSlot = Get-SswViewerMachineRollbackSlot `
+        -InstallDirectory $fixtureMachineInstall
+    Assert-ViewerInstallerTest -Condition (
+        $fixtureRollbackSlot -ceq "$fixtureMachineInstall.__rollback" -and
+        (Split-Path $fixtureRollbackSlot -Parent) -ceq
+            (Split-Path $fixtureMachineInstall -Parent)
+    ) -Message 'The fixed rollback slot is not a strict install sibling.'
+
+    $fixtureCurrent = Join-Path $testRoot 'rollback-current'
+    $fixtureSlot = Join-Path $testRoot 'rollback-slot'
+    Copy-ViewerPackageFixture -Source $validFixture -Destination $fixtureCurrent
+    Copy-ViewerPackageFixture -Source $validFixture -Destination $fixtureSlot
+    $fixtureCurrentPackage = Get-SswValidatedViewerPackage -Directory $fixtureCurrent `
+        -ManifestPath (Join-Path $fixtureCurrent 'BUILD-MANIFEST.json')
+    $fixtureSlotPackage = Get-SswValidatedViewerPackage -Directory $fixtureSlot `
+        -ManifestPath (Join-Path $fixtureSlot 'BUILD-MANIFEST.json')
+    Assert-ViewerInstallerTest -Condition (
+        $fixtureCurrentPackage.ManifestSha256 -eq $fixtureSlotPackage.ManifestSha256
+    ) -Message 'Current/rollback fixture validation is not deterministic.'
+
+    # EDR 격리나 손상으로 현재 실행 파일/manifest가 사라져도 검증된 slot은
+    # 현재 패키지 검증에 막히지 않고 복원되어야 한다.
+    function Assert-SswTrustedDirectoryRootOwner {
+        param([Parameter(Mandatory = $true)][string]$Path)
+        return 'S-1-5-32-544'
+    }
+    $damagedInstall = Join-Path $testRoot 'machine-rollback\Viewer'
+    $damagedSlot = "$damagedInstall.__rollback"
+    New-Item -ItemType Directory -Path $damagedInstall -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $damagedInstall 'damaged.txt') `
+        -Value 'corrupt current package' -Encoding UTF8
+    Copy-ViewerPackageFixture -Source $validFixture -Destination $damagedSlot
+
+    $rollbackResult = Invoke-SswViewerMachineRollbackCore -InstallDirectory $damagedInstall
+    Assert-ViewerInstallerTest -Condition ($rollbackResult -ceq 'PREVIOUS_VIEWER_RESTORED') `
+        -Message 'A damaged current Viewer install blocked restoration of the validated rollback slot.'
+    $restoredPackage = Get-SswValidatedViewerPackage -Directory $damagedInstall `
+        -ManifestPath (Join-Path $damagedInstall 'BUILD-MANIFEST.json')
+    Assert-ViewerInstallerTest -Condition (
+        $restoredPackage.ManifestSha256 -eq $fixtureSlotPackage.ManifestSha256
+    ) -Message 'The restored package does not match the validated rollback fixture.'
+    Assert-ViewerInstallerTest -Condition (-not (Test-Path -LiteralPath $damagedSlot)) `
+        -Message 'The restored rollback slot unexpectedly remains beside the active install.'
+
+    $partialInstall = Join-Path $testRoot 'fresh-partial\Viewer'
+    New-Item -ItemType Directory -Path $partialInstall -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $partialInstall 'partial.txt') `
+        -Value 'partial first install' -Encoding UTF8
+    $partialResult = Invoke-SswViewerMachineRollbackCore -InstallDirectory $partialInstall
+    Assert-ViewerInstallerTest -Condition (
+        $partialResult -ceq 'PARTIAL_INSTALL_REMOVED' -and
+        -not (Test-Path -LiteralPath $partialInstall)
+    ) -Message 'A damaged first install without a rollback slot was not removed safely.'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

@@ -77,7 +77,8 @@ public partial class App : Application
             settingsSaveCoordinator: _settingsSaveCoordinator,
             writeDiagnostic: _diagnosticLog.Write,
             settingsSaveDelay: static (delay, cancellationToken) =>
-                Task.Delay(delay, cancellationToken));
+                Task.Delay(delay, cancellationToken),
+            writeConnectionDiagnostic: _diagnosticLog.WriteConnectionTransition);
         _mainWindow = new MainWindow(_viewModel);
         MainWindow = _mainWindow;
         _trayIcon = new TrayIconService(_viewModel, ShowDashboard, ShowMiniWindow, OpenConnectionSettings, ExitApplication);

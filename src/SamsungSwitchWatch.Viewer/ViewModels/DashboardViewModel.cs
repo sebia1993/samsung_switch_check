@@ -70,6 +70,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private readonly ManagedDeviceStore? _deviceStore;
     private readonly ViewerMonitoringStore? _monitoringStore;
     private readonly Action<string, string> _writeDiagnostic;
+    private readonly Action<string, string, string> _writeConnectionDiagnostic;
     private readonly Func<TimeSpan, CancellationToken, Task> _settingsSaveDelay;
     private readonly SynchronizationContext? _uiContext;
     private readonly CancellationTokenSource _lifetime = new();
@@ -151,7 +152,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             monitoringStore,
             new ViewerSettingsSaveCoordinator(settingsStore),
             null,
-            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken),
+            null)
     {
     }
 
@@ -164,7 +166,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         ViewerMonitoringStore? monitoringStore,
         ViewerSettingsSaveCoordinator settingsSaveCoordinator,
         Action<string, string>? writeDiagnostic,
-        Func<TimeSpan, CancellationToken, Task> settingsSaveDelay)
+        Func<TimeSpan, CancellationToken, Task> settingsSaveDelay,
+        Action<string, string, string>? writeConnectionDiagnostic = null)
     {
         _settings = ViewerSettingsSanitizer.Sanitize(settings);
         _settingsSaveCoordinator = settingsSaveCoordinator
@@ -172,6 +175,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _deviceStore = deviceStore;
         _monitoringStore = monitoringStore;
         _writeDiagnostic = writeDiagnostic ?? ((_, _) => { });
+        _writeConnectionDiagnostic = writeConnectionDiagnostic ?? ((_, _, _) => { });
         _settingsSaveDelay = settingsSaveDelay
             ?? throw new ArgumentNullException(nameof(settingsSaveDelay));
         _clientFactory = clientFactory ?? new AgentClientFactory();
@@ -485,6 +489,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             if (SetProperty(ref _httpConnectionState, value))
             {
+                if (value == AgentConnectionState.Connected)
+                {
+                    TryWriteConnectionDiagnostic("agent-http", "AGENT_CONNECTED", "recovered");
+                }
                 OnPropertyChanged(nameof(HttpConnectionText));
                 UpdateCombinedConnectionState();
                 if (_hasSnapshot && _lastRefreshedAt is { } generatedAt) RebuildCollectorHealth(generatedAt);
@@ -499,6 +507,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             if (SetProperty(ref _realtimeConnectionState, value))
             {
+                if (value == AgentConnectionState.Connected)
+                {
+                    TryWriteConnectionDiagnostic("agent-realtime", "AGENT_CONNECTED", "recovered");
+                }
                 OnPropertyChanged(nameof(RealtimeConnectionText));
                 UpdateCombinedConnectionState();
                 if (_hasSnapshot && _lastRefreshedAt is { } generatedAt) RebuildCollectorHealth(generatedAt);
@@ -1015,6 +1027,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             if (++pageCount > 10_000) throw new InvalidDataException("EVENT_CHANGE_PAGE_LIMIT");
             var before = AppliedChangeCursor;
             var page = await client.GetEventChangesAsync(before, EventPageSize, cancellationToken).ConfigureAwait(false);
+            if (!ReferenceEquals(client, _client))
+            {
+                return;
+            }
             if (page.ResetRequired)
             {
                 await RebaselineEventFeedAsync(client, page.ResetCursor, cancellationToken).ConfigureAwait(false);
@@ -1035,6 +1051,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 await RunOnUiAsync(() =>
                 {
+                    if (!ReferenceEquals(client, _client))
+                    {
+                        return;
+                    }
                     HttpConnectionState = _hasSnapshot ? AgentConnectionState.Stale : AgentConnectionState.Offline;
                     OperationMessage = "이벤트 변경 순서에 빈 구간이 있어 다음 동기화를 기다립니다. · EVENT_CHANGE_GAP";
                 }).ConfigureAwait(false);
@@ -1046,7 +1066,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         if (completed && catchupCandidates is { Count: > 0 }
             && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
         {
-            await RunOnUiAsync(() => RaiseCatchupSummary(catchupCandidates)).ConfigureAwait(false);
+            await RunOnUiAsync(() =>
+            {
+                if (ReferenceEquals(client, _client))
+                {
+                    RaiseCatchupSummary(catchupCandidates);
+                }
+            }).ConfigureAwait(false);
         }
     }
 
@@ -1063,12 +1089,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
 
             var replacement = _clientFactory.Create(clean);
+            var replacementConnectionVerified = false;
             try
             {
                 if (replacement.SupportsStatelessV4)
                 {
                     await replacement.StartAsync(cancellationToken).ConfigureAwait(false);
                     var identity = await replacement.GetIdentityAsync(cancellationToken).ConfigureAwait(false);
+                    replacementConnectionVerified = true;
                     lock (_settingsSync)
                     {
                         MergeLatestRuntimeSettings(clean);
@@ -1106,6 +1134,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         OperationMessage = ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
                                            ?? "Agent 연결 설정을 저장했습니다.";
                     }).ConfigureAwait(false);
+                    if (!clean.DemoMode)
+                    {
+                        TryWriteConnectionDiagnostic(
+                            "agent-http",
+                            "AGENT_CONNECTED",
+                            "recovered");
+                    }
                     if (_monitoringStore is not null
                         && _deviceStore is not null
                         && (_monitorLoop is null || _monitorLoop.IsCompleted)
@@ -1141,6 +1176,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     }
                 }
                 _ = await replacement.GetEventChangesAsync(replacementCursor, 1, cancellationToken).ConfigureAwait(false);
+                replacementConnectionVerified = true;
                 await _syncGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 IAgentClient previous;
                 try
@@ -1183,6 +1219,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                             : AgentConnectionState.Connected;
                         ApplyRecentEventsCore(recent);
                     }).ConfigureAwait(false);
+                    if (!clean.DemoMode)
+                    {
+                        TryWriteConnectionDiagnostic(
+                            "agent-http",
+                            "AGENT_CONNECTED",
+                            "recovered");
+                    }
                 }
                 finally
                 {
@@ -1201,7 +1244,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     // The replacement already passed snapshot, recent-event, hub,
                     // and change-feed preflight. A later network interruption makes
                     // the new connection stale; it must not resurrect old settings.
-                    await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                    await SetUnavailableStateAsync(
+                        exception,
+                        AgentChannel.Http,
+                        replacement).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -1221,8 +1267,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     await RunOnUiAsync(() => SetReadyOperationMessageIfHealthy(clean)).ConfigureAwait(false);
                 }
             }
-            catch
+            catch (Exception exception)
             {
+                if (!clean.DemoMode && !replacementConnectionVerified)
+                {
+                    TryWriteConnectionDiagnostic(
+                        "agent-http",
+                        SafeMessage(exception),
+                        "failed");
+                }
                 if (!ReferenceEquals(replacement, _client)) await replacement.DisposeAsync().ConfigureAwait(false);
                 throw;
             }
@@ -1334,9 +1387,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         await _monitorGate.WaitAsync(linked.Token).ConfigureAwait(false);
         try
         {
+            var client = _client;
             try
             {
-                await _client.StartAsync(linked.Token).ConfigureAwait(false);
+                await client.StartAsync(linked.Token).ConfigureAwait(false);
+                if (!ReferenceEquals(client, _client))
+                {
+                    return;
+                }
             }
             catch (OperationCanceledException) when (linked.IsCancellationRequested)
             {
@@ -1344,7 +1402,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
             catch (Exception exception)
             {
-                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                await SetUnavailableStateAsync(
+                    exception,
+                    AgentChannel.Http,
+                    client).ConfigureAwait(false);
                 _monitoringStore.Heartbeat();
                 return;
             }
@@ -1354,7 +1415,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     && !IsMonitoringCredentialBlocked(item.Id))
                 .ToArray();
             await Task.WhenAll(profiles.Select(profile =>
-                MonitorDeviceAsync(profile, linked.Token))).ConfigureAwait(false);
+                MonitorDeviceAsync(profile, client, linked.Token))).ConfigureAwait(false);
             _monitoringStore.Heartbeat();
         }
         finally
@@ -1392,6 +1453,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         if (_statelessV4)
         {
+            var client = _client;
             await RunOnUiAsync(() =>
             {
                 IsBusy = true;
@@ -1401,8 +1463,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }).ConfigureAwait(false);
             try
             {
-                await _client.StartAsync(_lifetime.Token).ConfigureAwait(false);
-                var identity = await _client.GetIdentityAsync(_lifetime.Token).ConfigureAwait(false);
+                await client.StartAsync(_lifetime.Token).ConfigureAwait(false);
+                var identity = await client.GetIdentityAsync(_lifetime.Token).ConfigureAwait(false);
+                if (!ReferenceEquals(client, _client))
+                {
+                    return;
+                }
                 bool settingsSaved;
                 string settingsSaveErrorCode;
                 lock (_settingsSync)
@@ -1414,6 +1480,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 }
                 await RunOnUiAsync(() =>
                 {
+                    if (!ReferenceEquals(client, _client))
+                    {
+                        return;
+                    }
                     _currentAgentId = identity.AgentId;
                     _lastRefreshedAt = DateTimeOffset.UtcNow;
                     _lastSuccessfulReceiptAt = DateTimeOffset.Now;
@@ -1436,7 +1506,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                await SetUnavailableStateAsync(
+                    exception,
+                    AgentChannel.Http,
+                    client).ConfigureAwait(false);
             }
             finally
             {
@@ -1506,13 +1579,26 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 _syncGate.Release();
             }
-            await RunOnUiAsync(ClearConnectionFailureMessageIfHealthy).ConfigureAwait(false);
+            if (!ReferenceEquals(client, _client))
+            {
+                return false;
+            }
+            await RunOnUiAsync(() =>
+            {
+                if (ReferenceEquals(client, _client))
+                {
+                    ClearConnectionFailureMessageIfHealthy();
+                }
+            }).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return false; }
         catch (Exception exception)
         {
-            await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+            await SetUnavailableStateAsync(
+                exception,
+                AgentChannel.Http,
+                client).ConfigureAwait(false);
             return false;
         }
     }
@@ -2008,7 +2094,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch (Exception exception) { await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false); }
+        catch (Exception exception)
+        {
+            await SetUnavailableStateAsync(
+                exception,
+                AgentChannel.Http,
+                client).ConfigureAwait(false);
+        }
     }
 
     private void OnConnectionStateChanged(object? sender, AgentConnectionState state)
@@ -2037,6 +2129,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private async Task MonitorDeviceAsync(
         ManagedDeviceProfile profile,
+        IAgentClient client,
         CancellationToken cancellationToken)
     {
         await _monitorConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -2082,7 +2175,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     secrets.Password,
                     secrets.EnablePassword,
                     "monitor");
-                var tested = await _client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
+                var tested = await client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
+                if (!ReferenceEquals(client, _client)) return;
                 if (!tested.Success)
                 {
                     throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
@@ -2103,7 +2197,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 secrets.EnablePassword,
                 "monitor",
                 commands);
-            var result = await _client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
+            var result = await client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!ReferenceEquals(client, _client)) return;
             if (!result.Success)
             {
                 throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
@@ -2133,11 +2228,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
         {
+            if (!ReferenceEquals(client, _client)) return;
             await ReportMonitoringCycleFailureAsync(
                 "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
         }
         catch (Exception exception)
         {
+            if (!ReferenceEquals(client, _client)) return;
             var code = SafeMessage(exception);
             var authenticationFailure = IsAuthenticationFailure(code);
             if (authenticationFailure)
@@ -2151,7 +2248,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             var monitoringStateSaveFailed = false;
             if (IsAgentChannelFailure(code))
             {
-                await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
+                await SetUnavailableStateAsync(
+                    exception,
+                    AgentChannel.Http,
+                    client).ConfigureAwait(false);
             }
             else if (!IsTransientBusy(code))
             {
@@ -2706,10 +2806,26 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task SetUnavailableStateAsync(Exception exception, AgentChannel channel)
+    private async Task SetUnavailableStateAsync(
+        Exception exception,
+        AgentChannel channel,
+        IAgentClient? sourceClient = null)
     {
+        var errorCode = SafeMessage(exception);
+        if (sourceClient is not null && !ReferenceEquals(sourceClient, _client))
+        {
+            return;
+        }
         await RunOnUiAsync(() =>
         {
+            if (sourceClient is not null && !ReferenceEquals(sourceClient, _client))
+            {
+                return;
+            }
+            TryWriteConnectionDiagnostic(
+                channel == AgentChannel.Http ? "agent-http" : "agent-realtime",
+                errorCode,
+                "failed");
             var typed = exception as AgentClientException;
             var state = typed?.SuggestedConnectionState ?? AgentConnectionState.Offline;
             if (state == AgentConnectionState.NeedsConnection)
@@ -2725,7 +2841,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 RealtimeConnectionState = state;
             }
-            OperationMessage = $"Agent 상태 미확인 · {SafeMessage(exception)}";
+            OperationMessage = $"Agent 상태 미확인 · {errorCode}";
         }).ConfigureAwait(false);
     }
 
@@ -2876,6 +2992,21 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch
         {
             // Diagnostics must never stop monitoring or shutdown.
+        }
+    }
+
+    private void TryWriteConnectionDiagnostic(
+        string stage,
+        string errorCode,
+        string transition)
+    {
+        try
+        {
+            _writeConnectionDiagnostic(stage, errorCode, transition);
+        }
+        catch
+        {
+            // Connection diagnostics must never affect transport recovery.
         }
     }
 

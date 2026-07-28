@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
@@ -42,13 +43,47 @@ internal sealed class ViewerDiagnosticLog
         "VIEWER_CREDENTIAL_CORRUPT",
         "VIEWER_UNEXPECTED_ERROR"
     ];
+    private static readonly HashSet<string> AllowedConnectionStages =
+    [
+        "agent-http",
+        "agent-realtime"
+    ];
+    private static readonly HashSet<string> AllowedConnectionErrorCodes =
+    [
+        "AGENT_ACCESS_DENIED",
+        "AGENT_CONNECTION_REFUSED",
+        "AGENT_DNS_FAILED",
+        "AGENT_HTTP_ERROR",
+        "AGENT_IDENTITY_CHANGED",
+        "AGENT_INTERNAL_ERROR",
+        "AGENT_NOT_READY",
+        "AGENT_PROTOCOL_MISMATCH",
+        "AGENT_RESPONSE_INVALID",
+        "AGENT_RESPONSE_TOO_LARGE",
+        "AGENT_RESPONSE_UTF8_INVALID",
+        "AGENT_TIMEOUT",
+        "AGENT_UNREACHABLE",
+        "VIEWER_CONFIGURATION_INVALID",
+        "VIEWER_CONNECTION_REQUIRED",
+        "VIEWER_UNEXPECTED_ERROR"
+    ];
+    private static readonly HashSet<string> AllowedConnectionTransitions =
+    [
+        "failed",
+        "recovered"
+    ];
     private readonly IViewerDiagnosticFileSystem _fileSystem;
     private readonly long _maximumBytes;
+    private readonly string _applicationVersion;
+    private readonly object _connectionTransitionLock = new();
+    private readonly Dictionary<string, (string ErrorCode, string Transition)> _lastConnectionTransitions =
+        new(StringComparer.Ordinal);
 
     public ViewerDiagnosticLog(
         string? directory = null,
         long maximumBytes = DefaultMaximumBytes,
-        IViewerDiagnosticFileSystem? fileSystem = null)
+        IViewerDiagnosticFileSystem? fileSystem = null,
+        string? applicationVersion = null)
     {
         DirectoryPath = directory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -58,6 +93,8 @@ internal sealed class ViewerDiagnosticLog
         BackupPath = Path.Combine(DirectoryPath, BackupFileName);
         _maximumBytes = Math.Max(256, maximumBytes);
         _fileSystem = fileSystem ?? PhysicalViewerDiagnosticFileSystem.Instance;
+        _applicationVersion = NormalizeApplicationVersion(
+            applicationVersion ?? ResolveApplicationVersion());
     }
 
     internal string DirectoryPath { get; }
@@ -73,9 +110,69 @@ internal sealed class ViewerDiagnosticLog
         var entry = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["timestampUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["appVersion"] = _applicationVersion,
             ["stage"] = safeStage,
             ["errorCode"] = safeCode
         });
+        WriteLine(entry);
+    }
+
+    /// <summary>
+    /// Records only allowlisted Agent connection failures and their recovery.
+    /// Initial successful connections are intentionally omitted, and identical
+    /// consecutive states are de-duplicated.
+    /// </summary>
+    public void WriteConnectionTransition(
+        string stage,
+        string errorCode,
+        string transition)
+    {
+        var safeStage = AllowedConnectionStages.Contains(stage)
+            ? stage
+            : "agent-http";
+        var safeCode = AllowedConnectionErrorCodes.Contains(errorCode)
+            ? errorCode
+            : "VIEWER_UNEXPECTED_ERROR";
+        var safeTransition = AllowedConnectionTransitions.Contains(transition)
+            ? transition
+            : "failed";
+
+        lock (_connectionTransitionLock)
+        {
+            if (safeTransition == "recovered")
+            {
+                if (!_lastConnectionTransitions.TryGetValue(safeStage, out var previous)
+                    || previous.Transition != "failed")
+                {
+                    return;
+                }
+                safeCode = previous.ErrorCode;
+            }
+
+            var current = (safeCode, safeTransition);
+            if (_lastConnectionTransitions.TryGetValue(safeStage, out var last)
+                && last == current)
+            {
+                return;
+            }
+
+            var entry = JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["timestampUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+                ["appVersion"] = _applicationVersion,
+                ["stage"] = safeStage,
+                ["errorCode"] = safeCode,
+                ["transition"] = safeTransition
+            });
+            if (WriteLine(entry))
+            {
+                _lastConnectionTransitions[safeStage] = current;
+            }
+        }
+    }
+
+    private bool WriteLine(string entry)
+    {
         var line = entry + Environment.NewLine;
         var lineBytes = Utf8WithoutBom.GetByteCount(line);
 
@@ -91,11 +188,70 @@ internal sealed class ViewerDiagnosticLog
                 }
                 _fileSystem.AppendAllText(CurrentPath, line, Utf8WithoutBom);
             }
+            return true;
         }
         catch
         {
             // Diagnostics must never become an application failure path.
+            return false;
         }
+    }
+
+    private static string ResolveApplicationVersion()
+    {
+        var assembly = typeof(ViewerDiagnosticLog).Assembly;
+        return assembly
+                   .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                   ?.InformationalVersion
+               ?? assembly.GetName().Version?.ToString()
+               ?? "unknown";
+    }
+
+    private static string NormalizeApplicationVersion(string? value)
+    {
+        var candidate = value?.Trim() ?? string.Empty;
+        var metadataIndex = candidate.IndexOf('+');
+        if (metadataIndex >= 0)
+        {
+            candidate = candidate[..metadataIndex];
+        }
+
+        return IsSafeApplicationVersion(candidate)
+            ? candidate
+            : "unknown";
+    }
+
+    private static bool IsSafeApplicationVersion(string candidate)
+    {
+        if (candidate.Length is 0 or > 64)
+        {
+            return false;
+        }
+
+        var prereleaseIndex = candidate.IndexOf('-');
+        var core = prereleaseIndex >= 0
+            ? candidate[..prereleaseIndex]
+            : candidate;
+        var prerelease = prereleaseIndex >= 0
+            ? candidate[(prereleaseIndex + 1)..]
+            : null;
+        var coreParts = core.Split('.');
+        if (coreParts.Length is < 2 or > 4
+            || coreParts.Any(part =>
+                part.Length is 0 or > 10
+                || part.Any(character => character is < '0' or > '9')))
+        {
+            return false;
+        }
+
+        return prerelease is null
+               || (prerelease.Length > 0
+                   && prerelease.All(character =>
+                       character is >= 'A' and <= 'Z'
+                           or >= 'a' and <= 'z'
+                           or >= '0' and <= '9'
+                           or '.'
+                           or '-'));
     }
 }
 

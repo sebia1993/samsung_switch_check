@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using SamsungSwitchWatch.Viewer.Models;
@@ -9,6 +10,210 @@ namespace SamsungSwitchWatch.Viewer.Tests;
 
 public sealed class ViewerFailureReportingTests
 {
+    [Fact]
+    public async Task AgentConnectionRefused_RecoveryClearsStaleMessageAndWritesOneTransitionPair()
+    {
+        var folder = TemporaryFolder();
+        var diagnosticLog = new ViewerDiagnosticLog(
+            Path.Combine(folder, "logs"),
+            applicationVersion: "1.2.3-poc");
+        var settingsStore = new ViewerSettingsStore(
+            Path.Combine(folder, "settings.json"));
+        var client = new TestAgentClient(supportsStatelessV4: true)
+        {
+            StartException = new AgentClientException(
+                "AGENT_CONNECTION_REFUSED",
+                AgentConnectionState.Offline,
+                new HttpRequestException(
+                    "host=192.0.2.10 user=operator password=login-secret"))
+        };
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings
+            {
+                DemoMode = false,
+                AgentUri = "https://agent.example.test:18443"
+            },
+            settingsStore,
+            new TestFactory(client),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null,
+            settingsSaveCoordinator: new ViewerSettingsSaveCoordinator(
+                settingsStore,
+                diagnosticLog.Write),
+            writeDiagnostic: diagnosticLog.Write,
+            settingsSaveDelay: static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken),
+            writeConnectionDiagnostic: diagnosticLog.WriteConnectionTransition);
+        try
+        {
+            await viewModel.InitializeAsync();
+
+            Assert.Equal(AgentConnectionState.Offline, viewModel.ConnectionState);
+            Assert.Contains(
+                "AGENT_CONNECTION_REFUSED",
+                viewModel.OperationMessage,
+                StringComparison.Ordinal);
+
+            client.EmitState(AgentConnectionState.Connected);
+            client.EmitState(AgentConnectionState.Connected);
+
+            Assert.Equal(AgentConnectionState.Connected, viewModel.ConnectionState);
+            Assert.DoesNotContain(
+                "AGENT_CONNECTION_REFUSED",
+                viewModel.OperationMessage,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "Agent 상태 미확인",
+                viewModel.OperationMessage,
+                StringComparison.Ordinal);
+
+            var content = File.ReadAllText(diagnosticLog.CurrentPath);
+            Assert.DoesNotContain("192.0.2.10", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("login-secret", content, StringComparison.Ordinal);
+            var lines = File.ReadAllLines(diagnosticLog.CurrentPath);
+            Assert.Equal(2, lines.Length);
+            using var failed = JsonDocument.Parse(lines[0]);
+            using var recovered = JsonDocument.Parse(lines[1]);
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                failed.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "failed",
+                failed.RootElement.GetProperty("transition").GetString());
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                recovered.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "recovered",
+                recovered.RootElement.GetProperty("transition").GetString());
+        }
+        finally
+        {
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task DemoState_DoesNotRecordAgentRecovery()
+    {
+        var folder = TemporaryFolder();
+        var diagnosticLog = new ViewerDiagnosticLog(
+            Path.Combine(folder, "logs"),
+            applicationVersion: "1.2.3-poc");
+        var settingsStore = new ViewerSettingsStore(
+            Path.Combine(folder, "settings.json"));
+        var client = new TestAgentClient(supportsStatelessV4: true)
+        {
+            StartException = new AgentClientException(
+                "AGENT_CONNECTION_REFUSED",
+                AgentConnectionState.Offline)
+        };
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            new TestFactory(client),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null,
+            settingsSaveCoordinator: new ViewerSettingsSaveCoordinator(
+                settingsStore,
+                diagnosticLog.Write),
+            writeDiagnostic: diagnosticLog.Write,
+            settingsSaveDelay: static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken),
+            writeConnectionDiagnostic: diagnosticLog.WriteConnectionTransition);
+        try
+        {
+            await viewModel.InitializeAsync();
+            client.EmitState(AgentConnectionState.Demo);
+
+            Assert.Equal(AgentConnectionState.Demo, viewModel.ConnectionState);
+            var transition = Assert.Single(ReadConnectionTransitions(
+                diagnosticLog.CurrentPath));
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                transition.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "failed",
+                transition.GetProperty("transition").GetString());
+        }
+        finally
+        {
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ConnectionSwitch_PreflightFailureWritesSafeStableDiagnostic()
+    {
+        var folder = TemporaryFolder();
+        var diagnosticLog = new ViewerDiagnosticLog(
+            Path.Combine(folder, "logs"),
+            applicationVersion: "1.2.3-poc");
+        var settingsStore = new ViewerSettingsStore(
+            Path.Combine(folder, "settings.json"));
+        var original = new TestAgentClient(supportsStatelessV4: true);
+        var replacement = new TestAgentClient(supportsStatelessV4: true)
+        {
+            StartException = new AgentClientException(
+                "AGENT_CONNECTION_REFUSED",
+                AgentConnectionState.Offline,
+                new HttpRequestException(
+                    "host=192.0.2.10 user=operator password=login-secret"))
+        };
+        var viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            new QueueFactory(original, replacement),
+            synchronizationContext: null,
+            deviceStore: null,
+            monitoringStore: null,
+            settingsSaveCoordinator: new ViewerSettingsSaveCoordinator(
+                settingsStore,
+                diagnosticLog.Write),
+            writeDiagnostic: diagnosticLog.Write,
+            settingsSaveDelay: static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken),
+            writeConnectionDiagnostic: diagnosticLog.WriteConnectionTransition);
+        try
+        {
+            await viewModel.InitializeAsync();
+
+            var failure = await Assert.ThrowsAsync<AgentClientException>(() =>
+                viewModel.SwitchClientAsync(new ViewerSettings
+                {
+                    DemoMode = false,
+                    AgentUri = "https://replacement.example.test:18443"
+                }));
+
+            Assert.Equal("AGENT_CONNECTION_REFUSED", failure.ErrorCode);
+            var content = File.ReadAllText(diagnosticLog.CurrentPath);
+            Assert.DoesNotContain("192.0.2.10", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("login-secret", content, StringComparison.Ordinal);
+            var transition = Assert.Single(ReadConnectionTransitions(
+                diagnosticLog.CurrentPath));
+            Assert.Equal(
+                "agent-http",
+                transition.GetProperty("stage").GetString());
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                transition.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "failed",
+                transition.GetProperty("transition").GetString());
+        }
+        finally
+        {
+            await viewModel.DisposeAsync();
+            Directory.Delete(folder, true);
+        }
+    }
+
     [Fact]
     public async Task MonitoringCycle_StateWriteFailureKeepsStorageCode()
     {
@@ -120,6 +325,7 @@ public sealed class ViewerFailureReportingTests
                 diagnosticLog.CurrentPath,
                 "settings-save-connection",
                 "VIEWER_SETTINGS_WRITE_FAILED");
+            Assert.Empty(ReadConnectionTransitions(diagnosticLog.CurrentPath));
         }
         finally
         {
@@ -185,6 +391,7 @@ public sealed class ViewerFailureReportingTests
                 diagnosticLog.CurrentPath,
                 "settings-save-connection",
                 "VIEWER_SETTINGS_WRITE_FAILED");
+            Assert.Empty(ReadConnectionTransitions(diagnosticLog.CurrentPath));
         }
         finally
         {
@@ -676,11 +883,32 @@ public sealed class ViewerFailureReportingTests
             {
                 continue;
             }
-            Assert.Equal(3, document.RootElement.EnumerateObject().Count());
+            Assert.Equal(4, document.RootElement.EnumerateObject().Count());
+            Assert.False(string.IsNullOrWhiteSpace(
+                document.RootElement.GetProperty("appVersion").GetString()));
             found = true;
             break;
         }
         Assert.True(found, $"Expected diagnostic {expectedStage}/{expectedCode} was not written.");
+    }
+
+    private static IReadOnlyList<JsonElement> ReadConnectionTransitions(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        var items = new List<JsonElement>();
+        foreach (var line in File.ReadAllLines(path))
+        {
+            using var document = JsonDocument.Parse(line);
+            if (document.RootElement.TryGetProperty("transition", out _))
+            {
+                items.Add(document.RootElement.Clone());
+            }
+        }
+        return items;
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)
@@ -723,6 +951,7 @@ public sealed class ViewerFailureReportingTests
         private long _firstChangeRequestCursor = -1;
 
         public bool SupportsStatelessV4 { get; } = supportsStatelessV4;
+        public Exception? StartException { get; set; }
         public Queue<EventChangePageDto> ChangePages { get; } = new();
         public long FirstChangeRequestCursor => Interlocked.Read(ref _firstChangeRequestCursor);
         public bool DisposeCalled { get; private set; }
@@ -736,12 +965,20 @@ public sealed class ViewerFailureReportingTests
             {
                 await startGate.WaitAsync(cancellationToken);
             }
+            if (StartException is not null)
+            {
+                ConnectionStateChanged?.Invoke(this, AgentConnectionState.Offline);
+                throw StartException;
+            }
             ConnectionStateChanged?.Invoke(
                 this,
                 SupportsStatelessV4
                     ? AgentConnectionState.Demo
                     : AgentConnectionState.Connected);
         }
+
+        public void EmitState(AgentConnectionState state) =>
+            ConnectionStateChanged?.Invoke(this, state);
 
         public Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken) =>
             Task.FromResult(new AgentIdentityDto(

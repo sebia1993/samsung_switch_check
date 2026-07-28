@@ -65,6 +65,7 @@ Write-SswStep '배포 도우미 계약 검사'
 & (Join-Path $PSScriptRoot 'test-deployment-helpers.ps1')
 & (Join-Path $PSScriptRoot 'test-viewer-installer-contract.ps1')
 & (Join-Path $PSScriptRoot 'test-agent-address-input-contract.ps1')
+& (Join-Path $PSScriptRoot 'test-agent-health-diagnostics-contract.ps1')
 $requireElevatedAclFixture = $env:GITHUB_ACTIONS -eq 'true'
 & (Join-Path $PSScriptRoot 'test-agent-deployment-journal.ps1') `
     -RequireElevatedAclFixture:$requireElevatedAclFixture

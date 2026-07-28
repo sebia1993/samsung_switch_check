@@ -6,6 +6,10 @@
 ## 1. Agent 설치와 무창 실행
 
 - [ ] Agent ZIP과 Viewer ZIP의 Release 검증 완료
+- [ ] Viewer CMD 실행 후 UAC 승인과 `C:\Program Files\SamsungSwitchWatch\Viewer` 설치 확인
+- [ ] UAC를 다른 관리자 계정으로 승인해도 원래 사용자 시작 메뉴·자동 시작만 반영됨
+- [ ] Viewer 업데이트 뒤 `%LOCALAPPDATA%\SamsungSwitchWatch`의 장비·계정·감시 자료 보존
+- [ ] Program Files 설치본 무결성·자체점검 실패 시 기존 Viewer 또는 설치 전 상태로 rollback
 - [ ] `Install-or-Update-Agent.cmd`에서 UAC 승인
 - [ ] Viewer PC IPv4와 스위치 관리 IPv4를 CIDR 계산 없이 입력
 - [ ] 입력한 각 IPv4가 내부 설정과 방화벽에서 정확한 `/32`로 적용됨
@@ -44,6 +48,8 @@
 - [ ] 같은 버전 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 허용 IP 목록 변경 성공
 - [ ] 다른 버전 Agent ZIP의 허용 IP 설정 도구는 변경 전에 거부됨
 - [ ] 허용 IP 설정 도구에서 빈 입력 시 기존 목록이 보존됨
+- [ ] 기존과 같은 허용 IP를 다시 적용해도 서비스·listener·방화벽·프로필·live·ready 감사
+- [ ] Public-only 프로필은 자동 허용하지 않고 지원되지 않는 상태로 명확히 표시
 
 ## 4. Viewer 장비와 계정
 
@@ -142,6 +148,11 @@
 ## 9. 진단과 인수 기준
 
 - [ ] `diagnose-agent.ps1`에 ID, PW, 장비 IP, 명령과 원문 없음
+- [ ] 진단 JSON에 버전, 서비스 상태·시작 모드·종료 코드, TCP/18443 listener,
+      방화벽 enabled/profiles/exact, 활성 네트워크 범주, 허용 목록 개수, live/ready가 분리됨
+- [ ] Viewer 연결 진단에 IP·계정·명령 출력 없이 앱 버전·단계·안정 코드·복구 전환만 기록됨
+- [ ] 같은 연결 오류가 반복되어도 진단 로그가 매 주기마다 중복 증가하지 않음
+- [ ] `AGENT_CONNECTION_REFUSED` 뒤 연결 성공 시 오래된 오류 메시지가 화면에서 제거됨
 - [ ] 실패가 `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
       `COMMAND_TIMEOUT`, `PROMPT_PARSE_FAILED` 등으로 구분됨
 - [ ] 세 모델별 실제 펌웨어 버전과 검증 날짜를 사내 기록에만 보관

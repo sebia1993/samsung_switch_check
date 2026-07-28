@@ -1027,6 +1027,173 @@ function Invoke-SswLocalLivenessProbe {
     throw "Agent liveness 확인이 ${TimeoutSeconds}초 안에 성공하지 못했습니다. 진단 코드: $unreachableCode"
 }
 
+function Get-SswAgentServiceRuntimeSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstalledExecutablePath
+    )
+
+    $snapshot = [ordered]@{
+        Status = 'SERVICE_NOT_FOUND'
+        StartMode = 'UNKNOWN'
+        ExitCode = $null
+        PathStatus = 'NOT_TESTED'
+        AccountStatus = 'NOT_TESTED'
+        ProcessStatus = 'NOT_TESTED'
+        ProcessId = 0
+        ConfigurationExact = $false
+    }
+    if ($Name -notmatch '^[A-Za-z0-9_-]{1,128}$') {
+        $snapshot.Status = 'SERVICE_QUERY_FAILED'
+        return [pscustomobject]$snapshot
+    }
+
+    try {
+        $service = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction Stop
+        if (-not $service) {
+            return [pscustomobject]$snapshot
+        }
+
+        $snapshot.Status = switch ([string]$service.State) {
+            'Running' { 'Running' }
+            'Stopped' { 'Stopped' }
+            'Start Pending' { 'StartPending' }
+            'Stop Pending' { 'StopPending' }
+            'Paused' { 'Paused' }
+            default { 'Unknown' }
+        }
+        $snapshot.StartMode = switch ([string]$service.StartMode) {
+            'Auto' { 'Auto' }
+            'Manual' { 'Manual' }
+            'Disabled' { 'Disabled' }
+            default { 'Unknown' }
+        }
+        if ($null -ne $service.ExitCode) {
+            $snapshot.ExitCode = [int64]$service.ExitCode
+        }
+
+        $expectedPath = '"{0}" --service' -f
+            [IO.Path]::GetFullPath($InstalledExecutablePath)
+        $snapshot.PathStatus = if ([string]$service.PathName -ceq $expectedPath) {
+            'EXACT'
+        }
+        else {
+            'MISMATCH'
+        }
+        $expectedAccount = "NT SERVICE\$Name"
+        $snapshot.AccountStatus = if ([string]$service.StartName -ieq $expectedAccount) {
+            'EXACT'
+        }
+        else {
+            'MISMATCH'
+        }
+
+        $serviceProcessId = 0
+        if ([int]::TryParse([string]$service.ProcessId, [ref]$serviceProcessId) -and
+            $serviceProcessId -gt 0) {
+            $snapshot.ProcessStatus = 'AVAILABLE'
+            $snapshot.ProcessId = $serviceProcessId
+        }
+        else {
+            $snapshot.ProcessStatus = 'UNAVAILABLE'
+        }
+        $snapshot.ConfigurationExact =
+            $snapshot.StartMode -eq 'Auto' -and
+            $snapshot.PathStatus -eq 'EXACT' -and
+            $snapshot.AccountStatus -eq 'EXACT'
+    }
+    catch {
+        $snapshot.Status = 'SERVICE_QUERY_FAILED'
+        $snapshot.StartMode = 'UNKNOWN'
+        $snapshot.ExitCode = $null
+        $snapshot.PathStatus = 'NOT_TESTED'
+        $snapshot.AccountStatus = 'NOT_TESTED'
+        $snapshot.ProcessStatus = 'NOT_TESTED'
+        $snapshot.ProcessId = 0
+        $snapshot.ConfigurationExact = $false
+    }
+    return [pscustomobject]$snapshot
+}
+
+function Get-SswTcpListenerStatus {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)]
+        [int]$Port,
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 2147483647)]
+        [int]$ExpectedProcessId
+    )
+
+    try {
+        if (-not (Get-Command Get-NetTCPConnection -ErrorAction Stop)) {
+            return 'LISTENER_QUERY_FAILED'
+        }
+        $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object {
+            [int]$_.LocalPort -eq $Port
+        })
+        if ($listeners.Count -eq 0) {
+            return 'NOT_LISTENING'
+        }
+        $productAddressListeners = @($listeners | Where-Object {
+            [string]$_.LocalAddress -ceq '0.0.0.0'
+        })
+        if ($productAddressListeners.Count -eq 0) {
+            return 'LISTENER_ADDRESS_MISMATCH'
+        }
+        foreach ($listener in $productAddressListeners) {
+            $owningProcess = 0
+            if ([int]::TryParse([string]$listener.OwningProcess, [ref]$owningProcess) -and
+                $owningProcess -eq $ExpectedProcessId) {
+                return 'LISTENING'
+            }
+        }
+        return 'LISTENER_PROCESS_MISMATCH'
+    }
+    catch {
+        return 'LISTENER_QUERY_FAILED'
+    }
+}
+
+function Get-SswActiveNetworkCategorySnapshot {
+    $categories = New-Object Collections.Generic.HashSet[string]([StringComparer]::Ordinal)
+    try {
+        foreach ($profile in @(Get-NetConnectionProfile -ErrorAction Stop)) {
+            $category = switch ([string]$profile.NetworkCategory) {
+                'DomainAuthenticated' { 'DomainAuthenticated' }
+                'Private' { 'Private' }
+                'Public' { 'Public' }
+                default { 'Unknown' }
+            }
+            $null = $categories.Add($category)
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Status = 'ACTIVE_PROFILE_QUERY_FAILED'
+            Categories = @()
+        }
+    }
+
+    $sanitized = @($categories | Sort-Object)
+    if ($sanitized.Count -eq 0) {
+        return [pscustomobject]@{
+            Status = 'ACTIVE_PROFILE_NOT_FOUND'
+            Categories = @()
+        }
+    }
+    $supported = @($sanitized | Where-Object { $_ -in @('DomainAuthenticated', 'Private') })
+    return [pscustomobject]@{
+        Status = if ($supported.Count -gt 0) {
+            'ACTIVE_PROFILE_SUPPORTED'
+        }
+        else {
+            'ACTIVE_PROFILE_UNSUPPORTED'
+        }
+        Categories = $sanitized
+    }
+}
+
 function Set-SswInstallerBackupAcl {
     param(
         [Parameter(Mandatory = $true)][string]$Path,

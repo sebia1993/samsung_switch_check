@@ -242,6 +242,17 @@ try {
                     throw "Public Agent ZIP is not service-only: $($entry.Name)"
                 }
             }
+            foreach ($launcherName in @(
+                'Install-or-Update-Agent.cmd',
+                'Configure-Agent-Allowed-IPs.cmd'
+            )) {
+                $launcherText = Get-Content -LiteralPath (Join-Path $expanded $launcherName) `
+                    -Raw -Encoding UTF8
+                if ($launcherText.Contains('-ExecutionPolicy Bypass') -or
+                    $launcherText.Contains('Unblock-File')) {
+                    throw "Public Agent launcher bypasses Windows security policy: $launcherName"
+                }
+            }
             foreach ($document in Get-ChildItem -LiteralPath $expanded -Filter '*.md' -File) {
                 $documentText = Get-Content -LiteralPath $document.FullName -Raw -Encoding UTF8
                 if ($documentText -match '(?i)install-agent-background|run-agent-background|--background') {

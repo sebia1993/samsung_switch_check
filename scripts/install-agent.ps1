@@ -130,6 +130,102 @@ function Test-SswStringSetEqual {
     return ($normalizedLeft -join '|') -ceq ($normalizedRight -join '|')
 }
 
+function Get-SswAgentRuntimeHealthAudit {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][string[]]$ExpectedRemoteAddress,
+        [Parameter(Mandatory = $true)][string]$InstalledExecutablePath
+    )
+
+    $audit = [ordered]@{
+        Service = 'SERVICE_NOT_FOUND'
+        ServiceStartMode = 'UNKNOWN'
+        ServiceExit = 'UNKNOWN'
+        ServicePath = 'NOT_TESTED'
+        ServiceAccount = 'NOT_TESTED'
+        ServiceProcess = 'NOT_TESTED'
+        Listener = 'NOT_TESTED'
+        Firewall = 'NOT_TESTED'
+        ActiveProfile = 'NOT_TESTED'
+        Live = 'NOT_TESTED'
+        Ready = 'NOT_TESTED'
+        Healthy = $false
+    }
+
+    $service = Get-SswAgentServiceRuntimeSnapshot `
+        -Name $ServiceName -InstalledExecutablePath $InstalledExecutablePath
+    $audit.Service = [string]$service.Status
+    $audit.ServiceStartMode = [string]$service.StartMode
+    $audit.ServiceExit = if ($null -eq $service.ExitCode) {
+        'UNKNOWN'
+    }
+    elseif ([int64]$service.ExitCode -eq 0) {
+        'ZERO'
+    }
+    else {
+        'NONZERO'
+    }
+    $audit.ServicePath = [string]$service.PathStatus
+    $audit.ServiceAccount = [string]$service.AccountStatus
+    $audit.ServiceProcess = [string]$service.ProcessStatus
+    if ([int]$service.ProcessId -gt 0) {
+        $audit.Listener = Get-SswTcpListenerStatus `
+            -Port $Port -ExpectedProcessId ([int]$service.ProcessId)
+    }
+    else {
+        $audit.Listener = 'LISTENER_SERVICE_PROCESS_UNAVAILABLE'
+    }
+
+    try {
+        $firewall = Get-SswAgentFirewallSnapshotByName -Name 'SamsungSwitchWatchAgent-Https'
+        $audit.Firewall = if ($firewall -and
+            (Test-SswAgentHttpsFirewallRuleExact -Snapshot $firewall `
+                -RemoteAddress $ExpectedRemoteAddress)) {
+            'FIREWALL_RULE_EXACT'
+        }
+        elseif ($firewall) {
+            'FIREWALL_RULE_MISMATCH'
+        }
+        else {
+            'FIREWALL_RULE_NOT_FOUND'
+        }
+    }
+    catch {
+        $audit.Firewall = 'FIREWALL_QUERY_FAILED'
+    }
+
+    $network = Get-SswActiveNetworkCategorySnapshot
+    $audit.ActiveProfile = [string]$network.Status
+
+    try {
+        $audit.Live = Invoke-SswLocalLivenessProbe -Port $Port -TimeoutSeconds 5 -UseHttps
+    }
+    catch {
+        $audit.Live = 'AGENT_LIVE_FAILED'
+    }
+    try {
+        $audit.Ready = Invoke-SswLocalHealthProbe -Port $Port -TimeoutSeconds 5 -UseHttps
+    }
+    catch {
+        $audit.Ready = 'AGENT_READY_FAILED'
+    }
+
+    $audit.Healthy =
+        $audit.Service -eq 'Running' -and
+        $audit.ServiceStartMode -eq 'Auto' -and
+        $audit.ServiceExit -eq 'ZERO' -and
+        $audit.ServicePath -eq 'EXACT' -and
+        $audit.ServiceAccount -eq 'EXACT' -and
+        $audit.ServiceProcess -eq 'AVAILABLE' -and
+        $audit.Listener -eq 'LISTENING' -and
+        $audit.Firewall -eq 'FIREWALL_RULE_EXACT' -and
+        $audit.ActiveProfile -eq 'ACTIVE_PROFILE_SUPPORTED' -and
+        $audit.Live -eq 'LIVE' -and
+        $audit.Ready -eq 'READY'
+    return [pscustomobject]$audit
+}
+
 function Assert-SswReconfigurationPackageMatch {
     param(
         [Parameter(Mandatory = $true)][object]$SourceManifest,
@@ -726,8 +822,26 @@ Confirm-SswAddressPolicy -Required ([bool]$ReconfigureAddresses -or $script:sswA
 if ($ReconfigureAddresses -and
     (Test-SswStringSetEqual -Left $clientCidrs -Right $preservedClientCidrs) -and
     (Test-SswStringSetEqual -Left $targetCidrs -Right $preservedTargetCidrs)) {
-    Write-SswStep '허용 IP 변경 사항이 없어 Agent 서비스와 방화벽을 변경하지 않았습니다.'
-    return
+    Write-SswStep '허용 IP 변경 사항이 없어 현재 Agent 상태를 점검합니다.'
+    $unchangedPolicyHealth = Get-SswAgentRuntimeHealthAudit `
+        -ServiceName $serviceName -Port $httpsPort -ExpectedRemoteAddress $clientCidrs `
+        -InstalledExecutablePath $installedExe
+    Write-Host ("  health audit   : service={0}; start={1}; path={2}; account={3}; process={4}; listener={5}; firewall={6}; profile={7}; live={8}; ready={9}" -f
+        $unchangedPolicyHealth.Service,
+        $unchangedPolicyHealth.ServiceStartMode,
+        $unchangedPolicyHealth.ServicePath,
+        $unchangedPolicyHealth.ServiceAccount,
+        $unchangedPolicyHealth.ServiceProcess,
+        $unchangedPolicyHealth.Listener,
+        $unchangedPolicyHealth.Firewall,
+        $unchangedPolicyHealth.ActiveProfile,
+        $unchangedPolicyHealth.Live,
+        $unchangedPolicyHealth.Ready)
+    if ($unchangedPolicyHealth.Healthy) {
+        Write-SswStep '허용 IP와 Agent 상태가 모두 정상이라 서비스와 방화벽을 변경하지 않았습니다.'
+        return
+    }
+    Write-Warning 'AGENT_HEALTH_REAPPLY_REQUIRED: 허용 IP는 같지만 Agent 상태가 불완전하여 기존 설정을 보존한 채 설치 트랜잭션을 다시 적용합니다.'
 }
 if ($Preflight) {
     Write-SswStep 'Preflight passed; no Agent program, data, service, or firewall state was changed. The operations journal ACL may have been initialized.'
@@ -1029,6 +1143,25 @@ try {
     Start-Service -Name $serviceName
     $ready = Invoke-SswLocalHealthProbe -Port $httpsPort -TimeoutSeconds 60 -UseHttps
     Write-Host "  readiness     : $ready"
+    $appliedHealth = Get-SswAgentRuntimeHealthAudit `
+        -ServiceName $serviceName -Port $httpsPort -ExpectedRemoteAddress $clientCidrs `
+        -InstalledExecutablePath $installedExe
+    if ($appliedHealth.ActiveProfile -eq 'ACTIVE_PROFILE_UNSUPPORTED') {
+        throw 'AGENT_ACTIVE_PROFILE_UNSUPPORTED: 활성 네트워크가 Public 전용입니다. Agent 방화벽은 Domain/Private 전용으로 유지되며 Public 또는 LocalSubnet으로 확대하지 않았습니다.'
+    }
+    if (-not $appliedHealth.Healthy) {
+        throw ("AGENT_POST_APPLY_HEALTH_FAILED: service={0}; start={1}; path={2}; account={3}; process={4}; listener={5}; firewall={6}; profile={7}; live={8}; ready={9}" -f
+            $appliedHealth.Service,
+            $appliedHealth.ServiceStartMode,
+            $appliedHealth.ServicePath,
+            $appliedHealth.ServiceAccount,
+            $appliedHealth.ServiceProcess,
+            $appliedHealth.Listener,
+            $appliedHealth.Firewall,
+            $appliedHealth.ActiveProfile,
+            $appliedHealth.Live,
+            $appliedHealth.Ready)
+    }
 
     if ($legacyBackgroundState) {
         Write-SswStep 'Move retired current-user Agent files to an Administrators-only archive'

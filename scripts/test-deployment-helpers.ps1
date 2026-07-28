@@ -638,6 +638,10 @@ Assert-ContainsAll -Name 'UAC launcher' -Text $launcher -Needles @(
 )
 Assert-DeploymentTest -Condition (-not ($launcher -match '(?im)^\s*powershell\.exe(?:\s|$)')) `
     -Message 'Agent launcher must not resolve Windows PowerShell through the current directory or PATH.'
+Assert-DeploymentTest -Condition (-not $launcher.Contains('-ExecutionPolicy Bypass')) `
+    -Message 'Agent launcher must respect the Windows PowerShell execution policy.'
+Assert-DeploymentTest -Condition (-not $launcher.Contains('Unblock-File')) `
+    -Message 'Agent launcher must not unblock downloaded files.'
 Assert-DeploymentTest -Condition (
     $build -match "\[string\]\`$Version\s*=\s*'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?'") `
     -Message 'Release build default must be a semantic version.'
@@ -685,8 +689,9 @@ Assert-ContainsAll -Name 'Viewer installer' -Text $viewerInstall -Needles @(
     'New-SswDirectoryIfMissing -Path $startMenuParent',
     'New-SswDirectoryIfMissing -Path $startupParent',
     'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE',
-    'if ($StartWithWindows) { Copy-Item -LiteralPath $startMenu -Destination $startup -Force }',
-    'elseif ($DisableStartWithWindows -and (Test-Path -LiteralPath $startup -PathType Leaf))'
+    '$keepStartup = $EnableStartup -or ($startupWasPresent -and -not $DisableStartup)',
+    'if ($keepStartup) {',
+    'elseif ($DisableStartup -and (Test-Path -LiteralPath $startup -PathType Leaf))'
 )
 
 Write-SswStep 'Viewer shortcut directory helper behavior'
@@ -779,8 +784,11 @@ $viewerProgramCleanupIndex = $viewerInstall.IndexOf(
 Assert-DeploymentTest -Condition (
     $viewerCommitIndex -ge 0 -and
     $viewerCommittedFlagIndex -gt $viewerCommitIndex -and
-    $viewerProgramCleanupIndex -gt $viewerCommittedFlagIndex
-) -Message 'Viewer must durably commit before deleting the previous program backup.'
+    $viewerProgramCleanupIndex -gt $viewerCommittedFlagIndex -and
+    $viewerInstall.IndexOf(
+        'if (-not $MachinePhase -and (Test-Path -LiteralPath $backup))',
+        $viewerProgramCleanupIndex) -gt $viewerProgramCleanupIndex
+) -Message 'Viewer must commit before PerUser backup cleanup and retain the machine rollback slot.'
 
 $viewerCatchIndex = $viewerInstall.IndexOf('catch {', $viewerProgramCleanupIndex)
 $viewerCommittedCatchIndex = $viewerInstall.IndexOf(
