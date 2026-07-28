@@ -8,6 +8,20 @@ namespace SamsungSwitchWatch.Agent.Setup.Tests;
 public sealed class DeploymentSecurityTests
 {
     [Fact]
+    public void WriteAllTextAtomic_CreatesAndReplacesUtf8WithoutLeavingTemporaryFiles()
+    {
+        using var folder = new TemporaryFolder();
+        var fileSystem = new PhysicalSetupFileSystem();
+        var path = Path.Combine(folder.Path, "journal.json");
+
+        fileSystem.WriteAllTextAtomic(path, "첫 번째");
+        fileSystem.WriteAllTextAtomic(path, "두 번째");
+
+        Assert.Equal("두 번째", File.ReadAllText(path));
+        Assert.Empty(Directory.GetFiles(folder.Path, ".journal.json.*.tmp*"));
+    }
+
+    [Fact]
     public void IsReparsePoint_DetectsJunctionOrSymbolicLinkAttribute()
     {
         Assert.True(PhysicalSetupFileSystem.IsReparsePoint(

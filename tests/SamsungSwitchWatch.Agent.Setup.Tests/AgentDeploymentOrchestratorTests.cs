@@ -172,6 +172,9 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
         Assert.True(journalStore.Exists);
         Assert.Equal("rollback-completed", journalStore.Read().Stage);
+        Assert.Equal(
+            DeploymentJournalStore.CurrentFormatVersion,
+            journalStore.Read().FormatVersion);
         Assert.Empty(Directory.GetDirectories(
             Path.GetDirectoryName(fixture.Paths.InstallDirectory)!,
             $"{Path.GetFileName(fixture.Paths.InstallDirectory)}.__failed_*"));
@@ -502,7 +505,7 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
-    public async Task DeployAsync_RollbackMarkerWithStagingAndFailedRemnantsFailsClosed()
+    public async Task DeployAsync_LegacyRollbackMarkerIsRejectedBeforeMutation()
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
@@ -512,6 +515,88 @@ public sealed class AgentDeploymentOrchestratorTests
             mutationStarted: true,
             installMovedToBackup: true,
             stagingActivated: true);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal(
+            DeploymentJournalStore.LegacyFormatVersion,
+            journalStore.Read().FormatVersion);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_LegacyPendingRecoveryUpgradesJournalBeforeRollback()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.JournalDeleteFailuresRemaining = 1;
+        var journalStore = WritePendingJournal(
+            fixture,
+            "service-stop-pending",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: false);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal(
+            DeploymentJournalStore.CurrentFormatVersion,
+            journalStore.Read().FormatVersion);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+    }
+
+    [Fact]
+    public async Task DeployAsync_LegacyJournalUpgradeFailurePreservesStateBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.JournalUpgradeWriteFailuresRemaining = 1;
+        var journalStore = WritePendingJournal(
+            fixture,
+            "service-stop-pending",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: false);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal(
+            DeploymentJournalStore.LegacyFormatVersion,
+            journalStore.Read().FormatVersion);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_RollbackMarkerWithStagingAndFailedRemnantsFailsClosed()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "rollback-completed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
         var pending = journalStore.Read();
         Directory.CreateDirectory(pending.StagingDirectory);
         Directory.CreateDirectory(pending.FailedDirectory);
@@ -526,6 +611,198 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
         Assert.True(Directory.Exists(pending.StagingDirectory));
         Assert.True(Directory.Exists(pending.FailedDirectory));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task DeployAsync_ContradictoryRollbackRemnantFailsBeforeServiceMutation(
+        bool createBackup,
+        bool createFailed)
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "service-stop-pending",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: false,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        Directory.CreateDirectory(
+            createBackup
+                ? pending.BackupDirectory
+                : pending.FailedDirectory);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.Equal(createBackup, Directory.Exists(pending.BackupDirectory));
+        Assert.Equal(createFailed, Directory.Exists(pending.FailedDirectory));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_ActiveRollbackWithStagingAndFailedRemnantsFailsBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "activation-pending",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        Directory.CreateDirectory(pending.StagingDirectory);
+        Directory.CreateDirectory(pending.FailedDirectory);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.True(Directory.Exists(pending.StagingDirectory));
+        Assert.True(Directory.Exists(pending.FailedDirectory));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_PostDataStageWithoutDataDecisionFailsBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "service-configured",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion,
+            dataDirectoryExistedBefore: false,
+            dataDirectoryCreated: false);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_PreDataRollbackMarkerRejectsUnexpectedDataDirectory()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        Directory.CreateDirectory(fixture.Paths.DataDirectory);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "rollback-completed",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion,
+            dataDirectoryExistedBefore: false,
+            dataDirectoryCreated: false);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.True(Directory.Exists(fixture.Paths.DataDirectory));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Theory]
+    [InlineData("service-stop-pending")]
+    [InlineData("rollback-completed")]
+    public async Task DeployAsync_MissingPreexistingDataFailsBeforeServiceMutation(string stage)
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        Directory.Delete(fixture.Paths.DataDirectory, recursive: true);
+        var journalStore = WritePendingJournal(
+            fixture,
+            stage,
+            mutationStarted: true,
+            installMovedToBackup: stage == "rollback-completed",
+            stagingActivated: stage == "rollback-completed",
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion,
+            dataDirectoryExistedBefore: true,
+            dataDirectoryCreated: false);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.False(Directory.Exists(fixture.Paths.DataDirectory));
+        Assert.DoesNotContain("stop", fixture.Services.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task DeployAsync_CommittedJournalMissingAuthoritativeStatePreservesRecoveryData(
+        bool removeInstall,
+        bool removeData)
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion,
+            dataDirectoryExistedBefore: true,
+            dataDirectoryCreated: false);
+        var pending = journalStore.Read();
+        if (removeInstall)
+        {
+            Directory.Move(fixture.Paths.InstallDirectory, pending.BackupDirectory);
+        }
+        if (removeData)
+        {
+            Directory.Delete(fixture.Paths.DataDirectory, recursive: true);
+        }
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RecoveryRequired, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.Equal(removeInstall, Directory.Exists(pending.BackupDirectory));
+        Assert.Equal(removeData, !Directory.Exists(fixture.Paths.DataDirectory));
         Assert.DoesNotContain("stop", fixture.Services.Operations);
         Assert.DoesNotContain("restore", fixture.Services.Operations);
     }
@@ -600,12 +877,15 @@ public sealed class AgentDeploymentOrchestratorTests
         string stage,
         bool mutationStarted,
         bool installMovedToBackup,
-        bool stagingActivated)
+        bool stagingActivated,
+        int formatVersion = DeploymentJournalStore.LegacyFormatVersion,
+        bool dataDirectoryExistedBefore = true,
+        bool dataDirectoryCreated = false)
     {
         var transactionId = new string('c', 32);
         var store = new DeploymentJournalStore(fixture.FileSystem, fixture.Paths);
         store.Write(new DeploymentJournal(
-            1,
+            formatVersion,
             transactionId,
             stage,
             "0.10.1-poc",
@@ -615,8 +895,8 @@ public sealed class AgentDeploymentOrchestratorTests
             mutationStarted,
             installMovedToBackup,
             stagingActivated,
-            true,
-            false,
+            dataDirectoryExistedBefore,
+            dataDirectoryCreated,
             fixture.Services.State,
             fixture.Firewall.State,
             FirewallRuleSnapshot.Missing(SetupConstants.LegacyFirewallRuleName)));

@@ -24,6 +24,9 @@ public sealed class DeploymentJournalStore(
     ISetupFileSystem fileSystem,
     DeploymentPaths paths)
 {
+    public const int LegacyFormatVersion = 1;
+    public const int CurrentFormatVersion = 2;
+
     public string JournalPath =>
         Path.Combine(paths.OperationsDirectory, "agent-native-setup-transaction.json");
 
@@ -37,7 +40,7 @@ public sealed class DeploymentJournalStore(
                 fileSystem.ReadAllText(JournalPath),
                 JsonOptions);
             if (journal is null ||
-                journal.FormatVersion != 1 ||
+                journal.FormatVersion is not (LegacyFormatVersion or CurrentFormatVersion) ||
                 string.IsNullOrWhiteSpace(journal.TransactionId) ||
                 string.IsNullOrWhiteSpace(journal.Stage) ||
                 journal.PreviousService is null ||

@@ -16,6 +16,7 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public DirectoryAccessKind? AccessFailureKind { get; set; }
     public int AccessFailureOccurrence { get; set; } = 1;
     public int JournalDeleteFailuresRemaining { get; set; }
+    public int JournalUpgradeWriteFailuresRemaining { get; set; }
     public int RollbackMarkerWriteFailuresRemaining { get; set; }
     public int FailedDirectoryCleanupFailuresRemaining { get; set; }
     public int ActivationMoveFailuresRemaining { get; set; }
@@ -26,6 +27,15 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public string ReadAllText(string path) => _inner.ReadAllText(path);
     public void WriteAllTextAtomic(string path, string contents)
     {
+        if (JournalUpgradeWriteFailuresRemaining > 0 &&
+            contents.Contains("\"FormatVersion\": 2", StringComparison.Ordinal) &&
+            File.Exists(path) &&
+            File.ReadAllText(path).Contains("\"FormatVersion\": 1", StringComparison.Ordinal))
+        {
+            JournalUpgradeWriteFailuresRemaining--;
+            throw new IOException("simulated journal format upgrade failure");
+        }
+
         if (RollbackMarkerWriteFailuresRemaining > 0 &&
             contents.Contains("\"Stage\": \"rollback-completed\"", StringComparison.Ordinal))
         {
