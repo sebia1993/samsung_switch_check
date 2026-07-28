@@ -3,7 +3,7 @@
 삼성 `IES4224GP`, `IES4028XP`, `IES4226XP` 스위치에 Telnet으로 접속해 조회 명령을
 실행하고, 결과와 변경점을 운영자 PC에서 확인하는 Windows 전용 도구입니다.
 
-현재 버전은 `v0.9.22-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
+현재 버전은 `v0.9.23-poc`입니다. 실제 세 모델의 펌웨어에서 검증하기 전까지는
 운영 확정판이 아닌 현장 검증용 프리릴리스로 취급해야 합니다.
 
 ```text
@@ -47,8 +47,8 @@ show syslog tail num 100
 
 GitHub Release의 Assets에서 아래 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.22-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.22-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.23-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.23-poc-win-x64.zip`
 
 두 ZIP에는 바로 열어 볼 수 있는 `SamsungSwitchWatch_User_Manual_KO.pdf`가 포함됩니다.
 편집용 DOCX는 배포 ZIP에 넣지 않습니다.
@@ -92,11 +92,14 @@ Viewer ZIP을 운영자 PC에 풀고 `Install-or-Update-Viewer.cmd`를 더블클
 전체 파일을 두 번 검증하고, 설치된 파일의 SHA-256과 Agent 연결을 하지 않는 무화면
 자체점검을 통과한 뒤 설치를 확정합니다.
 
-이전 Program Files 버전은 다음 업데이트까지 관리자 보호 rollback 슬롯에 남습니다. 원래
-사용자 권한의 실행 검사나 바로 가기 반영이 실패하면 복구 UAC를 통해 이전 버전을 되돌리며,
-새 설치 파일이 보안 제품에 의해 격리되거나 손상된 경우에도 검증된 rollback 슬롯을 먼저
-복원합니다. 제거 중 실행 프로세스나 활성 프로그램 폴더를 정리하지 못하면 rollback 슬롯을
-삭제하지 않습니다.
+이전 Program Files 버전은 다음 업데이트까지 관리자 보호 rollback 슬롯에 남습니다. 다음
+업데이트에서는 정상인 현재 버전을 새 rollback 기준으로 회전하므로 실패 시 정확히 직전
+버전을 복원합니다. 원래 사용자 권한의 실행 검사나 바로 가기 반영이 실패하면 복구 UAC를
+통해 이전 버전을 되돌립니다. 각 관리자 설치는 고유 작업 ID와 활성·rollback 매니페스트
+해시를 관리자 전용 marker에 결속합니다. 같은 ZIP을 다시 설치한 경우에도 늦은 복구 요청은
+작업 ID 불일치로 중단하고 두 설치 증거를 보존합니다. 새 설치 파일이 보안 제품에 의해 격리되거나 손상된
+경우에도 검증된 rollback 슬롯을 먼저 복원합니다. 제거 중 실행 프로세스나 활성 프로그램
+폴더를 정리하지 못하면 rollback 슬롯과 작업 marker를 삭제하지 않습니다.
 검증된 기존 사용자별 프로그램 폴더와 `%LOCALAPPDATA%\SamsungSwitchWatch`의 사용자
 데이터는 자동 삭제하지 않습니다.
 
@@ -133,7 +136,7 @@ dotnet restore .\SamsungSwitchWatch.sln --locked-mode
 릴리스 패키지는 깨끗한 Git 작업 트리에서 만듭니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.9.22-poc
+.\scripts\build-release.ps1 -Version 0.9.23-poc
 ```
 
 `artifacts\release` 내부에는 ZIP 2개와 내부 검증용 매니페스트·SBOM·해시 파일이 생깁니다.
@@ -162,6 +165,7 @@ GitHub Release의 사용자 정의 Assets에는 Agent ZIP과 Viewer ZIP, 정확�
 - [보안 설계](docs/SECURITY.md)
 - [현장 POC 체크리스트](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.9.23-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.23_POC_KO.md)
 - [0.9.22-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.22_POC_KO.md)
 - [0.9.21-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.21_POC_KO.md)
 - [0.9.20-poc 릴리스 노트](docs/RELEASE_NOTES_0.9.20_POC_KO.md)
