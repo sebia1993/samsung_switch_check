@@ -2213,6 +2213,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 await ProbeAndRecordMonitoredOutputAsync(
                     profile,
                     secrets,
+                    client,
                     definition,
                     knownCapabilities.FirstOrDefault(item =>
                         item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
@@ -2310,17 +2311,22 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private async Task ProbeAndRecordMonitoredOutputAsync(
         ManagedDeviceProfile profile,
         ManagedDeviceSecrets secrets,
+        IAgentClient sourceClient,
         ReadOnlyCommandDefinition definition,
         CollectorCapabilityDto? previousCapability,
         TelnetCommandOutputDto? initialOutput,
         CancellationToken cancellationToken)
     {
+        if (!ReferenceEquals(sourceClient, _client)) return;
+
         var assessment = AssessMonitoringOutput(definition.Id, initialOutput);
         if (assessment.ExplicitlyUnsupported)
         {
             foreach (var alternate in definition.CandidateCommands.Where(candidate =>
                          !candidate.Equals(initialOutput?.Command, StringComparison.OrdinalIgnoreCase)))
             {
+                if (!ReferenceEquals(sourceClient, _client)) return;
+
                 var fallbackRequest = new TelnetExecuteRequestDto(
                     Guid.NewGuid().ToString("N"),
                     profile.Host,
@@ -2331,8 +2337,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     secrets.EnablePassword,
                     "monitor",
                     [alternate]);
-                var fallback = await _client.ExecuteTelnetAsync(fallbackRequest, cancellationToken)
+                var fallback = await sourceClient.ExecuteTelnetAsync(fallbackRequest, cancellationToken)
                     .ConfigureAwait(false);
+                if (!ReferenceEquals(sourceClient, _client)) return;
                 if (!fallback.Success)
                 {
                     throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
@@ -2344,6 +2351,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 if (!assessment.ExplicitlyUnsupported) break;
             }
         }
+
+        if (!ReferenceEquals(sourceClient, _client)) return;
 
         if (assessment.Ready)
         {

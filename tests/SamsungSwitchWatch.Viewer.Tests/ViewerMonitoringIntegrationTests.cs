@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
@@ -141,6 +142,49 @@ public sealed class ViewerMonitoringIntegrationTests
             }
             finally
             {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task AgentSwitch_DuringCapabilityFallback_NeverUsesReplacementForOldRequest()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var oldClient = new AgentSwitchRaceClient();
+            var replacementClient = new RecordingClient();
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new QueueClientFactory(oldClient, replacementClient),
+                deviceStore: devices,
+                monitoringStore: new ViewerMonitoringStore(Path.Combine(folder, "monitor.json")));
+            try
+            {
+                await viewModel.InitializeAsync();
+                await oldClient.OutputEnumerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                await viewModel.SwitchClientAsync(new ViewerSettings { DemoMode = true })
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+
+                oldClient.ReleaseOutputEnumeration.TrySetResult();
+                await viewModel.RunMonitoringCycleAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+
+                var replacementRequests = replacementClient.ExecuteRequests.ToArray();
+                Assert.NotEmpty(replacementRequests);
+                Assert.All(replacementRequests, request => Assert.Equal(2, request.Commands.Count));
+            }
+            finally
+            {
+                oldClient.ReleaseOutputEnumeration.TrySetResult();
                 await viewModel.DisposeAsync();
             }
         }
@@ -594,6 +638,13 @@ public sealed class ViewerMonitoringIntegrationTests
         public IAgentClient Create(ViewerSettings settings) => client;
     }
 
+    private sealed class QueueClientFactory(params IAgentClient[] clients) : IAgentClientFactory
+    {
+        private readonly Queue<IAgentClient> _clients = new(clients);
+
+        public IAgentClient Create(ViewerSettings settings) => _clients.Dequeue();
+    }
+
     private abstract class StatelessClientBase : IAgentClient
     {
         public bool SupportsStatelessV4 => true;
@@ -725,6 +776,71 @@ public sealed class ViewerMonitoringIntegrationTests
                 DateTimeOffset.UtcNow)).ToArray();
             return Task.FromResult(Result(request.RequestId, outputs));
         }
+    }
+
+    private sealed class AgentSwitchRaceClient : StatelessClientBase
+    {
+        private int _executeCount;
+
+        public TaskCompletionSource OutputEnumerationStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseOutputEnumeration { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _executeCount) != 1)
+            {
+                return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+            }
+
+            var outputs = request.Commands.Select(command => new TelnetCommandOutputDto(
+                command,
+                command.Equals("show port status", StringComparison.OrdinalIgnoreCase)
+                    ? "% Invalid command"
+                    : Syslog((1, "link state stable")),
+                false,
+                DateTimeOffset.UtcNow)).ToArray();
+            return Task.FromResult(Result(
+                request.RequestId,
+                new BlockingCommandOutputList(
+                    outputs,
+                    OutputEnumerationStarted,
+                    ReleaseOutputEnumeration)));
+        }
+    }
+
+    private sealed class RecordingClient : StatelessClientBase
+    {
+        public ConcurrentQueue<TelnetExecuteRequestDto> ExecuteRequests { get; } = new();
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            ExecuteRequests.Enqueue(request);
+            return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+        }
+    }
+
+    private sealed class BlockingCommandOutputList(
+        IReadOnlyList<TelnetCommandOutputDto> items,
+        TaskCompletionSource enumerationStarted,
+        TaskCompletionSource releaseEnumeration) : IReadOnlyList<TelnetCommandOutputDto>
+    {
+        public int Count => items.Count;
+        public TelnetCommandOutputDto this[int index] => items[index];
+
+        public IEnumerator<TelnetCommandOutputDto> GetEnumerator()
+        {
+            enumerationStarted.TrySetResult();
+            releaseEnumeration.Task.GetAwaiter().GetResult();
+            return items.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private sealed class BlockingConnectionTestClient : StatelessClientBase
