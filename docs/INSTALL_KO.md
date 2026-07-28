@@ -2,18 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.1-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.2-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.1-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.1-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.2-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.2-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.1-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.2-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
+
+Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
+Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.2-poc` Agent ZIP의 Setup을
+다시 실행하십시오.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
 `SHA256SUMS.txt`는 내부 검증용이라 별도 Asset으로 배포하지 않습니다.

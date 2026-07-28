@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.1 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.2 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.1-poc"
+VERSION = "0.10.2-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
