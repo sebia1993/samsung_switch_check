@@ -557,6 +557,26 @@ public sealed class ViewerConnectionTests
         Assert.DoesNotContain("show port status", message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("VIEWER_MONITOR_STATE_CORRUPT", "다시 시작", "새 기준")]
+    [InlineData("VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED", "같거나 최신", "Viewer")]
+    [InlineData("VIEWER_MONITOR_STATE_UNAVAILABLE", "권한", "잠금")]
+    public void MonitorStateFailureMessages_ExplainRecoveryWithoutExposingSecrets(
+        string code,
+        string expectedFirst,
+        string expectedSecond)
+    {
+        var message = ViewerConnectionMessages.ForCode(code);
+
+        Assert.Contains(expectedFirst, message, StringComparison.Ordinal);
+        Assert.Contains(expectedSecond, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.0.2.10", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("login-secret", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("enable-secret", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("show port status", message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Copy_PreservesWindowAndCursorStateWithoutSharingCursorDictionary()
     {

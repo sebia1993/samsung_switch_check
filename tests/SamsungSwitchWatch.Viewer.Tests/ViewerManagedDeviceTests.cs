@@ -723,6 +723,10 @@ public sealed class ViewerManagedDeviceTests
             var store = new ViewerMonitoringStore(path);
             var device = Profile();
 
+            Assert.Equal(ViewerMonitoringLoadStatus.Ok, store.LastLoadStatus);
+            Assert.True(store.IsOperational);
+            Assert.Null(store.LoadErrorCode);
+
             var gap = Assert.Single(store.BeginSession([device]));
             Assert.Equal("감시 공백", gap.Kind);
             Assert.Empty(store.RecordOutput(
@@ -1103,6 +1107,9 @@ public sealed class ViewerManagedDeviceTests
             var store = new ViewerMonitoringStore(path);
 
             Assert.Empty(store.LoadEvents());
+            Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+            Assert.False(store.IsOperational);
+            Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
             Assert.False(File.Exists(path));
             Assert.Single(Directory.GetFiles(folder, "monitor.json.corrupt-*"));
         }
@@ -1112,39 +1119,351 @@ public sealed class ViewerManagedDeviceTests
         }
     }
 
-    [Fact]
-    public void MonitoringStore_ReadIoFailurePropagatesWithoutQuarantining()
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void MonitoringStore_ReadIoFailureIsNonOperationalWithoutQuarantining(
+        Type exceptionType)
     {
         var persistence = new TestMonitoringPersistence
         {
-            ReadException = new UnauthorizedAccessException("simulated access denial")
+            ReadException = (Exception)Activator.CreateInstance(
+                exceptionType,
+                "simulated storage failure")!
         };
 
-        Assert.Throws<UnauthorizedAccessException>(
-            () => new ViewerMonitoringStore("monitor.json", persistence));
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.StorageUnavailable,
+            store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_UNAVAILABLE", store.LoadErrorCode);
         Assert.Equal(0, persistence.QuarantineCount);
         Assert.Equal(0, persistence.WriteCount);
     }
 
-    [Fact]
-    public void MonitoringStore_SaveFailureRollsBackFailureAndSequence()
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void MonitoringStore_QuarantineFailureIsReportedAsStorageUnavailable(
+        Type exceptionType)
     {
         var persistence = new TestMonitoringPersistence
         {
-            WriteException = new IOException("simulated write failure")
+            Content = "{not-json",
+            QuarantineException = (Exception)Activator.CreateInstance(
+                exceptionType,
+                "simulated quarantine failure")!
+        };
+
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.StorageUnavailable,
+            store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_UNAVAILABLE", store.LoadErrorCode);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Equal("{not-json", persistence.Content);
+        Assert.Equal(0, persistence.WriteCount);
+        var blocked = Assert.Throws<InvalidOperationException>(store.Heartbeat);
+        Assert.Equal("VIEWER_MONITOR_STATE_UNAVAILABLE", blocked.Message);
+        Assert.Equal(0, persistence.WriteCount);
+    }
+
+    [Fact]
+    public void MonitoringStore_FutureSchemaIsPreservedAndReportedAsUnsupported()
+    {
+        const string original = """
+        {
+          "SchemaVersion": 4,
+          "NextSequence": 0,
+          "Baselines": {},
+          "ActiveFailures": {},
+          "ActiveInterfaceConditions": {},
+          "Capabilities": {},
+          "Events": []
+        }
+        """;
+        var persistence = new TestMonitoringPersistence { Content = original };
+
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.VersionUnsupported,
+            store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal(
+            "VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED",
+            store.LoadErrorCode);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public void MonitoringStore_InvalidUtf8PhysicalFileIsQuarantinedAsCorrupt()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var path = Path.Combine(folder, "monitor.json");
+            var validSchemaThreeJson = """
+            {
+              "SchemaVersion": 3,
+              "NextSequence": 1,
+              "Baselines": {},
+              "ActiveFailures": {},
+              "ActiveInterfaceConditions": {},
+              "Capabilities": {},
+              "Events": [{
+                "Sequence": 1,
+                "AgentEventId": "viewer-1",
+                "DeviceId": "sw-01",
+                "DeviceName": "ACCESS-SW-01",
+                "OccurredAt": "2026-07-28T00:00:00+00:00",
+                "Severity": 1,
+                "Kind": "test",
+                "Title": "test",
+                "Detail": "test"
+              }]
+            }
+            """;
+            var invalidUtf8 = System.Text.Encoding.UTF8.GetBytes(
+                validSchemaThreeJson);
+            var deviceNameBytes = System.Text.Encoding.UTF8.GetBytes(
+                "ACCESS-SW-01");
+            var deviceNameOffset = invalidUtf8.AsSpan().IndexOf(deviceNameBytes);
+            Assert.True(deviceNameOffset >= 0);
+            invalidUtf8[deviceNameOffset] = 0xC3;
+            invalidUtf8[deviceNameOffset + 1] = 0x28;
+            File.WriteAllBytes(path, invalidUtf8);
+
+            var store = new ViewerMonitoringStore(path);
+
+            Assert.Empty(store.LoadEvents());
+            Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+            Assert.False(store.IsOperational);
+            Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
+            Assert.False(File.Exists(path));
+            var quarantine = Assert.Single(
+                Directory.GetFiles(folder, "monitor.json.corrupt-*"));
+            Assert.Equal(invalidUtf8, File.ReadAllBytes(quarantine));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    public static TheoryData<string> RequiredMonitoringStateProperties => new()
+    {
+        "SchemaVersion",
+        "NextSequence",
+        "Baselines",
+        "ActiveFailures",
+        "ActiveInterfaceConditions",
+        "Capabilities",
+        "Events"
+    };
+
+    [Theory]
+    [MemberData(nameof(RequiredMonitoringStateProperties))]
+    public void MonitoringStore_CurrentSchemaMissingRequiredPropertyIsCorrupt(
+        string propertyName)
+    {
+        var state = JsonNode.Parse(CompleteMonitoringStateJson())!.AsObject();
+        Assert.True(state.Remove(propertyName));
+        var persistence = new TestMonitoringPersistence
+        {
+            Content = state.ToJsonString()
+        };
+
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+        Assert.Equal(0, persistence.WriteCount);
+    }
+
+    [Fact]
+    public void MonitoringStore_NextSequenceBelowStoredEventMaximumIsCorrupt()
+    {
+        var persistence = MonitoringPersistenceWithClosedFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        state["NextSequence"] = 1;
+        persistence.Content = state.ToJsonString();
+
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+    }
+
+    [Fact]
+    public void MonitoringStore_DuplicateAgentEventIdIsCorrupt()
+    {
+        var persistence = MonitoringPersistenceWithClosedFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        var events = state["Events"]!.AsArray();
+        var duplicateId = events[0]!["AgentEventId"]!.GetValue<string>();
+        events[1]!.AsObject()["AgentEventId"] = duplicateId;
+        persistence.Content = state.ToJsonString();
+
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+    }
+
+    public static TheoryData<string> RequiredMonitoringEventStringProperties => new()
+    {
+        "DeviceName",
+        "Kind",
+        "Title",
+        "Detail"
+    };
+
+    [Theory]
+    [MemberData(nameof(RequiredMonitoringEventStringProperties))]
+    public void MonitoringStore_CurrentSchemaMissingRequiredEventStringIsCorrupt(
+        string propertyName)
+    {
+        var persistence = MonitoringPersistenceWithClosedFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        var firstEvent = state["Events"]![0]!.AsObject();
+        Assert.True(firstEvent.Remove(propertyName));
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    [Fact]
+    public void MonitoringStore_CurrentSchemaInvalidEventSeverityIsCorrupt()
+    {
+        var persistence = MonitoringPersistenceWithClosedFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        state["Events"]![0]!["Severity"] = 999;
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    [Fact]
+    public void MonitoringStore_CurrentSchemaMissingEventOccurrenceIsCorrupt()
+    {
+        var persistence = MonitoringPersistenceWithClosedFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        Assert.True(state["Events"]![0]!.AsObject().Remove("OccurredAt"));
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    [Fact]
+    public void MonitoringStore_CurrentSchemaMissingCapabilityStateIsCorrupt()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var source = new ViewerMonitoringStore("monitor.json", persistence);
+        source.RecordCapability(
+            "sw-01",
+            new CollectorCapabilityDto("interface_status", true, "Ready"));
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        var capability = state["Capabilities"]!["sw-01"]![0]!.AsObject();
+        Assert.True(capability.Remove("State"));
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    public static TheoryData<string> ActiveReferenceDamage => new()
+    {
+        "Recovered",
+        "DeviceId",
+        "ConditionKey"
+    };
+
+    [Theory]
+    [MemberData(nameof(ActiveReferenceDamage))]
+    public void MonitoringStore_CurrentSchemaInvalidActiveFailureReferenceIsCorrupt(
+        string damage)
+    {
+        var persistence = MonitoringPersistenceWithActiveFailure();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        DamageActiveEvent(state, damage);
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    [Theory]
+    [MemberData(nameof(ActiveReferenceDamage))]
+    public void MonitoringStore_CurrentSchemaInvalidActiveInterfaceReferenceIsCorrupt(
+        string damage)
+    {
+        var persistence = MonitoringPersistenceWithActiveInterfaceCondition();
+        var state = JsonNode.Parse(persistence.Content!)!.AsObject();
+        DamageActiveEvent(state, damage);
+        persistence.Content = state.ToJsonString();
+
+        AssertMonitoringStateIsQuarantinedAsCorrupt(persistence);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void MonitoringStore_SaveFailureTransitionsToFailClosedStorageState(
+        Type exceptionType)
+    {
+        var expected = (Exception)Activator.CreateInstance(
+            exceptionType,
+            "simulated write failure")!;
+        var persistence = new TestMonitoringPersistence
+        {
+            WriteException = expected
         };
         var store = new ViewerMonitoringStore("monitor.json", persistence);
         var device = Profile();
 
-        Assert.Throws<IOException>(() => store.RecordFailure(device, "TCP_TIMEOUT"));
+        var thrown = Record.Exception(
+            () => store.RecordFailure(device, "TCP_TIMEOUT"));
+
+        Assert.Same(expected, thrown);
         Assert.Null(store.GetActiveFailureCode(device.Id));
         Assert.Empty(store.LoadEvents());
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.StorageUnavailable,
+            store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_UNAVAILABLE", store.LoadErrorCode);
+        Assert.Equal(1, persistence.WriteCount);
 
         persistence.WriteException = null;
-        var created = Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
+        var blocked = Assert.Throws<InvalidOperationException>(
+            () => store.RecordFailure(device, "TCP_TIMEOUT"));
+        Assert.Equal("VIEWER_MONITOR_STATE_UNAVAILABLE", blocked.Message);
+        Assert.Equal(1, persistence.WriteCount);
 
+        var restarted = new ViewerMonitoringStore("monitor.json", persistence);
+        var created = Assert.Single(
+            restarted.RecordFailure(device, "TCP_TIMEOUT"));
         Assert.Equal(1, created.Sequence);
-        Assert.Equal("TCP_TIMEOUT", store.GetActiveFailureCode(device.Id));
     }
 
     [Fact]
@@ -1169,10 +1488,19 @@ public sealed class ViewerManagedDeviceTests
         Assert.Equal(persistedBaseline, persistence.Content);
         Assert.Empty(store.LoadEvents());
         Assert.Equal(0, store.GetActiveInterfaceConditionCount(device.Id));
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.StorageUnavailable,
+            store.LastLoadStatus);
 
         persistence.WriteException = null;
+        Assert.Throws<InvalidOperationException>(
+            () => store.RecordOutput(
+                device,
+                "show port status",
+                PortStatus(("1", "Down"))));
+        var restarted = new ViewerMonitoringStore("monitor.json", persistence);
         var created = Assert.Single(
-            store.RecordOutput(
+            restarted.RecordOutput(
                 device,
                 "show port status",
                 PortStatus(("1", "Down"))));
@@ -1207,9 +1535,15 @@ public sealed class ViewerManagedDeviceTests
         Assert.Equal("TCP_TIMEOUT", store.GetActiveFailureCode(device.Id));
         Assert.Equal(1, store.GetActiveInterfaceConditionCount(device.Id));
         Assert.All(store.LoadEvents(), item => Assert.False(item.Recovered));
+        Assert.Equal(
+            ViewerMonitoringLoadStatus.StorageUnavailable,
+            store.LastLoadStatus);
 
         persistence.WriteException = null;
-        var closed = store.ResetDeviceCollectionState(device.Id);
+        Assert.Throws<InvalidOperationException>(
+            () => store.ResetDeviceCollectionState(device.Id));
+        var restarted = new ViewerMonitoringStore("monitor.json", persistence);
+        var closed = restarted.ResetDeviceCollectionState(device.Id);
 
         Assert.Equal(2, closed.Count);
         Assert.All(closed, item =>
@@ -1220,11 +1554,11 @@ public sealed class ViewerManagedDeviceTests
             Assert.NotNull(item.RecoveredAt);
             Assert.Contains("이전 상태 추적을 종료", item.Detail, StringComparison.Ordinal);
         });
-        Assert.Empty(store.LoadCapabilities(device.Id));
-        Assert.Null(store.GetActiveFailureCode(device.Id));
-        Assert.Equal(0, store.GetActiveInterfaceConditionCount(device.Id));
-        Assert.Equal(2, store.LoadEvents().Count);
-        Assert.All(store.LoadEvents(), item => Assert.True(item.Recovered));
+        Assert.Empty(restarted.LoadCapabilities(device.Id));
+        Assert.Null(restarted.GetActiveFailureCode(device.Id));
+        Assert.Equal(0, restarted.GetActiveInterfaceConditionCount(device.Id));
+        Assert.Equal(2, restarted.LoadEvents().Count);
+        Assert.All(restarted.LoadEvents(), item => Assert.True(item.Recovered));
 
         var persisted = JsonNode.Parse(persistence.Content!)!.AsObject();
         Assert.Empty(persisted["Baselines"]!.AsObject());
@@ -1233,7 +1567,7 @@ public sealed class ViewerManagedDeviceTests
         Assert.Empty(persisted["ActiveInterfaceConditions"]!.AsObject());
 
         var writeCount = persistence.WriteCount;
-        Assert.Empty(store.ResetDeviceCollectionState(device.Id));
+        Assert.Empty(restarted.ResetDeviceCollectionState(device.Id));
         Assert.Equal(writeCount, persistence.WriteCount);
     }
 
@@ -1616,8 +1950,10 @@ public sealed class ViewerManagedDeviceTests
                 await viewModel.InitializeAsync();
                 await WaitUntilAsync(() =>
                     viewModel.IsMonitoringCredentialBlocked(saved.Id)
-                    && viewModel.OperationMessage.Contains(
-                        "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                    && client.ExecuteCount == 1);
+                await WaitUntilAsync(() =>
+                    viewModel.OperationMessage.Contains(
+                        "VIEWER_MONITOR_STATE_UNAVAILABLE",
                         StringComparison.Ordinal));
 
                 Assert.Equal(1, client.ExecuteCount);
@@ -1625,9 +1961,8 @@ public sealed class ViewerManagedDeviceTests
 
                 await viewModel.RunMonitoringCycleSafelyAsync(CancellationToken.None);
 
-                Assert.Contains("인증 실패", viewModel.OperationMessage, StringComparison.Ordinal);
                 Assert.Contains(
-                    "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE",
                     viewModel.OperationMessage,
                     StringComparison.Ordinal);
 
@@ -1687,6 +2022,90 @@ public sealed class ViewerManagedDeviceTests
                 $"\"{entry.Message}\"\r\n" +
                 "level: 6, module: 6, function: 1, and event no.: 1"));
 
+    private static string CompleteMonitoringStateJson() => """
+    {
+      "SchemaVersion": 3,
+      "NextSequence": 0,
+      "Baselines": {},
+      "ActiveFailures": {},
+      "ActiveInterfaceConditions": {},
+      "Capabilities": {},
+      "Events": []
+    }
+    """;
+
+    private static TestMonitoringPersistence MonitoringPersistenceWithClosedFailure()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var source = new ViewerMonitoringStore("monitor.json", persistence);
+        var device = Profile();
+        Assert.Single(source.RecordFailure(device, "TCP_TIMEOUT"));
+        Assert.Equal(2, source.RecordSuccess(device).Count);
+        return persistence;
+    }
+
+    private static TestMonitoringPersistence MonitoringPersistenceWithActiveFailure()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var source = new ViewerMonitoringStore("monitor.json", persistence);
+        Assert.Single(source.RecordFailure(Profile(), "TCP_TIMEOUT"));
+        return persistence;
+    }
+
+    private static TestMonitoringPersistence MonitoringPersistenceWithActiveInterfaceCondition()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var source = new ViewerMonitoringStore("monitor.json", persistence);
+        var device = Profile();
+        Assert.Empty(source.RecordOutput(
+            device,
+            "show port status",
+            PortStatus(("1", "Up"))));
+        Assert.Single(source.RecordOutput(
+            device,
+            "show port status",
+            PortStatus(("1", "Down"))));
+        return persistence;
+    }
+
+    private static void DamageActiveEvent(JsonObject state, string damage)
+    {
+        var activeEvent = state["Events"]![0]!.AsObject();
+        switch (damage)
+        {
+            case "Recovered":
+                activeEvent["Recovered"] = true;
+                activeEvent["RecoveredAt"] = "2026-07-28T00:01:00+00:00";
+                break;
+            case "DeviceId":
+                activeEvent["DeviceId"] = "different-device";
+                break;
+            case "ConditionKey":
+                activeEvent["ConditionKey"] = "different-condition";
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(damage),
+                    damage,
+                    null);
+        }
+    }
+
+    private static void AssertMonitoringStateIsQuarantinedAsCorrupt(
+        TestMonitoringPersistence persistence)
+    {
+        var writeCount = persistence.WriteCount;
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+
+        Assert.Empty(store.LoadEvents());
+        Assert.Equal(ViewerMonitoringLoadStatus.Corrupt, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_MONITOR_STATE_CORRUPT", store.LoadErrorCode);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Null(persistence.Content);
+        Assert.Equal(writeCount, persistence.WriteCount);
+    }
+
     private static string TemporaryFolder()
     {
         var path = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerManaged", Guid.NewGuid().ToString("N"));
@@ -1744,10 +2163,11 @@ public sealed class ViewerManagedDeviceTests
 
     private sealed class TestMonitoringPersistence : IViewerMonitoringPersistence
     {
-        public string? Content { get; private set; }
+        public string? Content { get; set; }
         public Exception? ReadException { get; init; }
         public Exception? WriteException { get; set; }
         public Exception? WriteExceptionAfterSuccessfulWrites { get; set; }
+        public Exception? QuarantineException { get; init; }
         public int WriteCount { get; private set; }
         public int QuarantineCount { get; private set; }
 
@@ -1771,6 +2191,7 @@ public sealed class ViewerManagedDeviceTests
         public void Quarantine(string path, string destination)
         {
             QuarantineCount++;
+            if (QuarantineException is not null) throw QuarantineException;
             Content = null;
         }
     }

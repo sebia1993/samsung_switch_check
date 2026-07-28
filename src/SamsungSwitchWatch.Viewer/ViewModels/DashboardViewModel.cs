@@ -37,7 +37,11 @@ public static class StatusAggregator
             items.Count(item => item.Health == DeviceHealth.Critical),
             items.Count(item => item.Health == DeviceHealth.Disconnected),
             items.Count(item => item.Health == DeviceHealth.Loading),
-            items.Count(item => item.Health == DeviceHealth.Empty));
+            items.Count(item =>
+                item.Health == DeviceHealth.Empty
+                || item.CollectionState.Equals(
+                    "StoreUnavailable",
+                    StringComparison.OrdinalIgnoreCase)));
     }
 }
 
@@ -141,6 +145,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private IReadOnlyList<ManagedDeviceProfile> _lastManagedDeviceProfiles = [];
     private Task? _snapshotLoop;
     private Task? _monitorLoop;
+    private string? _monitoringStoreFailureCauseCode;
     private readonly SemaphoreSlim _monitorGate = new(1, 1);
     private readonly SemaphoreSlim _monitorConcurrency = new(2, 2);
 
@@ -253,6 +258,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public long AppliedChangeCursor => Interlocked.Read(ref _changeCursor);
     internal int ReadOnlyQueryHistoryCount => _readOnlyQueryHistory.Count;
     public bool HasManagedDeviceStore => _deviceStore is not null;
+    private bool IsMonitoringStoreOperational =>
+        _monitoringStore?.IsOperational == true;
 
     internal bool TryUpdateCurrentSettings(
         Action<ViewerSettings> update,
@@ -310,14 +317,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 ClearMonitoringCredentialBlock(result.Id);
             }
 
-            if (outcome.ConnectionIdentityChanged || !result.MonitoringEnabled)
+            if (IsMonitoringStoreOperational
+                && (outcome.ConnectionIdentityChanged || !result.MonitoringEnabled))
             {
                 warningCode = RunPostSaveCleanup(
                     () => lifecycleEvents =
                         _monitoringStore?.ResetDeviceCollectionState(result.Id) ?? [],
                     warningCode);
             }
-            else if (result.ConnectionVerified)
+            else if (IsMonitoringStoreOperational && result.ConnectionVerified)
             {
                 warningCode = RunPostSaveCleanup(
                     () => _monitoringStore?.ClearCapabilities(result.Id),
@@ -328,9 +336,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try
         {
             ReloadManagedDevices(result.Id);
-            if (_monitoringStore is not null)
+            if (IsMonitoringStoreOperational)
             {
-                ApplyEvents(_monitoringStore.LoadEvents(), false);
+                ApplyEvents(_monitoringStore!.LoadEvents(), false);
             }
         }
         catch
@@ -357,10 +365,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             {
                 AdvanceDeviceLifecycleRevisionUnsafe(id);
                 ClearMonitoringCredentialBlock(id);
-                warningCode = RunPostSaveCleanup(
+                warningCode = IsMonitoringStoreOperational
+                    ? RunPostSaveCleanup(
                     () => lifecycleEvents =
-                        _monitoringStore?.ResetDeviceCollectionState(id) ?? [],
-                    warningCode);
+                        _monitoringStore!.ResetDeviceCollectionState(id),
+                    warningCode)
+                    : warningCode;
             }
         }
         if (removed)
@@ -384,7 +394,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             result = _deviceStore.SetMonitoring(id, enabled);
             AdvanceDeviceLifecycleRevisionUnsafe(id);
-            lifecycleEvents = _monitoringStore?.ResetDeviceCollectionState(id) ?? [];
+            lifecycleEvents = IsMonitoringStoreOperational
+                ? _monitoringStore!.ResetDeviceCollectionState(id)
+                : [];
         }
         if (lifecycleEvents.Count > 0) ApplyEvents(lifecycleEvents, false);
         ReloadManagedDevices(id);
@@ -417,13 +429,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             var result = await _client.TestTelnetAsync(request, cancellationToken).ConfigureAwait(false);
             if (result.Success
                 && !string.IsNullOrWhiteSpace(draft.Id)
-                && _monitoringStore is not null)
+                && IsMonitoringStoreOperational)
             {
                 var profile = _deviceStore.Load().FirstOrDefault(item =>
                     item.Id.Equals(draft.Id, StringComparison.Ordinal));
                 if (profile is not null)
                 {
-                    var recoveries = _monitoringStore.RecordSuccess(profile);
+                    var recoveries = _monitoringStore!.RecordSuccess(profile);
                     if (recoveries.Count > 0) ApplyEvents(recoveries);
                     await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
                 }
@@ -818,7 +830,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         $"{(ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? "현재 확인" : "마지막 확인")} 정상"
         + (UnmonitoredCount > 0 ? $" · 미감시 {UnmonitoredCount}대" : string.Empty);
     public string MiniCurrentStatusText => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
-        ? MonitoredCount == 0
+        ? HasMonitoringStoreFailure
+            ? "Agent 연결됨 · 자동 감시 중지됨"
+        : MonitoredCount == 0
             ? "Agent 연결됨 · 감시 대상 없음"
             : "현재 감시 상태 확인됨"
         : "현재 상태 미확인";
@@ -840,6 +854,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentConnectionState.Offline => "원격 수집 PC 연결 끊김",
         AgentConnectionState.Reconnecting => "실시간 이벤트 재연결 중",
         AgentConnectionState.Stale => "원격 상태 수신 지연",
+        _ when HasMonitoringStoreFailure => "자동 감시 저장소 확인 필요",
         _ when CriticalCount > 0 && DisconnectedCount > 0 => $"장애 {CriticalCount}대 · 접속 끊김 {DisconnectedCount}대",
         _ when CriticalCount > 0 => $"장애 장비 {CriticalCount}대",
         _ when DisconnectedCount > 0 => $"접속 끊김 장비 {DisconnectedCount}대",
@@ -851,6 +866,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     };
     public string MiniIssueDetail => ConnectionState switch
     {
+        AgentConnectionState.Connected or AgentConnectionState.Demo when HasMonitoringStoreFailure =>
+            MonitoringStoreWarning() ?? "자동 감시 저장소를 사용할 수 없습니다.",
         AgentConnectionState.Connected or AgentConnectionState.Demo when MonitoredCount == 0 =>
             "장비 관리에서 접속 시험 후 주기 감시를 켜세요.",
         AgentConnectionState.Connected or AgentConnectionState.Demo =>
@@ -918,10 +935,28 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     CollectorSummary = "Viewer 주도형 Telnet 중계 · Agent 연결 확인 중";
                     ReadOnlyQueryMaxCommandLength = 128;
                     ReloadManagedDevices();
-                    if (_monitoringStore is not null)
+                    if (IsMonitoringStoreOperational)
                     {
-                        ApplyEvents(_monitoringStore.LoadEvents(), false);
-                        ApplyEvents(_monitoringStore.BeginSession(_lastManagedDeviceProfiles), false);
+                        ApplyEvents(_monitoringStore!.LoadEvents(), false);
+                        try
+                        {
+                            ApplyEvents(
+                                _monitoringStore.BeginSession(_lastManagedDeviceProfiles),
+                                false);
+                        }
+                        catch (Exception exception) when (
+                            IsMonitoringPersistenceFailure(exception)
+                            || (!IsMonitoringStoreOperational
+                                && _monitoringStore.LoadErrorCode is not null))
+                        {
+                            var errorCode = CurrentMonitoringStoreErrorCode(
+                                "VIEWER_MONITOR_STATE_WRITE_FAILED");
+                            Volatile.Write(
+                                ref _monitoringStoreFailureCauseCode,
+                                "VIEWER_MONITOR_STATE_WRITE_FAILED");
+                            TryWriteDiagnostic("monitoring-store-startup", errorCode);
+                            ApplyMonitoringStoreFailurePresentation(errorCode);
+                        }
                     }
                     RebuildCollectorHealth(DateTimeOffset.UtcNow);
                 }).ConfigureAwait(false);
@@ -956,6 +991,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         RebuildCollectorHealth(DateTimeOffset.UtcNow);
                         OperationMessage = settingsSaved
                             ? ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                              ?? MonitoringStoreWarning()
                               ?? "Agent 연결됨 · 장비와 계정은 이 Viewer에서 관리합니다."
                             : SettingsWriteFailureOperationMessage(settingsSaveErrorCode);
                         OnPropertyChanged(nameof(LastRefreshText));
@@ -967,7 +1003,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     await SetUnavailableStateAsync(exception, AgentChannel.Http).ConfigureAwait(false);
                 }
-                if (_monitoringStore is not null && _deviceStore is not null)
+                if (IsMonitoringStoreOperational && _deviceStore is not null)
                 {
                     _monitorLoop = Task.Run(() => MonitorLoopAsync(_lifetime.Token));
                 }
@@ -1178,12 +1214,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         CollectorSummary = "Viewer 주도형 Telnet 중계 준비";
                         ReadOnlyQueryMaxOutputBytes = identity.MaxOutputBytes;
                         ReloadManagedDevices();
-                        if (_monitoringStore is not null)
+                        if (IsMonitoringStoreOperational)
                         {
-                            ApplyEvents(_monitoringStore.LoadEvents(), false);
+                            ApplyEvents(_monitoringStore!.LoadEvents(), false);
                         }
                         RebuildCollectorHealth(DateTimeOffset.UtcNow);
                         OperationMessage = ManagedDeviceStoreWarning(_managedDeviceLoadStatus)
+                                           ?? MonitoringStoreWarning()
                                            ?? "Agent 연결 설정을 저장했습니다.";
                     }).ConfigureAwait(false);
                     if (!clean.DemoMode)
@@ -1193,7 +1230,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                             "AGENT_CONNECTED",
                             "recovered");
                     }
-                    if (_monitoringStore is not null
+                    if (IsMonitoringStoreOperational
                         && _deviceStore is not null
                         && (_monitorLoop is null || _monitorLoop.IsCompleted)
                         && !_lifetime.IsCancellationRequested)
@@ -1404,6 +1441,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             while (true)
             {
                 await RunMonitoringCycleSafelyAsync(cancellationToken).ConfigureAwait(false);
+                if (!IsMonitoringStoreOperational) return;
                 await Task.Delay(SnapshotInterval, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1412,6 +1450,16 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     internal async Task RunMonitoringCycleSafelyAsync(CancellationToken cancellationToken)
     {
+        if (!IsMonitoringStoreOperational
+            && _monitoringStore?.LoadErrorCode is not null)
+        {
+            await ReportMonitoringCycleFailureAsync(
+                Volatile.Read(ref _monitoringStoreFailureCauseCode)
+                ?? CurrentMonitoringStoreErrorCode(
+                    "VIEWER_MONITOR_STATE_UNAVAILABLE")).ConfigureAwait(false);
+            return;
+        }
+
         try
         {
             await RunMonitoringCycleAsync(cancellationToken).ConfigureAwait(false);
@@ -1419,6 +1467,13 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (Exception) when (
+            !IsMonitoringStoreOperational
+            && _monitoringStore?.LoadErrorCode is not null)
+        {
+            await ReportMonitoringCycleFailureAsync(
+                "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
         }
         catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
         {
@@ -1434,7 +1489,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     internal async Task RunMonitoringCycleAsync(CancellationToken cancellationToken = default)
     {
-        if (!_statelessV4 || _deviceStore is null || _monitoringStore is null || _disposed) return;
+        if (!_statelessV4 || _deviceStore is null || !IsMonitoringStoreOperational || _disposed) return;
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
         await _monitorGate.WaitAsync(linked.Token).ConfigureAwait(false);
         try
@@ -1458,13 +1513,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     exception,
                     AgentChannel.Http,
                     client).ConfigureAwait(false);
-                _monitoringStore.Heartbeat();
+                _monitoringStore!.Heartbeat();
                 return;
             }
             var workItems = CaptureMonitoringWorkItems();
             await Task.WhenAll(workItems.Select(workItem =>
                 MonitorDeviceAsync(workItem, client, linked.Token))).ConfigureAwait(false);
-            _monitoringStore.Heartbeat();
+            if (!IsMonitoringStoreOperational) return;
+            _monitoringStore!.Heartbeat();
         }
         finally
         {
@@ -1866,9 +1922,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         if (item is null || item.Acknowledged) return;
         try
         {
-            if (_statelessV4 && _monitoringStore is not null)
+            if (_statelessV4 && IsMonitoringStoreOperational)
             {
-                if (_monitoringStore.Acknowledge(item.AgentEventId))
+                if (_monitoringStore!.Acknowledge(item.AgentEventId))
                 {
                     await RunOnUiAsync(() =>
                     {
@@ -2301,6 +2357,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         {
             throw;
         }
+        catch (Exception) when (
+            !IsMonitoringStoreOperational
+            && _monitoringStore?.LoadErrorCode is not null)
+        {
+            if (!ReferenceEquals(client, _client)) return;
+            await ReportMonitoringCycleFailureAsync(
+                "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                workItem).ConfigureAwait(false);
+        }
         catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
         {
             if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
@@ -2370,6 +2435,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 }
                 await RunOnUiForDeviceRevisionAsync(uiToken, () =>
                 {
+                    if (_monitoringStore?.LoadErrorCode is { } storeErrorCode)
+                    {
+                        ApplyMonitoringStoreFailurePresentation(
+                            storeErrorCode,
+                            Volatile.Read(
+                                ref _monitoringStoreFailureCauseCode));
+                        return;
+                    }
+
                     ReloadManagedDevices(workItem.Profile.Id);
                     OperationMessage = (monitoringStateSaveFailed, deviceSettingsSaveFailed) switch
                     {
@@ -2569,16 +2643,22 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private DeviceSnapshotDto CreateManagedDeviceSnapshot(ManagedDeviceProfile profile)
     {
+        var monitoringStoreError = profile.MonitoringEnabled
+            ? _monitoringStore?.LoadErrorCode
+            : null;
+        var monitoringStoreUnavailable = monitoringStoreError is not null;
         var credentialBlocked = IsMonitoringCredentialBlocked(profile.Id);
         var credentialCorrupt = profile.LastConnectionTestCode == "VIEWER_CREDENTIAL_CORRUPT";
-        var activeFailure = profile.MonitoringEnabled
+        var activeFailure = profile.MonitoringEnabled && !monitoringStoreUnavailable
             ? _monitoringStore?.GetActiveFailureCode(profile.Id)
             : null;
-        var effectiveMonitoringEnabled = profile.MonitoringEnabled && !credentialBlocked;
+        var effectiveMonitoringEnabled = profile.MonitoringEnabled
+                                         && !credentialBlocked
+                                         && !monitoringStoreUnavailable;
         var activeInterfaceIssues = effectiveMonitoringEnabled
             ? _monitoringStore?.GetActiveInterfaceConditionCount(profile.Id) ?? 0
             : 0;
-        var capabilities = profile.MonitoringEnabled
+        var capabilities = profile.MonitoringEnabled && !monitoringStoreUnavailable
             ? _monitoringStore?.LoadCapabilities(profile.Id) ?? []
             : [];
         if (profile.MonitoringEnabled && capabilities.Count == 0)
@@ -2608,7 +2688,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             !item.Supported || !item.State.Equals("Ready", StringComparison.OrdinalIgnoreCase));
         var health = activeFailure is not null
             ? DeviceHealth.Disconnected
-            : credentialBlocked
+            : monitoringStoreUnavailable
+                     || credentialBlocked
                      || credentialCorrupt
                      || !profile.ConnectionVerified
                      || activeInterfaceIssues > 0
@@ -2617,6 +2698,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 : effectiveMonitoringEnabled ? DeviceHealth.Normal : DeviceHealth.Empty;
         var summary = activeFailure is not null
             ? $"주기 감시 실패 · {activeFailure}"
+            : monitoringStoreUnavailable
+                ? $"주기 감시 시작 안 됨 · {monitoringStoreError}"
             : credentialBlocked
             ? "인증 실패 · 접속 시험 후 감시 재개"
             : credentialCorrupt
@@ -2628,12 +2711,16 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 : effectiveMonitoringEnabled && capabilityIssue
                     ? "주기 감시 중 · 일부 명령 확인 필요"
                     : effectiveMonitoringEnabled ? "Viewer 실행 중 주기 감시" : "등록됨 · 주기 감시 꺼짐";
-        var capabilityMetric = capabilities.Count == 0
+        var capabilityMetric = monitoringStoreUnavailable
+            ? "확인 불가"
+            : capabilities.Count == 0
             ? "감시 꺼짐"
             : capabilities.Any(item => item.State.Equals("Initializing", StringComparison.OrdinalIgnoreCase))
                 ? "확인 중"
                 : $"{capabilities.Count(item => item.Supported)}/{capabilities.Count} 지원";
-        var collectionState = credentialBlocked
+        var collectionState = monitoringStoreUnavailable
+            ? "StoreUnavailable"
+            : credentialBlocked
             ? "AuthBlocked"
             : activeFailure is not null
                 ? "Failed"
@@ -2644,7 +2731,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : effectiveMonitoringEnabled && capabilityIssue
                 ? "Degraded"
                 : effectiveMonitoringEnabled ? "Monitoring" : "Registered";
-        var collectionError = credentialBlocked
+        var collectionError = monitoringStoreUnavailable
+            ? monitoringStoreError
+            : credentialBlocked
             ? "AUTH_MONITORING_BLOCKED"
             : activeFailure
               ?? (credentialCorrupt
@@ -2668,7 +2757,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 new("장비 IP", profile.Host),
                 new("Telnet", "TCP/23"),
                 new("접속 시험", profile.ConnectionVerified ? "성공" : "미확인", profile.ConnectionVerified ? DeviceHealth.Normal : DeviceHealth.Warning),
-                new("주기 감시", effectiveMonitoringEnabled ? "켜짐" : "꺼짐", effectiveMonitoringEnabled ? DeviceHealth.Normal : credentialBlocked ? DeviceHealth.Warning : DeviceHealth.Empty),
+                new(
+                    "주기 감시",
+                    effectiveMonitoringEnabled ? "켜짐" : "꺼짐",
+                    effectiveMonitoringEnabled
+                        ? DeviceHealth.Normal
+                        : credentialBlocked || monitoringStoreUnavailable
+                            ? DeviceHealth.Warning
+                            : DeviceHealth.Empty),
                 new("활성 포트 변경", $"{activeInterfaceIssues}개", activeInterfaceIssues > 0 ? DeviceHealth.Warning : DeviceHealth.Normal),
                 new("수집 기능", capabilityMetric, capabilityIssue ? DeviceHealth.Warning : DeviceHealth.Normal)
             ],
@@ -3052,12 +3148,22 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private void RebuildCollectorHealth(DateTimeOffset generatedAt)
     {
+        var monitoringStoreError = _monitoringStore?.LoadErrorCode;
         CollectorHealth.Clear();
         CollectorHealth.Add(new("Agent", ConnectionText, ConnectionHealth));
         CollectorHealth.Add(new(_statelessV4 ? "HTTPS API" : "HTTP 상태", HttpConnectionText,
             HttpConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
-        CollectorHealth.Add(new(_statelessV4 ? "Viewer 감시" : "실시간 이벤트", RealtimeConnectionText,
-            RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? DeviceHealth.Normal : DeviceHealth.Warning));
+        CollectorHealth.Add(new(
+            _statelessV4 ? "Viewer 감시" : "실시간 이벤트",
+            _statelessV4 && monitoringStoreError is not null
+                ? $"시작 안 됨 · {monitoringStoreError}"
+                : RealtimeConnectionText,
+            _statelessV4 && monitoringStoreError is not null
+                ? DeviceHealth.Warning
+                : RealtimeConnectionState is AgentConnectionState.Connected
+                    or AgentConnectionState.Demo
+                    ? DeviceHealth.Normal
+                    : DeviceHealth.Warning));
         CollectorHealth.Add(new("마지막 성공 수신", LastSuccessfulReceiptText));
         CollectorHealth.Add(new("수집기 버전", CollectorVersion));
         CollectorHealth.Add(new("API 버전", $"v{_apiVersion}"));
@@ -3084,10 +3190,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 : DeviceHealth.Warning));
         OperationalStatuses.Add(_statelessV4
             ? new OperationalStatusDto(
-                "VIEWER_LOCAL_MONITOR",
+                monitoringStoreError ?? "VIEWER_LOCAL_MONITOR",
                 "Viewer 로컬 감시",
-                "Viewer가 실행 중인 동안 등록 장비를 감시합니다.",
-                DeviceHealth.Normal)
+                monitoringStoreError is null
+                    ? "Viewer가 실행 중인 동안 등록 장비를 감시합니다."
+                    : ViewerConnectionMessages.ForCode(monitoringStoreError),
+                monitoringStoreError is null
+                    ? DeviceHealth.Normal
+                    : DeviceHealth.Warning)
             : new OperationalStatusDto(
                 RealtimeConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
                     ? "REALTIME_AVAILABLE"
@@ -3191,6 +3301,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private string ReadyOperationMessage(ViewerSettings settings)
     {
         if (ManagedDeviceStoreWarning() is { } warning) return warning;
+        if (MonitoringStoreWarning() is { } monitoringWarning) return monitoringWarning;
         if (settings.DemoMode) return "오프라인 데모 · 실제 장비에는 접속하지 않습니다.";
         return MonitoredCount == 0
             ? $"Agent 연결됨 · 등록 장비 {TotalCount}대 · 주기 감시 대상 없음"
@@ -3208,6 +3319,37 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             "장비 목록 파일을 읽을 수 없음 · 파일 권한과 잠금을 확인하세요. · VIEWER_DEVICE_STORE_UNAVAILABLE",
         _ => null
     };
+
+    private string? MonitoringStoreWarning()
+    {
+        var errorCode = _monitoringStore?.LoadErrorCode;
+        return errorCode is null
+            ? null
+            : $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+    }
+
+    private bool HasMonitoringStoreFailure =>
+        _monitoringStore?.LoadErrorCode is not null;
+
+    private string CurrentMonitoringStoreErrorCode(string fallback) =>
+        _monitoringStore?.LoadErrorCode ?? fallback;
+
+    private void ApplyMonitoringStoreFailurePresentation(
+        string errorCode,
+        string? causeCode = null)
+    {
+        ReloadManagedDevices();
+        RebuildCollectorHealth(DateTimeOffset.UtcNow);
+        var causeSuffix = causeCode is not null
+                          && !causeCode.Equals(
+                              errorCode,
+                              StringComparison.Ordinal)
+            ? $" · {causeCode}"
+            : string.Empty;
+        OperationMessage =
+            $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}"
+            + causeSuffix;
+    }
 
     private void SetReadyOperationMessageIfHealthy(ViewerSettings settings)
     {
@@ -3357,20 +3499,42 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         string errorCode,
         MonitoringWorkItem? workItem = null)
     {
+        if (errorCode.Equals(
+                "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                StringComparison.Ordinal))
+        {
+            Volatile.Write(
+                ref _monitoringStoreFailureCauseCode,
+                errorCode);
+        }
+        var reportedErrorCode = CurrentMonitoringStoreErrorCode(errorCode);
+        var monitoringStoreUnavailable =
+            _monitoringStore?.LoadErrorCode is not null;
         TryWriteDiagnostic("monitoring-cycle", errorCode);
         try
         {
             await RunOnUiAsync(() =>
                 {
+                    if (monitoringStoreUnavailable)
+                    {
+                        ApplyMonitoringStoreFailurePresentation(
+                            reportedErrorCode,
+                            errorCode);
+                        return;
+                    }
+
                     void ApplyFailureMessage()
                     {
-                        if (OperationMessage.Contains(errorCode, StringComparison.Ordinal))
+                        if (OperationMessage.Contains(
+                                reportedErrorCode,
+                                StringComparison.Ordinal))
                         {
                             return;
                         }
 
                         OperationMessage =
-                            $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+                            $"{ViewerConnectionMessages.ForCode(reportedErrorCode)} "
+                            + $"· {reportedErrorCode}";
                     }
 
                     if (workItem is null)

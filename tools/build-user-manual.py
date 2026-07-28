@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.20-poc"
+VERSION = "0.9.21-poc"
 DOCUMENT_DATE = "2026-07-28"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -959,6 +959,15 @@ Viewer PC IPv4 예     : 192.0.2.25
         "감시 공백으로 표시하고 현재 결과를 새 기준으로 사용합니다. 그 사이 로그 버퍼에서 사라진 사건은 복원할 수 없습니다.",
         "warning",
     )
+    add_callout(
+        doc,
+        "감시 이력 파일 오류",
+        "감시 이력 파일이 손상됐거나 현재 Viewer보다 새로운 형식이거나 읽기·쓰기가 불가능하면 "
+        "Viewer는 이전 장애를 정상으로 오판하지 않도록 자동 감시와 이력 저장을 중지합니다. "
+        "장비의 수동 show 조회는 계속 사용할 수 있습니다. 화면의 오류 코드와 조치 안내에 따라 "
+        "격리 파일, Viewer 버전, 사용자 폴더 권한·파일 잠금을 확인한 뒤 Viewer를 다시 시작하세요.",
+        "warning",
+    )
     add_heading(doc, "짧은 세션 유지 시간 대응", 2, heading_num_id)
     add_code_block(
         doc,
@@ -1129,10 +1138,13 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("VIEWER_DEVICE_STORE_UNAVAILABLE", "Viewer 사용자 폴더의 파일 권한과 다른 프로세스의 잠금 확인"),
             ("VIEWER_DEVICE_STORE_WRITE_FAILED", "입력은 유지됨. Viewer 사용자 폴더 권한·잠금·디스크 확인 후 다시 저장"),
             ("VIEWER_SETTINGS_WRITE_FAILED", "Agent 연결은 유지됨. Viewer 사용자 폴더 권한과 디스크 여유 공간 확인"),
+            ("VIEWER_MONITOR_STATE_CORRUPT", "이번 실행의 자동 감시가 중지됨. 격리된 원본을 보존하고 Viewer를 다시 시작해 새 기준선 생성"),
+            ("VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED", "파일을 변경하지 말고 같거나 최신 버전의 Viewer로 실행"),
+            ("VIEWER_MONITOR_STATE_UNAVAILABLE", "자동 감시가 중지됨. Viewer 사용자 폴더 권한·파일 잠금 확인 후 재시작"),
             ("VIEWER_MONITOR_STATE_WRITE_FAILED", "장비 설정은 저장될 수 있음. 중복 등록하지 말고 감시 이력 파일 권한·잠금·디스크 확인"),
             ("VIEWER_MONITOR_CYCLE_FAILED", "다음 주기 재시도를 기다리고 반복되면 Viewer 진단 로그 확인"),
         ],
-        [4000, 5360],
+        [4300, 5060],
         header_size=8.5,
         body_size=8.25,
         body_line=1.0,

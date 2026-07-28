@@ -14,6 +14,16 @@ public sealed class ViewerMonitoringStore
     private const int MaximumStoredEventCount = 500;
     private const string CollectionResetDetail =
         "장비 또는 감시 설정이 변경되어 이전 상태 추적을 종료했습니다.";
+    private static readonly string[] CurrentSchemaRequiredProperties =
+    [
+        "SchemaVersion",
+        "NextSequence",
+        "Baselines",
+        "ActiveFailures",
+        "ActiveInterfaceConditions",
+        "Capabilities",
+        "Events"
+    ];
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly object _sync = new();
     private readonly string _path;
@@ -36,6 +46,23 @@ public sealed class ViewerMonitoringStore
         _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
         _state = LoadUnsafe();
     }
+
+    internal ViewerMonitoringLoadStatus LastLoadStatus { get; private set; } =
+        ViewerMonitoringLoadStatus.Missing;
+
+    internal bool IsOperational =>
+        LastLoadStatus is ViewerMonitoringLoadStatus.Ok
+            or ViewerMonitoringLoadStatus.Missing;
+
+    internal string? LoadErrorCode => LastLoadStatus switch
+    {
+        ViewerMonitoringLoadStatus.Corrupt => "VIEWER_MONITOR_STATE_CORRUPT",
+        ViewerMonitoringLoadStatus.VersionUnsupported =>
+            "VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED",
+        ViewerMonitoringLoadStatus.StorageUnavailable =>
+            "VIEWER_MONITOR_STATE_UNAVAILABLE",
+        _ => null
+    };
 
     public IReadOnlyList<SwitchEventDto> BeginSession(IReadOnlyList<ManagedDeviceProfile> devices)
     {
@@ -586,14 +613,57 @@ public sealed class ViewerMonitoringStore
 
     private MonitoringEnvelope LoadUnsafe()
     {
-        var json = _persistence.ReadIfExists(_path);
-        if (json is null) return new MonitoringEnvelope();
+        string? json;
+        try
+        {
+            json = _persistence.ReadIfExists(_path);
+        }
+        catch (DecoderFallbackException)
+        {
+            LastLoadStatus = TryQuarantineCorruptFile()
+                ? ViewerMonitoringLoadStatus.Corrupt
+                : ViewerMonitoringLoadStatus.StorageUnavailable;
+            return new MonitoringEnvelope();
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException)
+        {
+            LastLoadStatus = ViewerMonitoringLoadStatus.StorageUnavailable;
+            return new MonitoringEnvelope();
+        }
+        if (json is null)
+        {
+            LastLoadStatus = ViewerMonitoringLoadStatus.Missing;
+            return new MonitoringEnvelope();
+        }
 
         try
         {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("SchemaVersion", out var schemaElement)
+                || !schemaElement.TryGetInt32(out var schemaVersion)
+                || schemaVersion < 1)
+            {
+                throw new InvalidDataException("MONITOR_STATE_SCHEMA_INVALID");
+            }
+            if (schemaVersion > CurrentSchemaVersion)
+            {
+                LastLoadStatus = ViewerMonitoringLoadStatus.VersionUnsupported;
+                return new MonitoringEnvelope();
+            }
+            if (schemaVersion == CurrentSchemaVersion
+                && CurrentSchemaRequiredProperties.Any(property =>
+                    !document.RootElement.TryGetProperty(property, out _)))
+            {
+                throw new InvalidDataException("MONITOR_STATE_SCHEMA_INCOMPLETE");
+            }
+
             var loaded = JsonSerializer.Deserialize<MonitoringEnvelope>(json, JsonOptions)
                          ?? throw new InvalidDataException("MONITOR_STATE_NULL");
             ValidateState(loaded);
+            LastLoadStatus = ViewerMonitoringLoadStatus.Ok;
             return CloneState(loaded);
         }
         catch (Exception exception) when (
@@ -601,10 +671,27 @@ public sealed class ViewerMonitoringStore
             or NotSupportedException
             or InvalidDataException)
         {
+            LastLoadStatus = TryQuarantineCorruptFile()
+                ? ViewerMonitoringLoadStatus.Corrupt
+                : ViewerMonitoringLoadStatus.StorageUnavailable;
+            return new MonitoringEnvelope();
+        }
+    }
+
+    private bool TryQuarantineCorruptFile()
+    {
+        try
+        {
             _persistence.Quarantine(
                 _path,
                 _path + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}");
-            return new MonitoringEnvelope();
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 
@@ -617,6 +704,12 @@ public sealed class ViewerMonitoringStore
 
     private TResult CommitUnsafe<TResult>(Func<TResult> mutation)
     {
+        if (!IsOperational)
+        {
+            throw new InvalidOperationException(
+                LoadErrorCode ?? "VIEWER_MONITOR_STATE_UNAVAILABLE");
+        }
+
         var original = _state;
         var candidate = CloneState(original);
         TResult result;
@@ -630,7 +723,17 @@ public sealed class ViewerMonitoringStore
         {
             _state = original;
         }
-        SaveUnsafe(candidate);
+        try
+        {
+            SaveUnsafe(candidate);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException)
+        {
+            LastLoadStatus = ViewerMonitoringLoadStatus.StorageUnavailable;
+            throw;
+        }
         _state = candidate;
         return result;
     }
@@ -788,17 +891,80 @@ public sealed class ViewerMonitoringStore
             if (string.IsNullOrWhiteSpace(key)
                 || capabilities is null
                 || capabilities.Any(capability =>
-                    capability is null || string.IsNullOrWhiteSpace(capability.CommandId)))
+                    capability is null
+                    || string.IsNullOrWhiteSpace(capability.CommandId)
+                    || (state.SchemaVersion == CurrentSchemaVersion
+                        && string.IsNullOrWhiteSpace(capability.State))))
             {
                 throw new InvalidDataException("MONITOR_STATE_CAPABILITY_INVALID");
             }
         }
-        if (state.Events.Any(item =>
-                item is null
-                || string.IsNullOrWhiteSpace(item.AgentEventId)
-                || string.IsNullOrWhiteSpace(item.DeviceId)))
+        var eventsById = new Dictionary<string, SwitchEventDto>(StringComparer.Ordinal);
+        var eventSequences = new HashSet<long>();
+        foreach (var item in state.Events)
         {
-            throw new InvalidDataException("MONITOR_STATE_EVENT_INVALID");
+            if (item is null
+                || item.Sequence <= 0
+                || string.IsNullOrWhiteSpace(item.AgentEventId)
+                || string.IsNullOrWhiteSpace(item.DeviceId)
+                || !eventsById.TryAdd(item.AgentEventId, item)
+                || !eventSequences.Add(item.Sequence)
+                || (state.SchemaVersion == CurrentSchemaVersion
+                    && (string.IsNullOrWhiteSpace(item.DeviceName)
+                        || string.IsNullOrWhiteSpace(item.Kind)
+                        || string.IsNullOrWhiteSpace(item.Title)
+                        || string.IsNullOrWhiteSpace(item.Detail)
+                        || !Enum.IsDefined(item.Severity)
+                        || item.OccurredAt == default)))
+            {
+                throw new InvalidDataException("MONITOR_STATE_EVENT_INVALID");
+            }
+        }
+        if (state.Events.Count > 0
+            && state.NextSequence < state.Events.Max(item => item.Sequence))
+        {
+            throw new InvalidDataException("MONITOR_STATE_SEQUENCE_INVALID");
+        }
+
+        if (state.SchemaVersion != CurrentSchemaVersion)
+        {
+            return;
+        }
+
+        foreach (var (deviceId, active) in state.ActiveFailures)
+        {
+            if (!eventsById.TryGetValue(active.EventId, out var activeEvent)
+                || !activeEvent.DeviceId.Equals(deviceId, StringComparison.Ordinal)
+                || activeEvent.Recovered
+                || activeEvent.RecoveredAt is not null
+                || activeEvent.IsActiveCondition
+                || !string.Equals(
+                    activeEvent.ConditionKey,
+                    $"{deviceId}:수집기:주기 감시 실패",
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "MONITOR_STATE_ACTIVE_FAILURE_REFERENCE_INVALID");
+            }
+        }
+        foreach (var (conditionKey, active) in state.ActiveInterfaceConditions)
+        {
+            if (!eventsById.TryGetValue(active.EventId, out var activeEvent)
+                || !conditionKey.Equals(
+                    InterfaceConditionKey(active.DeviceId, active.PortId),
+                    StringComparison.Ordinal)
+                || !activeEvent.DeviceId.Equals(active.DeviceId, StringComparison.Ordinal)
+                || activeEvent.Recovered
+                || activeEvent.RecoveredAt is not null
+                || !activeEvent.IsActiveCondition
+                || !string.Equals(
+                    activeEvent.ConditionKey,
+                    conditionKey,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "MONITOR_STATE_ACTIVE_INTERFACE_REFERENCE_INVALID");
+            }
         }
     }
 
@@ -966,6 +1132,15 @@ public sealed class ViewerMonitoringStore
     }
 }
 
+internal enum ViewerMonitoringLoadStatus
+{
+    Ok,
+    Missing,
+    Corrupt,
+    VersionUnsupported,
+    StorageUnavailable
+}
+
 internal sealed record MonitoringOutputRecordResult(
     bool Accepted,
     string? ErrorCode,
@@ -987,6 +1162,8 @@ internal interface IViewerMonitoringPersistence
 
 internal sealed class PhysicalViewerMonitoringPersistence : IViewerMonitoringPersistence
 {
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
     public static PhysicalViewerMonitoringPersistence Instance { get; } = new();
 
     private PhysicalViewerMonitoringPersistence()
@@ -997,7 +1174,7 @@ internal sealed class PhysicalViewerMonitoringPersistence : IViewerMonitoringPer
     {
         try
         {
-            return File.ReadAllText(path, Encoding.UTF8);
+            return File.ReadAllText(path, StrictUtf8);
         }
         catch (FileNotFoundException)
         {
@@ -1011,7 +1188,11 @@ internal sealed class PhysicalViewerMonitoringPersistence : IViewerMonitoringPer
 
     public void WriteAtomically(string path, string content)
     {
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+        var directory = System.IO.Path.GetDirectoryName(
+                            System.IO.Path.GetFullPath(path))
+                        ?? throw new InvalidOperationException(
+                            "VIEWER_MONITOR_STATE_PATH_INVALID");
+        Directory.CreateDirectory(directory);
         var temporary = path + $".{Guid.NewGuid():N}.tmp";
         try
         {
@@ -1020,7 +1201,18 @@ internal sealed class PhysicalViewerMonitoringPersistence : IViewerMonitoringPer
         }
         finally
         {
-            try { File.Delete(temporary); } catch { }
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup only; do not hide the primary write.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // See IOException comment above.
+            }
         }
     }
 
