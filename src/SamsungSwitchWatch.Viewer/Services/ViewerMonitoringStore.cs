@@ -12,6 +12,8 @@ public sealed class ViewerMonitoringStore
 {
     private const int CurrentSchemaVersion = 3;
     private const int MaximumStoredEventCount = 500;
+    private const string CollectionResetDetail =
+        "장비 또는 감시 설정이 변경되어 이전 상태 추적을 종료했습니다.";
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private readonly object _sync = new();
     private readonly string _path;
@@ -653,6 +655,21 @@ public sealed class ViewerMonitoringStore
         }
     }
 
+    private bool HasDeviceCollectionStateUnsafe(string deviceId)
+    {
+        var prefix = deviceId + "\n";
+        return _state.Baselines.Keys.Any(key =>
+                   key.StartsWith(prefix, StringComparison.Ordinal))
+               || _state.Capabilities.ContainsKey(deviceId)
+               || _state.ActiveFailures.ContainsKey(deviceId)
+               || _state.ActiveInterfaceConditions.Values.Any(item =>
+                   item.DeviceId.Equals(deviceId, StringComparison.Ordinal))
+               || _state.Events.Any(item =>
+                   item.DeviceId.Equals(deviceId, StringComparison.Ordinal)
+                   && item.IsActiveCondition
+                   && !item.Recovered);
+    }
+
     private static MonitoringEnvelope CloneState(MonitoringEnvelope source) =>
         new()
         {
@@ -808,6 +825,77 @@ public sealed class ViewerMonitoringStore
             {
                 _state.Capabilities.Remove(deviceId);
                 HeartbeatUnsafe();
+            });
+        }
+    }
+
+    internal IReadOnlyList<SwitchEventDto> ResetDeviceCollectionState(string deviceId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        lock (_sync)
+        {
+            if (!HasDeviceCollectionStateUnsafe(deviceId))
+            {
+                return [];
+            }
+
+            return CommitUnsafe(() =>
+            {
+                var closedAt = DateTimeOffset.UtcNow;
+                var activeEventIds = new HashSet<string>(StringComparer.Ordinal);
+                if (_state.ActiveFailures.Remove(deviceId, out var activeFailure))
+                {
+                    activeEventIds.Add(activeFailure.EventId);
+                }
+
+                foreach (var key in _state.ActiveInterfaceConditions
+                             .Where(item => item.Value.DeviceId.Equals(deviceId, StringComparison.Ordinal))
+                             .Select(item => item.Key)
+                             .ToArray())
+                {
+                    if (_state.ActiveInterfaceConditions.Remove(key, out var activeCondition))
+                    {
+                        activeEventIds.Add(activeCondition.EventId);
+                    }
+                }
+
+                foreach (var item in _state.Events.Where(item =>
+                             item.DeviceId.Equals(deviceId, StringComparison.Ordinal)
+                             && item.IsActiveCondition
+                             && !item.Recovered))
+                {
+                    activeEventIds.Add(item.AgentEventId);
+                }
+
+                RemoveDeviceBaselines(deviceId);
+                _state.Capabilities.Remove(deviceId);
+
+                var closed = new List<SwitchEventDto>();
+                for (var index = 0; index < _state.Events.Count; index++)
+                {
+                    var item = _state.Events[index];
+                    if (!activeEventIds.Contains(item.AgentEventId))
+                    {
+                        continue;
+                    }
+
+                    var detail = item.Detail.Contains(CollectionResetDetail, StringComparison.Ordinal)
+                        ? item.Detail
+                        : $"{item.Detail} {CollectionResetDetail}";
+                    var updated = item with
+                    {
+                        Detail = detail,
+                        Acknowledged = true,
+                        Recovered = true,
+                        IsActiveCondition = false,
+                        RecoveredAt = closedAt
+                    };
+                    _state.Events[index] = updated;
+                    closed.Add(updated);
+                }
+
+                HeartbeatUnsafe();
+                return (IReadOnlyList<SwitchEventDto>)closed;
             });
         }
     }

@@ -54,6 +54,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         bool Ready,
         bool ExplicitlyUnsupported,
         string? ErrorCode);
+    private sealed record DeviceLifecycleToken(string DeviceId, long Revision);
+    private sealed record MonitoringWorkItem(ManagedDeviceProfile Profile, long Revision)
+    {
+        public DeviceLifecycleToken Token => new(Profile.Id, Revision);
+    }
     private enum AgentChannel { Http, Realtime }
 
     private const int EventPageSize = 500;
@@ -80,10 +85,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private readonly object _settingsSync = new();
     private readonly object _monitoringCredentialBlockSync = new();
     private readonly object _deviceOperationGateSync = new();
+    private readonly object _deviceLifecycleSync = new();
     private readonly Dictionary<string, EventViewModel> _eventsById = new(StringComparer.Ordinal);
     private readonly HashSet<string> _monitoringCredentialBlocks = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SemaphoreSlim> _deviceOperationGates =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _deviceLifecycleRevisions = new(StringComparer.Ordinal);
     private readonly SortedDictionary<long, AgentEventChangeDto> _changeBuffer = [];
     private readonly HashSet<long> _liveAlertSequences = [];
     private IAgentClient _client;
@@ -124,6 +131,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private long _changeCursor;
     private long _settingsGeneration;
     private long _feedResetCount;
+    private long _nextDeviceLifecycleRevision;
     private bool _hasSnapshot;
     private bool _allowLiveAlerts;
     private bool _initialized;
@@ -289,24 +297,41 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         out string? warningCode)
     {
         if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
-        var result = _deviceStore.Save(draft);
+        ManagedDeviceProfile result;
+        IReadOnlyList<SwitchEventDto> lifecycleEvents = [];
         warningCode = null;
-        if (result.ConnectionVerified)
+        lock (_deviceLifecycleSync)
         {
-            ClearMonitoringCredentialBlock(result.Id);
-            warningCode = RunPostSaveCleanup(
-                () => _monitoringStore?.ClearCapabilities(result.Id),
-                warningCode);
+            var outcome = _deviceStore.SaveWithOutcome(draft);
+            result = outcome.Profile;
+            AdvanceDeviceLifecycleRevisionUnsafe(result.Id);
+            if (result.ConnectionVerified)
+            {
+                ClearMonitoringCredentialBlock(result.Id);
+            }
+
+            if (outcome.ConnectionIdentityChanged || !result.MonitoringEnabled)
+            {
+                warningCode = RunPostSaveCleanup(
+                    () => lifecycleEvents =
+                        _monitoringStore?.ResetDeviceCollectionState(result.Id) ?? [],
+                    warningCode);
+            }
+            else if (result.ConnectionVerified)
+            {
+                warningCode = RunPostSaveCleanup(
+                    () => _monitoringStore?.ClearCapabilities(result.Id),
+                    warningCode);
+            }
         }
-        if (!result.MonitoringEnabled)
-        {
-            warningCode = RunPostSaveCleanup(
-                () => _monitoringStore?.ClearActiveFailure(result.Id),
-                warningCode);
-        }
+        if (lifecycleEvents.Count > 0) ApplyEvents(lifecycleEvents, false);
         try
         {
             ReloadManagedDevices(result.Id);
+            if (_monitoringStore is not null)
+            {
+                ApplyEvents(_monitoringStore.LoadEvents(), false);
+            }
         }
         catch
         {
@@ -322,11 +347,30 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public bool DeleteManagedDevice(string id)
     {
         if (_deviceStore is null) return false;
-        var removed = _deviceStore.Delete(id);
+        var removed = false;
+        string? warningCode = null;
+        IReadOnlyList<SwitchEventDto> lifecycleEvents = [];
+        lock (_deviceLifecycleSync)
+        {
+            removed = _deviceStore.Delete(id);
+            if (removed)
+            {
+                AdvanceDeviceLifecycleRevisionUnsafe(id);
+                ClearMonitoringCredentialBlock(id);
+                warningCode = RunPostSaveCleanup(
+                    () => lifecycleEvents =
+                        _monitoringStore?.ResetDeviceCollectionState(id) ?? [],
+                    warningCode);
+            }
+        }
         if (removed)
         {
-            ClearMonitoringCredentialBlock(id);
+            if (lifecycleEvents.Count > 0) ApplyEvents(lifecycleEvents, false);
             ReloadManagedDevices();
+            if (warningCode is not null)
+            {
+                ReportDeviceManagementFailure("device-management-delete", warningCode);
+            }
         }
         return removed;
     }
@@ -334,9 +378,15 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public ManagedDeviceProfile SetManagedDeviceMonitoring(string id, bool enabled)
     {
         if (_deviceStore is null) throw new InvalidOperationException("VIEWER_DEVICE_STORE_UNAVAILABLE");
-        var result = _deviceStore.SetMonitoring(id, enabled);
-        if (enabled) _monitoringStore?.ClearCapabilities(id);
-        else _monitoringStore?.ClearActiveFailure(id);
+        ManagedDeviceProfile result;
+        IReadOnlyList<SwitchEventDto> lifecycleEvents = [];
+        lock (_deviceLifecycleSync)
+        {
+            result = _deviceStore.SetMonitoring(id, enabled);
+            AdvanceDeviceLifecycleRevisionUnsafe(id);
+            lifecycleEvents = _monitoringStore?.ResetDeviceCollectionState(id) ?? [];
+        }
+        if (lifecycleEvents.Count > 0) ApplyEvents(lifecycleEvents, false);
         ReloadManagedDevices(id);
         return result;
     }
@@ -987,12 +1037,14 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public void ApplySnapshot(AgentSnapshotDto snapshot) => RunOnUi(() => ApplySnapshotCore(snapshot));
 
     public void ApplyEvents(IEnumerable<SwitchEventDto> events, bool raiseAlerts = true) =>
-        RunOnUi(() =>
-        {
-            foreach (var item in events.OrderBy(item => item.Sequence)) UpsertEvent(item, raiseAlerts, "Created");
-            RebuildSelectedDeviceEvents();
-            NotifySummaryChanged();
-        });
+        RunOnUi(() => ApplyEventsCore(events, raiseAlerts));
+
+    private void ApplyEventsCore(IEnumerable<SwitchEventDto> events, bool raiseAlerts)
+    {
+        foreach (var item in events.OrderBy(item => item.Sequence)) UpsertEvent(item, raiseAlerts, "Created");
+        RebuildSelectedDeviceEvents();
+        NotifySummaryChanged();
+    }
 
     public async Task SynchronizeChangesAsync(bool raiseCatchupSummary = false, CancellationToken cancellationToken = default)
     {
@@ -1409,13 +1461,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 _monitoringStore.Heartbeat();
                 return;
             }
-            var profiles = _deviceStore.Load().Where(item =>
-                    item.MonitoringEnabled
-                    && item.ConnectionVerified
-                    && !IsMonitoringCredentialBlocked(item.Id))
-                .ToArray();
-            await Task.WhenAll(profiles.Select(profile =>
-                MonitorDeviceAsync(profile, client, linked.Token))).ConfigureAwait(false);
+            var workItems = CaptureMonitoringWorkItems();
+            await Task.WhenAll(workItems.Select(workItem =>
+                MonitorDeviceAsync(workItem, client, linked.Token))).ConfigureAwait(false);
             _monitoringStore.Heartbeat();
         }
         finally
@@ -2128,20 +2176,26 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     }
 
     private async Task MonitorDeviceAsync(
-        ManagedDeviceProfile profile,
+        MonitoringWorkItem workItem,
         IAgentClient client,
         CancellationToken cancellationToken)
     {
         await _monitorConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var operationGate = GetDeviceOperationGate(profile.Host);
+        var operationGate = GetDeviceOperationGate(workItem.Profile.Host);
         var entered = false;
         try
         {
             entered = await operationGate.WaitAsync(0, cancellationToken).ConfigureAwait(false);
             if (!entered) return;
 
-            var secrets = _deviceStore!.GetSecrets(profile.Id);
-            var knownCapabilities = _monitoringStore!.LoadCapabilities(profile.Id);
+            if (!TryLoadMonitoringContext(
+                    workItem,
+                    out var profile,
+                    out var secrets,
+                    out var knownCapabilities))
+            {
+                return;
+            }
             if (!MonitoringProfiles.TryGet(profile.Model, out var commandProfile))
             {
                 throw new AgentClientException("VIEWER_DEVICE_INVALID", AgentConnectionState.Stale);
@@ -2176,14 +2230,22 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     secrets.EnablePassword,
                     "monitor");
                 var tested = await client.TestTelnetAsync(testRequest, cancellationToken).ConfigureAwait(false);
-                if (!ReferenceEquals(client, _client)) return;
+                if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
                 if (!tested.Success)
                 {
                     throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
                 }
-                var testRecoveries = _monitoringStore.RecordSuccess(profile);
-                if (testRecoveries.Count > 0) ApplyEvents(testRecoveries);
-                await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                if (!TryPersistMonitoringState(
+                        workItem,
+                        current => _monitoringStore!.RecordSuccess(current),
+                        out var testRecoveries))
+                {
+                    return;
+                }
+                await ApplyMonitoringResultToUiAsync(
+                    workItem,
+                    testRecoveries,
+                    updatePresentation: true).ConfigureAwait(false);
                 return;
             }
 
@@ -2198,30 +2260,42 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 "monitor",
                 commands);
             var result = await client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
-            if (!ReferenceEquals(client, _client)) return;
+            if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
             if (!result.Success)
             {
                 throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
             }
             var outputs = result.Commands.ToList();
-            var recoveries = _monitoringStore.RecordSuccess(profile);
-            if (recoveries.Count > 0) ApplyEvents(recoveries);
+            if (!TryPersistMonitoringState(
+                    workItem,
+                    current => _monitoringStore!.RecordSuccess(current),
+                    out var recoveries))
+            {
+                return;
+            }
+            await ApplyMonitoringResultToUiAsync(
+                workItem,
+                recoveries,
+                updatePresentation: false).ConfigureAwait(false);
 
             foreach (var definition in definitions)
             {
                 if (!selections.TryGetValue(definition.Id, out var selected)) continue;
                 await ProbeAndRecordMonitoredOutputAsync(
-                    profile,
+                    workItem,
                     secrets,
                     client,
                     definition,
                     knownCapabilities.FirstOrDefault(item =>
                         item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
-                    outputs.FirstOrDefault(item =>
-                        item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
-                    cancellationToken).ConfigureAwait(false);
+                     outputs.FirstOrDefault(item =>
+                         item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
+                     cancellationToken).ConfigureAwait(false);
             }
-            await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+            await ApplyMonitoringResultToUiAsync(
+                workItem,
+                [],
+                updatePresentation: true).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2229,74 +2303,87 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception) when (IsMonitoringPersistenceFailure(exception))
         {
-            if (!ReferenceEquals(client, _client)) return;
+            if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
             await ReportMonitoringCycleFailureAsync(
-                "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
+                "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                workItem).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             if (!ReferenceEquals(client, _client)) return;
             var code = SafeMessage(exception);
-            var authenticationFailure = IsAuthenticationFailure(code);
-            if (authenticationFailure)
-            {
-                // Runtime blocking must happen before any persistence call.
-                // Otherwise a full or read-only disk could cause repeated bad
-                // password attempts and lock the switch account.
-                BlockMonitoringForCredentialFailure(profile.Id);
-            }
-
-            var monitoringStateSaveFailed = false;
             if (IsAgentChannelFailure(code))
             {
                 await SetUnavailableStateAsync(
                     exception,
                     AgentChannel.Http,
                     client).ConfigureAwait(false);
+                return;
             }
-            else if (!IsTransientBusy(code))
+            if (!IsCurrentMonitoringWorkItem(workItem)) return;
+            var authenticationFailure = IsAuthenticationFailure(code);
+            if (authenticationFailure && !TryBlockMonitoringForCredentialFailure(workItem))
+            {
+                return;
+            }
+
+            var monitoringStateSaveFailed = false;
+            if (!IsTransientBusy(code))
             {
                 try
                 {
-                    var failures = _monitoringStore!.RecordFailure(profile, code);
-                    if (failures.Count > 0) ApplyEvents(failures);
-                    await RunOnUiAsync(() => UpdateManagedDevicePresentation(profile.Id)).ConfigureAwait(false);
+                    if (!TryPersistMonitoringState(
+                            workItem,
+                            current => _monitoringStore!.RecordFailure(current, code),
+                            out var failures))
+                    {
+                        return;
+                    }
+                    await ApplyMonitoringResultToUiAsync(
+                        workItem,
+                        failures,
+                        updatePresentation: true).ConfigureAwait(false);
                 }
                 catch (Exception persistenceException)
                     when (IsMonitoringPersistenceFailure(persistenceException))
                 {
                     monitoringStateSaveFailed = true;
                     await ReportMonitoringCycleFailureAsync(
-                        "VIEWER_MONITOR_STATE_WRITE_FAILED").ConfigureAwait(false);
+                        "VIEWER_MONITOR_STATE_WRITE_FAILED",
+                        workItem).ConfigureAwait(false);
                 }
             }
             if (authenticationFailure)
             {
                 var deviceSettingsSaveFailed = false;
+                var uiToken = workItem.Token;
                 try
                 {
-                    _deviceStore!.MarkConnectionTest(profile.Id, false, code);
+                    if (!TryMarkConnectionTestFailure(workItem, code, out uiToken))
+                    {
+                        return;
+                    }
                 }
                 catch
                 {
                     deviceSettingsSaveFailed = true;
                 }
-                await RunOnUiAsync(() =>
+                await RunOnUiForDeviceRevisionAsync(uiToken, () =>
                 {
-                    ReloadManagedDevices(profile.Id);
+                    ReloadManagedDevices(workItem.Profile.Id);
                     OperationMessage = (monitoringStateSaveFailed, deviceSettingsSaveFailed) switch
                     {
                         (true, true) =>
-                            $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
+                            $"{workItem.Profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
                             + "감시 이력과 장비 설정 파일 저장은 실패했습니다. · VIEWER_MONITOR_STATE_WRITE_FAILED",
                         (true, false) =>
-                            $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다. "
+                            $"{workItem.Profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다. "
                             + "감시 이력 저장은 실패했습니다. · VIEWER_MONITOR_STATE_WRITE_FAILED",
                         (false, true) =>
-                            $"{profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
+                            $"{workItem.Profile.DisplayName} 인증 실패 · 이 실행에서 감시를 즉시 차단했습니다. "
                             + "장비 설정 파일 저장은 실패했습니다.",
                         _ =>
-                            $"{profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다."
+                            $"{workItem.Profile.DisplayName} 인증 실패 · 계정 잠금 방지를 위해 감시를 껐습니다."
                     };
                 }).ConfigureAwait(false);
             }
@@ -2309,7 +2396,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     }
 
     private async Task ProbeAndRecordMonitoredOutputAsync(
-        ManagedDeviceProfile profile,
+        MonitoringWorkItem workItem,
         ManagedDeviceSecrets secrets,
         IAgentClient sourceClient,
         ReadOnlyCommandDefinition definition,
@@ -2317,7 +2404,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         TelnetCommandOutputDto? initialOutput,
         CancellationToken cancellationToken)
     {
-        if (!ReferenceEquals(sourceClient, _client)) return;
+        if (!ReferenceEquals(sourceClient, _client)
+            || !TryGetCurrentMonitoringProfile(workItem, out var profile))
+        {
+            return;
+        }
 
         var assessment = AssessMonitoringOutput(definition.Id, initialOutput);
         if (assessment.ExplicitlyUnsupported)
@@ -2325,7 +2416,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             foreach (var alternate in definition.CandidateCommands.Where(candidate =>
                          !candidate.Equals(initialOutput?.Command, StringComparison.OrdinalIgnoreCase)))
             {
-                if (!ReferenceEquals(sourceClient, _client)) return;
+                if (!ReferenceEquals(sourceClient, _client)
+                    || !TryGetCurrentMonitoringProfile(workItem, out profile))
+                {
+                    return;
+                }
 
                 var fallbackRequest = new TelnetExecuteRequestDto(
                     Guid.NewGuid().ToString("N"),
@@ -2339,7 +2434,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     [alternate]);
                 var fallback = await sourceClient.ExecuteTelnetAsync(fallbackRequest, cancellationToken)
                     .ConfigureAwait(false);
-                if (!ReferenceEquals(sourceClient, _client)) return;
+                if (!ReferenceEquals(sourceClient, _client)
+                    || !IsCurrentMonitoringWorkItem(workItem))
+                {
+                    return;
+                }
                 if (!fallback.Success)
                 {
                     throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
@@ -2352,24 +2451,46 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
         }
 
-        if (!ReferenceEquals(sourceClient, _client)) return;
+        if (!ReferenceEquals(sourceClient, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
 
         if (assessment.Ready)
         {
             var selected = assessment.Output!.Command;
-            _monitoringStore!.RecordCapability(
-                profile.Id,
-                new CollectorCapabilityDto(
-                    definition.Id,
-                    true,
-                    "Ready",
-                    null,
-                    definition.Command,
-                    selected,
-                    definition.CandidateCommands,
-                    selected));
-            var events = _monitoringStore.RecordOutput(profile, selected, assessment.Output.Output);
-            if (events.Count > 0) ApplyEvents(events);
+            if (!TryPersistMonitoringState(
+                    workItem,
+                    current =>
+                    {
+                        _monitoringStore!.RecordCapability(
+                            current.Id,
+                            new CollectorCapabilityDto(
+                                definition.Id,
+                                true,
+                                "Ready",
+                                null,
+                                definition.Command,
+                                selected,
+                                definition.CandidateCommands,
+                                selected));
+                        return true;
+                    },
+                    out _))
+            {
+                return;
+            }
+            if (!TryPersistMonitoringState(
+                    workItem,
+                    current => _monitoringStore!.RecordOutput(
+                        current,
+                        selected,
+                        assessment.Output.Output),
+                    out var events))
+            {
+                return;
+            }
+            await ApplyMonitoringResultToUiAsync(
+                workItem,
+                events,
+                updatePresentation: false).ConfigureAwait(false);
             return;
         }
 
@@ -2381,17 +2502,24 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                                      ErrorCode: "COMMAND_UNSUPPORTED"
                                  };
         var state = confirmUnsupported ? "Unsupported" : "Degraded";
-        _monitoringStore!.RecordCapability(
-            profile.Id,
-            new CollectorCapabilityDto(
-                definition.Id,
-                !confirmUnsupported,
-                state,
-                assessment.ErrorCode,
-                definition.Command,
-                assessment.Output?.Command,
-                definition.CandidateCommands,
-                previousCapability?.LastSuccessfulCli));
+        TryPersistMonitoringState(
+            workItem,
+            current =>
+            {
+                _monitoringStore!.RecordCapability(
+                    current.Id,
+                    new CollectorCapabilityDto(
+                        definition.Id,
+                        !confirmUnsupported,
+                        state,
+                        assessment.ErrorCode,
+                        definition.Command,
+                        assessment.Output?.Command,
+                        definition.CandidateCommands,
+                        previousCapability?.LastSuccessfulCli));
+                return true;
+            },
+            out _);
     }
 
     private static MonitoringOutputAssessment AssessMonitoringOutput(
@@ -2564,6 +2692,212 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         SortDevicesByPriority();
         RebuildCollectorHealth(DateTimeOffset.UtcNow);
         NotifySummaryChanged();
+    }
+
+    private MonitoringWorkItem[] CaptureMonitoringWorkItems()
+    {
+        lock (_deviceLifecycleSync)
+        {
+            return _deviceStore!.Load()
+                .Where(item =>
+                    item.MonitoringEnabled
+                    && item.ConnectionVerified
+                    && !IsMonitoringCredentialBlocked(item.Id))
+                .Select(item => new MonitoringWorkItem(
+                    item,
+                    GetOrCreateDeviceLifecycleRevisionUnsafe(item.Id)))
+                .ToArray();
+        }
+    }
+
+    private bool TryLoadMonitoringContext(
+        MonitoringWorkItem workItem,
+        out ManagedDeviceProfile profile,
+        out ManagedDeviceSecrets secrets,
+        out IReadOnlyList<CollectorCapabilityDto> capabilities)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out profile))
+            {
+                secrets = null!;
+                capabilities = [];
+                return false;
+            }
+
+            secrets = _deviceStore!.GetSecrets(profile.Id);
+            capabilities = _monitoringStore!.LoadCapabilities(profile.Id);
+            return true;
+        }
+    }
+
+    private bool TryGetCurrentMonitoringProfile(
+        MonitoringWorkItem workItem,
+        out ManagedDeviceProfile profile)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            return IsCurrentMonitoringWorkItemUnsafe(workItem, out profile);
+        }
+    }
+
+    private bool IsCurrentMonitoringWorkItem(MonitoringWorkItem workItem)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            return IsCurrentMonitoringWorkItemUnsafe(workItem, out _);
+        }
+    }
+
+    private bool IsCurrentMonitoringWorkItemUnsafe(
+        MonitoringWorkItem workItem,
+        out ManagedDeviceProfile profile)
+    {
+        profile = null!;
+        if (!_deviceLifecycleRevisions.TryGetValue(workItem.Profile.Id, out var revision)
+            || revision != workItem.Revision)
+        {
+            return false;
+        }
+
+        var current = _deviceStore!.Load().FirstOrDefault(item =>
+            item.Id.Equals(workItem.Profile.Id, StringComparison.Ordinal));
+        if (current is null
+            || !current.MonitoringEnabled
+            || !current.ConnectionVerified
+            || !SameMonitoringDefinition(current, workItem.Profile))
+        {
+            return false;
+        }
+
+        profile = current;
+        return true;
+    }
+
+    private static bool SameMonitoringDefinition(
+        ManagedDeviceProfile current,
+        ManagedDeviceProfile captured) =>
+        current.Id.Equals(captured.Id, StringComparison.Ordinal)
+        && current.DisplayName.Equals(captured.DisplayName, StringComparison.Ordinal)
+        && current.Model.Equals(captured.Model, StringComparison.OrdinalIgnoreCase)
+        && current.Host.Equals(captured.Host, StringComparison.Ordinal)
+        && current.Port == captured.Port
+        && current.ProtectedUsername.Equals(captured.ProtectedUsername, StringComparison.Ordinal)
+        && current.ProtectedPassword.Equals(captured.ProtectedPassword, StringComparison.Ordinal)
+        && string.Equals(
+            current.ProtectedEnablePassword,
+            captured.ProtectedEnablePassword,
+            StringComparison.Ordinal)
+        && current.MonitoringEnabled == captured.MonitoringEnabled
+        && current.ConnectionVerified == captured.ConnectionVerified
+        && current.LastConnectionTestUtc == captured.LastConnectionTestUtc
+        && string.Equals(
+            current.LastConnectionTestCode,
+            captured.LastConnectionTestCode,
+            StringComparison.Ordinal)
+        && current.UpdatedUtc == captured.UpdatedUtc;
+
+    private bool TryPersistMonitoringState<T>(
+        MonitoringWorkItem workItem,
+        Func<ManagedDeviceProfile, T> persist,
+        out T result)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out var current))
+            {
+                result = default!;
+                return false;
+            }
+
+            result = persist(current);
+            return true;
+        }
+    }
+
+    private bool TryBlockMonitoringForCredentialFailure(MonitoringWorkItem workItem)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out _)) return false;
+
+            // Block in memory before attempting either persistent write. This
+            // prevents repeated bad credentials even when the disk is read-only.
+            BlockMonitoringForCredentialFailure(workItem.Profile.Id);
+            return true;
+        }
+    }
+
+    private bool TryMarkConnectionTestFailure(
+        MonitoringWorkItem workItem,
+        string code,
+        out DeviceLifecycleToken token)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out _))
+            {
+                token = workItem.Token;
+                return false;
+            }
+
+            var updated = _deviceStore!.MarkConnectionTest(workItem.Profile.Id, false, code);
+            token = new DeviceLifecycleToken(
+                updated.Id,
+                AdvanceDeviceLifecycleRevisionUnsafe(updated.Id));
+            return true;
+        }
+    }
+
+    private Task ApplyMonitoringResultToUiAsync(
+        MonitoringWorkItem workItem,
+        IReadOnlyList<SwitchEventDto> events,
+        bool updatePresentation) =>
+        RunOnUiAsync(() =>
+        {
+            lock (_deviceLifecycleSync)
+            {
+                if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out _)) return;
+                if (events.Count > 0) ApplyEventsCore(events, true);
+                if (updatePresentation) UpdateManagedDevicePresentation(workItem.Profile.Id);
+            }
+        });
+
+    private Task RunOnUiForDeviceRevisionAsync(
+        DeviceLifecycleToken token,
+        Action action) =>
+        RunOnUiAsync(() =>
+        {
+            lock (_deviceLifecycleSync)
+            {
+                if (!IsCurrentDeviceRevisionUnsafe(token)) return;
+                action();
+            }
+        });
+
+    private bool IsCurrentDeviceRevisionUnsafe(DeviceLifecycleToken token)
+    {
+        if (!_deviceLifecycleRevisions.TryGetValue(token.DeviceId, out var revision)
+            || revision != token.Revision)
+        {
+            return false;
+        }
+
+        return _deviceStore!.Load().Any(item =>
+            item.Id.Equals(token.DeviceId, StringComparison.Ordinal));
+    }
+
+    private long GetOrCreateDeviceLifecycleRevisionUnsafe(string id)
+    {
+        if (_deviceLifecycleRevisions.TryGetValue(id, out var revision)) return revision;
+        return AdvanceDeviceLifecycleRevisionUnsafe(id);
+    }
+
+    private long AdvanceDeviceLifecycleRevisionUnsafe(string id)
+    {
+        var revision = ++_nextDeviceLifecycleRevision;
+        _deviceLifecycleRevisions[id] = revision;
+        return revision;
     }
 
     private void SortDevicesByPriority()
@@ -3019,20 +3353,37 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task ReportMonitoringCycleFailureAsync(string errorCode)
+    private async Task ReportMonitoringCycleFailureAsync(
+        string errorCode,
+        MonitoringWorkItem? workItem = null)
     {
         TryWriteDiagnostic("monitoring-cycle", errorCode);
         try
         {
             await RunOnUiAsync(() =>
                 {
-                    if (OperationMessage.Contains(errorCode, StringComparison.Ordinal))
+                    void ApplyFailureMessage()
                     {
+                        if (OperationMessage.Contains(errorCode, StringComparison.Ordinal))
+                        {
+                            return;
+                        }
+
+                        OperationMessage =
+                            $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+                    }
+
+                    if (workItem is null)
+                    {
+                        ApplyFailureMessage();
                         return;
                     }
 
-                    OperationMessage =
-                        $"{ViewerConnectionMessages.ForCode(errorCode)} · {errorCode}";
+                    lock (_deviceLifecycleSync)
+                    {
+                        if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out _)) return;
+                        ApplyFailureMessage();
+                    }
                 })
                 .WaitAsync(MonitoringFailureReportTimeout, _lifetime.Token)
                 .ConfigureAwait(false);

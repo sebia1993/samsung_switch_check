@@ -52,6 +52,37 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
+    public void DeviceStore_SaveWithOutcome_ReportsConnectionIdentityChanges()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var store = new ManagedDeviceStore(
+                Path.Combine(folder, "devices.json"),
+                new TestProtector());
+
+            var created = store.SaveWithOutcome(Draft("pw", null));
+            Assert.True(created.ConnectionIdentityChanged);
+
+            var displayOnly = store.CreateEditDraft(created.Profile.Id);
+            displayOnly.DisplayName = "ACCESS-SW-RENAMED";
+            var renamed = store.SaveWithOutcome(displayOnly);
+            Assert.False(renamed.ConnectionIdentityChanged);
+            Assert.Equal("ACCESS-SW-RENAMED", renamed.Profile.DisplayName);
+
+            var endpointEdit = store.CreateEditDraft(created.Profile.Id);
+            endpointEdit.Host = "192.0.2.11";
+            var endpointChanged = store.SaveWithOutcome(endpointEdit);
+            Assert.True(endpointChanged.ConnectionIdentityChanged);
+            Assert.Equal("192.0.2.11", endpointChanged.Profile.Host);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void DeviceStore_MigratesLegacyPlainUsernameToProtectedValue()
     {
         var folder = TemporaryFolder();
@@ -1146,6 +1177,64 @@ public sealed class ViewerManagedDeviceTests
                 "show port status",
                 PortStatus(("1", "Down"))));
         Assert.Equal(1, created.Sequence);
+    }
+
+    [Fact]
+    public void MonitoringStore_ResetDeviceCollectionState_IsAtomicAndPreservesClosedHistory()
+    {
+        var persistence = new TestMonitoringPersistence();
+        var store = new ViewerMonitoringStore("monitor.json", persistence);
+        var device = Profile();
+        Assert.Empty(store.RecordOutput(
+            device,
+            "show port status",
+            PortStatus(("1", "Up"))));
+        Assert.Single(store.RecordOutput(
+            device,
+            "show port status",
+            PortStatus(("1", "Down"))));
+        store.RecordCapability(
+            device.Id,
+            new CollectorCapabilityDto("interface_status", true, "Ready"));
+        Assert.Single(store.RecordFailure(device, "TCP_TIMEOUT"));
+        var persistedBeforeReset = persistence.Content;
+
+        persistence.WriteException = new IOException("simulated reset write failure");
+        Assert.Throws<IOException>(() => store.ResetDeviceCollectionState(device.Id));
+
+        Assert.Equal(persistedBeforeReset, persistence.Content);
+        Assert.Single(store.LoadCapabilities(device.Id));
+        Assert.Equal("TCP_TIMEOUT", store.GetActiveFailureCode(device.Id));
+        Assert.Equal(1, store.GetActiveInterfaceConditionCount(device.Id));
+        Assert.All(store.LoadEvents(), item => Assert.False(item.Recovered));
+
+        persistence.WriteException = null;
+        var closed = store.ResetDeviceCollectionState(device.Id);
+
+        Assert.Equal(2, closed.Count);
+        Assert.All(closed, item =>
+        {
+            Assert.True(item.Acknowledged);
+            Assert.True(item.Recovered);
+            Assert.False(item.IsActiveCondition);
+            Assert.NotNull(item.RecoveredAt);
+            Assert.Contains("이전 상태 추적을 종료", item.Detail, StringComparison.Ordinal);
+        });
+        Assert.Empty(store.LoadCapabilities(device.Id));
+        Assert.Null(store.GetActiveFailureCode(device.Id));
+        Assert.Equal(0, store.GetActiveInterfaceConditionCount(device.Id));
+        Assert.Equal(2, store.LoadEvents().Count);
+        Assert.All(store.LoadEvents(), item => Assert.True(item.Recovered));
+
+        var persisted = JsonNode.Parse(persistence.Content!)!.AsObject();
+        Assert.Empty(persisted["Baselines"]!.AsObject());
+        Assert.Empty(persisted["Capabilities"]!.AsObject());
+        Assert.Empty(persisted["ActiveFailures"]!.AsObject());
+        Assert.Empty(persisted["ActiveInterfaceConditions"]!.AsObject());
+
+        var writeCount = persistence.WriteCount;
+        Assert.Empty(store.ResetDeviceCollectionState(device.Id));
+        Assert.Equal(writeCount, persistence.WriteCount);
     }
 
     [Fact]

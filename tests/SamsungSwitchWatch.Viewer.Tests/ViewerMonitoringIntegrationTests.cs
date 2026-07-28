@@ -335,6 +335,363 @@ public sealed class ViewerMonitoringIntegrationTests
     }
 
     [Fact]
+    public async Task MonitoringDisabledDuringInFlightCycle_DiscardsLateSuccess()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingMonitoringClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                viewModel.SetManagedDeviceMonitoring(existing.Id, false);
+                var settled = viewModel.RunMonitoringCycleAsync();
+                client.ReleaseMonitor.TrySetResult();
+                await settled.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var persisted = new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"));
+                Assert.Empty(persisted.LoadCapabilities(existing.Id));
+                Assert.Null(persisted.GetActiveFailureCode(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id);
+                Assert.Equal(DeviceHealth.Empty, Assert.Single(viewModel.Devices).Health);
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task DeviceDeletedDuringInFlightCycle_DiscardsLateFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingFailureMonitoringClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                Assert.True(viewModel.DeleteManagedDevice(existing.Id));
+                var settled = viewModel.RunMonitoringCycleAsync();
+                client.ReleaseMonitor.TrySetResult();
+                await settled.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var persisted = new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"));
+                Assert.Null(persisted.GetActiveFailureCode(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id);
+                Assert.Empty(viewModel.Devices);
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AgentChannelFailureAfterLifecycleChange_UpdatesGlobalStateOnly(
+        bool deleteDevice)
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingAgentChannelFailureClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                if (deleteDevice)
+                {
+                    Assert.True(viewModel.DeleteManagedDevice(existing.Id));
+                }
+                else
+                {
+                    viewModel.SetManagedDeviceMonitoring(existing.Id, false);
+                }
+
+                client.ReleaseMonitor.TrySetResult();
+                await WaitUntilAsync(() =>
+                    viewModel.HttpConnectionState == AgentConnectionState.Offline);
+
+                var persisted = new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"));
+                Assert.Null(persisted.GetActiveFailureCode(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id
+                            && item.Severity == DeviceHealth.Disconnected
+                            && !item.Recovered);
+                if (deleteDevice)
+                {
+                    Assert.Empty(viewModel.Devices);
+                }
+                else
+                {
+                    Assert.Equal(DeviceHealth.Empty, Assert.Single(viewModel.Devices).Health);
+                }
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ChangedConnectionDefinition_StartsWithFreshMonitoringBaseline()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var client = new PortTransitionClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    client.ExecuteCount >= 1
+                    && viewModel.Devices.Single().Health == DeviceHealth.Normal);
+
+                var existing = Assert.Single(devices.Load());
+                var changed = devices.CreateEditDraft(existing.Id);
+                changed.Host = "192.0.2.99";
+                changed.Password = "replacement-password";
+                changed.MonitoringEnabled = true;
+                changed.ConnectionVerified = true;
+                changed.LastConnectionTestUtc = DateTimeOffset.UtcNow.AddMinutes(5);
+                changed.LastConnectionTestCode = "OK";
+                client.LinkDown = true;
+
+                var saved = viewModel.SaveManagedDevice(changed);
+                Assert.True(saved.MonitoringEnabled);
+                await viewModel.RunMonitoringCycleAsync();
+
+                var persisted = new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"));
+                Assert.Equal(0, persisted.GetActiveInterfaceConditionCount(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id
+                            && item.Kind == "포트 상태");
+                Assert.Equal(DeviceHealth.Normal, Assert.Single(viewModel.Devices).Health);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ReenabledPersistedDevice_DiscardsLegacyBaselineBeforeFirstResult()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var legacyState = new ViewerMonitoringStore(monitoringPath);
+            Assert.Empty(legacyState.RecordOutput(
+                existing,
+                "show port status",
+                "Port Admin Link Speed Duplex\r\n1 Enabled Up 1000M Full"));
+            devices.SetMonitoring(existing.Id, false);
+            Assert.Contains(
+                "SHOW PORT STATUS",
+                File.ReadAllText(monitoringPath),
+                StringComparison.Ordinal);
+
+            var client = new PortTransitionClient { LinkDown = true };
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                Assert.Equal(0, client.ExecuteCount);
+
+                viewModel.SetManagedDeviceMonitoring(existing.Id, true);
+                await viewModel.RunMonitoringCycleAsync();
+
+                var persisted = new ViewerMonitoringStore(monitoringPath);
+                Assert.Equal(0, persisted.GetActiveInterfaceConditionCount(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id
+                            && item.Kind == "포트 상태");
+                Assert.Equal(DeviceHealth.Normal, Assert.Single(viewModel.Devices).Health);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task CredentialChangedDuringInFlightAuthenticationFailure_DiscardsOldFailureAndUsesNewPassword()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var client = new BlockingAuthenticationFailureThenSuccessClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var changed = devices.CreateEditDraft(existing.Id);
+                changed.Password = "replacement-password";
+                changed.MonitoringEnabled = true;
+                changed.ConnectionVerified = true;
+                changed.LastConnectionTestUtc = DateTimeOffset.UtcNow.AddMinutes(5);
+                changed.LastConnectionTestCode = "OK";
+                var saved = viewModel.SaveManagedDevice(changed);
+
+                var settled = viewModel.RunMonitoringCycleAsync();
+                client.ReleaseFirstMonitor.TrySetResult();
+                await settled.WaitAsync(TimeSpan.FromSeconds(5));
+
+                Assert.False(viewModel.IsMonitoringCredentialBlocked(existing.Id));
+                var current = Assert.Single(devices.Load());
+                Assert.True(current.ConnectionVerified);
+                Assert.True(current.MonitoringEnabled);
+                Assert.Equal("OK", current.LastConnectionTestCode);
+                Assert.Equal(
+                    "replacement-password",
+                    devices.GetSecrets(existing.Id).Password);
+
+                var requests = client.ExecuteRequests.ToArray();
+                Assert.Equal(2, requests.Length);
+                Assert.Equal("password", requests[0].Password);
+                Assert.Equal("replacement-password", requests[1].Password);
+
+                var persisted = new ViewerMonitoringStore(
+                    Path.Combine(folder, "monitor.json"));
+                Assert.Null(persisted.GetActiveFailureCode(existing.Id));
+                Assert.DoesNotContain(
+                    persisted.LoadEvents(),
+                    item => item.DeviceId == existing.Id);
+                Assert.DoesNotContain(
+                    "인증 실패",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+                Assert.Equal(DeviceHealth.Normal, Assert.Single(viewModel.Devices).Health);
+            }
+            finally
+            {
+                client.ReleaseFirstMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task DisplayOnlySave_ReconcilesPersistedMonitoringEventsIntoDashboard()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var existing = Assert.Single(devices.Load());
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"));
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                new PortTransitionClient(),
+                monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).Health == DeviceHealth.Normal);
+
+                var persisted = Assert.Single(
+                    monitoringStore.RecordFailure(existing, "TCP_TIMEOUT"));
+                Assert.DoesNotContain(
+                    viewModel.RecentEvents,
+                    item => item.AgentEventId == persisted.AgentEventId);
+
+                var renamed = devices.CreateEditDraft(existing.Id);
+                renamed.DisplayName = "ACCESS-SW-RENAMED";
+                var saved = viewModel.SaveManagedDevice(renamed);
+
+                Assert.Equal("ACCESS-SW-RENAMED", saved.DisplayName);
+                await WaitUntilAsync(() =>
+                    viewModel.RecentEvents.Any(item =>
+                        item.AgentEventId == persisted.AgentEventId));
+                var displayed = Assert.Single(
+                    viewModel.RecentEvents,
+                    item => item.AgentEventId == persisted.AgentEventId);
+                Assert.False(displayed.Recovered);
+                Assert.Equal(DeviceHealth.Disconnected, Assert.Single(viewModel.Devices).Health);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public async Task MonitoringCycle_UsesAtMostTwoConcurrentDevices()
     {
         var folder = TemporaryFolder();
@@ -583,13 +940,15 @@ public sealed class ViewerMonitoringIntegrationTests
     private static DashboardViewModel CreateViewModel(
         string folder,
         ManagedDeviceStore devices,
-        StatelessClientBase client) =>
+        StatelessClientBase client,
+        ViewerMonitoringStore? monitoringStore = null) =>
         new(
             new ViewerSettings { DemoMode = true },
             new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
             new ClientFactory(client),
             deviceStore: devices,
-            monitoringStore: new ViewerMonitoringStore(Path.Combine(folder, "monitor.json")));
+            monitoringStore: monitoringStore
+                             ?? new ViewerMonitoringStore(Path.Combine(folder, "monitor.json")));
 
     private static string TemporaryFolder()
     {
@@ -940,6 +1299,92 @@ public sealed class ViewerMonitoringIntegrationTests
             {
                 Interlocked.Decrement(ref _active);
             }
+        }
+    }
+
+    private sealed class BlockingFailureMonitoringClient : StatelessClientBase
+    {
+        public TaskCompletionSource FirstMonitorStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseMonitor { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            FirstMonitorStarted.TrySetResult();
+            await ReleaseMonitor.Task.WaitAsync(cancellationToken);
+            throw new AgentClientException("TCP_TIMEOUT", AgentConnectionState.Stale);
+        }
+    }
+
+    private sealed class BlockingAgentChannelFailureClient : StatelessClientBase
+    {
+        public TaskCompletionSource FirstMonitorStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseMonitor { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            FirstMonitorStarted.TrySetResult();
+            await ReleaseMonitor.Task.WaitAsync(cancellationToken);
+            throw new AgentClientException(
+                "AGENT_UNREACHABLE",
+                AgentConnectionState.Offline);
+        }
+    }
+
+    private sealed class BlockingRecoveryMonitoringClient : StatelessClientBase
+    {
+        private int _executeCount;
+
+        public TaskCompletionSource FirstMonitorStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseMonitor { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int ExecuteCount => Volatile.Read(ref _executeCount);
+
+        public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _executeCount) == 1)
+            {
+                FirstMonitorStarted.TrySetResult();
+                await ReleaseMonitor.Task.WaitAsync(cancellationToken);
+            }
+
+            return Result(request.RequestId, NormalOutputs(request));
+        }
+    }
+
+    private sealed class BlockingAuthenticationFailureThenSuccessClient : StatelessClientBase
+    {
+        private int _executeCount;
+
+        public TaskCompletionSource FirstMonitorStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirstMonitor { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ConcurrentQueue<TelnetExecuteRequestDto> ExecuteRequests { get; } = new();
+
+        public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            ExecuteRequests.Enqueue(request);
+            if (Interlocked.Increment(ref _executeCount) == 1)
+            {
+                FirstMonitorStarted.TrySetResult();
+                await ReleaseFirstMonitor.Task.WaitAsync(cancellationToken);
+                throw new AgentClientException("AUTH_FAILED", AgentConnectionState.Stale);
+            }
+
+            return Result(request.RequestId, NormalOutputs(request));
         }
     }
 
