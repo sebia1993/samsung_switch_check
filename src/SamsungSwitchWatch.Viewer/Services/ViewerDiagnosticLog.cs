@@ -20,6 +20,8 @@ internal sealed class ViewerDiagnosticLog
     [
         "app-initialize",
         "dispatcher-unhandled",
+        "device-store-startup",
+        "device-store-monitoring",
         "monitoring-store-startup",
         "monitoring-cycle",
         "settings-save-interactive",
@@ -40,6 +42,7 @@ internal sealed class ViewerDiagnosticLog
         "VIEWER_MONITOR_CYCLE_FAILED",
         "VIEWER_SETTINGS_WRITE_FAILED",
         "VIEWER_DEVICE_STORE_CORRUPT",
+        "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
         "VIEWER_DEVICE_STORE_UNAVAILABLE",
         "VIEWER_DEVICE_STORE_WRITE_FAILED",
         "VIEWER_DEVICE_NOT_FOUND",

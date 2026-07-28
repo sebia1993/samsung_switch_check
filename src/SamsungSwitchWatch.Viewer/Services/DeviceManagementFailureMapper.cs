@@ -42,6 +42,13 @@ internal static class DeviceManagementFailureMapper
             return "VIEWER_DEVICE_STORE_UNAVAILABLE";
         }
 
+        if (exception.Message.Equals(
+                "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+                StringComparison.Ordinal))
+        {
+            return "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED";
+        }
+
         if (exception is KeyNotFoundException
             || exception.Message.Equals(
                 "VIEWER_DEVICE_NOT_FOUND",

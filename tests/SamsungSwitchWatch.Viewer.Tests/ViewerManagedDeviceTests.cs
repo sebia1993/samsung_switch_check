@@ -122,10 +122,61 @@ public sealed class ViewerManagedDeviceTests
         }
     }
 
+    [Theory]
+    [InlineData(typeof(System.ComponentModel.Win32Exception))]
+    [InlineData(typeof(PlatformNotSupportedException))]
+    public void DeviceStore_LegacyUsernameProtectionFailurePreservesSourceAndFailsClosed(
+        Type exceptionType)
+    {
+        const string original = """
+        {
+          "SchemaVersion":1,
+          "Devices":[{
+            "Id":"legacy",
+            "DisplayName":"ACCESS-SW-LEGACY",
+            "Model":"IES4224GP",
+            "Host":"192.0.2.20",
+            "Port":23,
+            "Username":"legacy-operator",
+            "ProtectedPassword":"cHJvdGVjdGVkOnB3",
+            "MonitoringEnabled":false,
+            "ConnectionVerified":false
+          }]
+        }
+        """;
+        var persistence = new TestManagedDevicePersistence { Content = original };
+        var protectionFailure = (Exception)Activator.CreateInstance(
+            exceptionType,
+            "simulated credential protection failure")!;
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new ThrowingProtectProtector(protectionFailure),
+            persistence);
+
+        var first = store.LoadWithStatus();
+        var second = store.LoadWithStatus();
+
+        Assert.Empty(first.Devices);
+        Assert.Empty(second.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, first.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, second.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_DEVICE_STORE_UNAVAILABLE", store.LoadErrorCode);
+        Assert.Equal(1, persistence.ReadCount);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+        AssertAllStoreOperationsBlocked(
+            store,
+            "VIEWER_DEVICE_STORE_UNAVAILABLE");
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
     public static TheoryData<string> InvalidDeviceStoreDocuments => new()
     {
         "null",
-        """{"SchemaVersion":2,"Devices":[]}""",
         """{"SchemaVersion":1,"Devices":null}""",
         """
         {
@@ -189,6 +240,67 @@ public sealed class ViewerManagedDeviceTests
         Assert.Equal(ManagedDeviceLoadStatus.Ok, valid.Status);
     }
 
+    [Fact]
+    public void DeviceStore_MissingAfterObservedFileLatchesStorageUnavailable()
+    {
+        var persistence = new TestManagedDevicePersistence
+        {
+            Content = """{"SchemaVersion":1,"Devices":[]}"""
+        };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        Assert.Equal(ManagedDeviceLoadStatus.Ok, store.LoadWithStatus().Status);
+        persistence.Content = null;
+
+        var missingAfterObserved = store.LoadWithStatus();
+        var repeated = store.LoadWithStatus();
+
+        Assert.Empty(missingAfterObserved.Devices);
+        Assert.Empty(repeated.Devices);
+        Assert.Equal(
+            ManagedDeviceLoadStatus.StorageUnavailable,
+            missingAfterObserved.Status);
+        Assert.Equal(
+            ManagedDeviceLoadStatus.StorageUnavailable,
+            repeated.Status);
+        Assert.False(store.IsOperational);
+        Assert.Equal(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            store.LoadErrorCode);
+        Assert.Equal(2, persistence.ReadCount);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+    }
+
+    [Fact]
+    public void DeviceStore_MissingAfterSuccessfulSaveLatchesStorageUnavailable()
+    {
+        var persistence = new TestManagedDevicePersistence();
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        _ = store.Save(Draft("pw", null));
+        persistence.Content = null;
+
+        var result = store.LoadWithStatus();
+
+        Assert.Empty(result.Devices);
+        Assert.Equal(
+            ManagedDeviceLoadStatus.StorageUnavailable,
+            result.Status);
+        Assert.False(store.IsOperational);
+        Assert.Equal(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            store.LoadErrorCode);
+        Assert.Equal(2, persistence.ReadCount);
+        Assert.Equal(1, persistence.WriteCount);
+    }
+
     [Theory]
     [InlineData(typeof(IOException))]
     [InlineData(typeof(UnauthorizedAccessException))]
@@ -208,6 +320,162 @@ public sealed class ViewerManagedDeviceTests
         Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, result.Status);
         Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
         Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public void DeviceStore_FutureSchemaIsPreservedAndLatchedWithoutQuarantine()
+    {
+        const string original =
+            """{"SchemaVersion":2,"Devices":{"FutureShape":true}}""";
+        var persistence = new TestManagedDevicePersistence { Content = original };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        var first = store.LoadWithStatus();
+        var second = store.LoadWithStatus();
+
+        Assert.Empty(first.Devices);
+        Assert.Empty(second.Devices);
+        Assert.Equal(ManagedDeviceLoadStatus.VersionUnsupported, first.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.VersionUnsupported, second.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.VersionUnsupported, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED", store.LoadErrorCode);
+        Assert.Equal(1, persistence.ReadCount);
+        Assert.Equal(0, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Fact]
+    public void DeviceStore_CorruptStateRemainsLatchedUntilAStoreRestart()
+    {
+        var persistence = new TestManagedDevicePersistence { Content = "null" };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        var first = store.LoadWithStatus();
+        var second = store.LoadWithStatus();
+
+        Assert.Equal(ManagedDeviceLoadStatus.Corrupt, first.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.Corrupt, second.Status);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_DEVICE_STORE_CORRUPT", store.LoadErrorCode);
+        Assert.Equal(1, persistence.ReadCount);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Null(persistence.Content);
+
+        var restarted = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+        Assert.Equal(ManagedDeviceLoadStatus.Missing, restarted.LoadWithStatus().Status);
+        Assert.True(restarted.IsOperational);
+        Assert.Null(restarted.LoadErrorCode);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void DeviceStore_QuarantineFailurePreservesOriginalAndLatchesStorageUnavailable(
+        Type exceptionType)
+    {
+        const string original = "null";
+        var persistence = new TestManagedDevicePersistence
+        {
+            Content = original,
+            QuarantineException = (Exception)Activator.CreateInstance(
+                exceptionType,
+                "simulated quarantine failure")!
+        };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        var first = store.LoadWithStatus();
+        var second = store.LoadWithStatus();
+
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, first.Status);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, second.Status);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_DEVICE_STORE_UNAVAILABLE", store.LoadErrorCode);
+        Assert.Equal(1, persistence.ReadCount);
+        Assert.Equal(1, persistence.QuarantineCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+        AssertAllStoreOperationsBlocked(
+            store,
+            "VIEWER_DEVICE_STORE_UNAVAILABLE");
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Theory]
+    [InlineData(
+        """{"SchemaVersion":2,"Devices":[]}""",
+        "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED")]
+    [InlineData("null", "VIEWER_DEVICE_STORE_CORRUPT")]
+    public void DeviceStore_LatchedFormatFailureBlocksMutationsAndSecretOperations(
+        string content,
+        string expectedErrorCode)
+    {
+        var persistence = new TestManagedDevicePersistence { Content = content };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+        _ = store.LoadWithStatus();
+        var original = persistence.Content;
+        var readsAfterFailure = persistence.ReadCount;
+
+        AssertAllStoreOperationsBlocked(store, expectedErrorCode);
+
+        Assert.Equal(readsAfterFailure, persistence.ReadCount);
+        Assert.Equal(0, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+    }
+
+    [Theory]
+    [InlineData(typeof(IOException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public void DeviceStore_WriteFailurePreservesOriginalAndLatchesStorageUnavailable(
+        Type exceptionType)
+    {
+        const string original = """{"SchemaVersion":1,"Devices":[]}""";
+        var persistence = new TestManagedDevicePersistence
+        {
+            Content = original,
+            WriteException = (Exception)Activator.CreateInstance(
+                exceptionType,
+                "simulated atomic write failure")!
+        };
+        var store = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+
+        _ = Assert.Throws(
+            exceptionType,
+            () => store.Save(Draft("pw", null)));
+
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.False(store.IsOperational);
+        Assert.Equal("VIEWER_DEVICE_STORE_UNAVAILABLE", store.LoadErrorCode);
+        Assert.Equal(1, persistence.WriteCount);
+        Assert.Equal(original, persistence.Content);
+
+        persistence.WriteException = null;
+        AssertAllStoreOperationsBlocked(
+            store,
+            "VIEWER_DEVICE_STORE_UNAVAILABLE");
+        Assert.Equal(1, persistence.WriteCount);
         Assert.Equal(original, persistence.Content);
     }
 
@@ -287,7 +555,7 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
-    public void DeviceStore_SaveFailureDoesNotReplacePreviouslyPersistedDevices()
+    public void DeviceStore_SaveFailureDoesNotReplacePersistedDevicesAndRequiresRestart()
     {
         var persistence = new TestManagedDevicePersistence();
         var store = new ManagedDeviceStore("viewer-devices.json", new TestProtector(), persistence);
@@ -300,8 +568,14 @@ public sealed class ViewerManagedDeviceTests
         Assert.Throws<IOException>(() => store.Save(edit));
 
         Assert.Equal(previous, persistence.Content);
+        Assert.Equal(ManagedDeviceLoadStatus.StorageUnavailable, store.LastLoadStatus);
+        Assert.Empty(store.Load());
         persistence.WriteException = null;
-        Assert.Equal("ACCESS-SW-01", Assert.Single(store.Load()).DisplayName);
+        var restarted = new ManagedDeviceStore(
+            "viewer-devices.json",
+            new TestProtector(),
+            persistence);
+        Assert.Equal("ACCESS-SW-01", Assert.Single(restarted.Load()).DisplayName);
     }
 
     [Fact]
@@ -411,6 +685,76 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
+    public async Task Dashboard_LegacyToStatelessSwitchRemovesStaleDevicesWhenStoreFails()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new TestManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var now = DateTimeOffset.UtcNow;
+            var legacy = new LegacyFakeClient(new AgentSnapshotDto(
+                now,
+                AgentConnectionState.Connected,
+                [
+                    new DeviceSnapshotDto(
+                        "legacy-device",
+                        "LEGACY-SW",
+                        "IES4224GP",
+                        "비공개",
+                        DeviceHealth.Normal,
+                        now,
+                        "정상",
+                        "1일")
+                ],
+                0,
+                "legacy",
+                "legacy collector"));
+            var replacement = new StatelessFakeClient();
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new QueueClientFactory(legacy, replacement),
+                deviceStore: devices);
+            try
+            {
+                await viewModel.InitializeAsync();
+                Assert.Single(viewModel.Devices);
+                Assert.Equal(1, viewModel.NormalCount);
+
+                persistence.ReadException =
+                    new IOException("private path host=192.0.2.10 password=secret");
+
+                await viewModel.SwitchClientAsync(
+                    new ViewerSettings { DemoMode = true });
+
+                Assert.Empty(viewModel.Devices);
+                Assert.Null(viewModel.SelectedDevice);
+                Assert.Equal(0, viewModel.NormalCount);
+                Assert.Equal(0, viewModel.MonitoredCount);
+                Assert.False(viewModel.ReadOnlyQueriesEnabled);
+                Assert.Equal(DeviceHealth.Warning, viewModel.MiniIssueHealth);
+                Assert.Contains(
+                    "VIEWER_DEVICE_STORE_UNAVAILABLE",
+                    viewModel.OperationMessage,
+                    StringComparison.Ordinal);
+            }
+            finally
+            {
+                persistence.ReadException = null;
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public async Task Dashboard_ManualRefreshPreservesDevicesAndStoreWarningOnReadFailure()
     {
         var folder = TemporaryFolder();
@@ -474,6 +818,47 @@ public sealed class ViewerManagedDeviceTests
             try
             {
                 Assert.Empty(viewModel.GetManagedDevices());
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task Dashboard_GetManagedDevicesReportsFutureSchemaAsVersionUnsupported()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            const string original =
+                """{"SchemaVersion":2,"Devices":{"FutureShape":true}}""";
+            var persistence = new TestManagedDevicePersistence { Content = original };
+            var store = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
+                new StatelessFactory(new StatelessFakeClient()),
+                deviceStore: store);
+            try
+            {
+                var exception = Assert.Throws<InvalidDataException>(
+                    () => viewModel.GetManagedDevices());
+
+                Assert.Equal(
+                    "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+                    exception.Message);
+                Assert.Equal(original, persistence.Content);
+                Assert.Equal(0, persistence.QuarantineCount);
+                Assert.Equal(0, persistence.WriteCount);
             }
             finally
             {
@@ -1993,6 +2378,36 @@ public sealed class ViewerManagedDeviceTests
         EnablePassword = enablePassword ?? string.Empty
     };
 
+    private static void AssertStoreOperationBlocked(
+        string expectedErrorCode,
+        Action operation)
+    {
+        var exception = Assert.ThrowsAny<Exception>(operation);
+        Assert.Equal(expectedErrorCode, exception.Message);
+    }
+
+    private static void AssertAllStoreOperationsBlocked(
+        ManagedDeviceStore store,
+        string expectedErrorCode)
+    {
+        AssertStoreOperationBlocked(expectedErrorCode, () => store.Save(Draft("pw", null)));
+        AssertStoreOperationBlocked(expectedErrorCode, () => store.Delete("device"));
+        AssertStoreOperationBlocked(
+            expectedErrorCode,
+            () => store.SetMonitoring("device", enabled: true));
+        AssertStoreOperationBlocked(
+            expectedErrorCode,
+            () => store.MarkConnectionTest("device", success: true, "OK"));
+        AssertStoreOperationBlocked(expectedErrorCode, () => store.GetSecrets("device"));
+        AssertStoreOperationBlocked(
+            expectedErrorCode,
+            () => store.ResolveDraftForOperation(new ManagedDeviceDraft { Id = "device" }));
+        AssertStoreOperationBlocked(
+            expectedErrorCode,
+            () => store.ResolveDraftForOperation(new ManagedDeviceDraft()));
+        AssertStoreOperationBlocked(expectedErrorCode, () => store.CreateEditDraft("device"));
+    }
+
     private static ManagedDeviceProfile Profile() => new()
     {
         Id = "sw-01",
@@ -2131,17 +2546,32 @@ public sealed class ViewerManagedDeviceTests
         }
     }
 
+    private sealed class ThrowingProtectProtector(Exception exception)
+        : IViewerSecretProtector
+    {
+        public string Protect(string plainText) => throw exception;
+
+        public string Unprotect(string protectedText)
+        {
+            var decoded = System.Text.Encoding.UTF8.GetString(
+                Convert.FromBase64String(protectedText));
+            return decoded["protected:".Length..];
+        }
+    }
+
     private sealed class TestManagedDevicePersistence : IManagedDevicePersistence
     {
         public string? Content { get; set; }
         public Exception? ReadException { get; set; }
         public Exception? WriteException { get; set; }
         public Exception? QuarantineException { get; init; }
+        public int ReadCount { get; private set; }
         public int WriteCount { get; private set; }
         public int QuarantineCount { get; private set; }
 
         public string? ReadIfExists(string path)
         {
+            ReadCount++;
             if (ReadException is not null) throw ReadException;
             return Content;
         }
@@ -2206,6 +2636,55 @@ public sealed class ViewerManagedDeviceTests
     private sealed class StatelessFactory(StatelessFakeClient client) : IAgentClientFactory
     {
         public IAgentClient Create(ViewerSettings settings) => client;
+    }
+
+    private sealed class QueueClientFactory(params IAgentClient[] clients) : IAgentClientFactory
+    {
+        private readonly Queue<IAgentClient> _clients = new(clients);
+
+        public IAgentClient Create(ViewerSettings settings) => _clients.Dequeue();
+    }
+
+    private sealed class LegacyFakeClient(AgentSnapshotDto snapshot) : IAgentClient
+    {
+        public event EventHandler<AgentEventChangeDto>? EventChanged { add { } remove { } }
+        public event EventHandler<AgentConnectionState>? ConnectionStateChanged { add { } remove { } }
+
+        public Task StartAsync(CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<AgentSnapshotDto> GetSnapshotAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(snapshot);
+
+        public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(
+            int limit,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<SwitchEventDto>>([]);
+
+        public Task<EventChangePageDto> GetEventChangesAsync(
+            long cursor,
+            int limit,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new EventChangePageDto(cursor, cursor, false, []));
+
+        public Task<CommandResultDto> ExecuteRegisteredCheckAsync(
+            string deviceId,
+            string commandId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new CommandResultDto(false, "not used"));
+
+        public Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+            string deviceId,
+            string command,
+            CancellationToken cancellationToken) =>
+            Task.FromException<ReadOnlyQueryResultDto>(new NotSupportedException());
+
+        public Task<bool> AcknowledgeAsync(
+            string eventId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class StatelessFakeClient : IAgentClient

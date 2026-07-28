@@ -492,17 +492,20 @@ public sealed class ViewerSettingsTests
         Assert.False(StartupWindowPolicy.ShouldShowMainWindow(
             settings,
             needsConnection: false,
-            ViewerMonitoringLoadStatus.Ok));
+            ViewerMonitoringLoadStatus.Ok,
+            ManagedDeviceLoadStatus.Ok));
         Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
             settings,
             needsConnection: true,
-            ViewerMonitoringLoadStatus.Ok));
+            ViewerMonitoringLoadStatus.Ok,
+            ManagedDeviceLoadStatus.Ok));
 
         settings.StartMinimizedToTray = false;
         Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
             settings,
             needsConnection: false,
-            ViewerMonitoringLoadStatus.Ok));
+            ViewerMonitoringLoadStatus.Ok,
+            ManagedDeviceLoadStatus.Ok));
     }
 
     [Theory]
@@ -519,7 +522,26 @@ public sealed class ViewerSettingsTests
         Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
             settings,
             needsConnection: false,
-            monitoringLoadStatus));
+            monitoringLoadStatus,
+            ManagedDeviceLoadStatus.Ok));
+    }
+
+    [Theory]
+    [InlineData("Corrupt")]
+    [InlineData("VersionUnsupported")]
+    [InlineData("StorageUnavailable")]
+    public void StartupWindowPolicy_DeviceStoreFailureOverridesTrayStart(
+        string deviceLoadStatusName)
+    {
+        var settings = new ViewerSettings { StartMinimizedToTray = true };
+        var deviceLoadStatus =
+            Enum.Parse<ManagedDeviceLoadStatus>(deviceLoadStatusName);
+
+        Assert.True(StartupWindowPolicy.ShouldShowMainWindow(
+            settings,
+            needsConnection: false,
+            ViewerMonitoringLoadStatus.Ok,
+            deviceLoadStatus));
     }
 
     [Fact]

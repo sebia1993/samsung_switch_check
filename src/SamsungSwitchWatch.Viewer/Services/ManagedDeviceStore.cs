@@ -14,6 +14,7 @@ public class ManagedDeviceStore
     private readonly string _path;
     private readonly IViewerSecretProtector _protector;
     private readonly IManagedDevicePersistence _persistence;
+    private bool _hasObservedStoreFile;
 
     public ManagedDeviceStore(string? path = null, IViewerSecretProtector? protector = null)
         : this(path, protector, PhysicalManagedDevicePersistence.Instance)
@@ -35,6 +36,14 @@ public class ManagedDeviceStore
 
     public string Path => _path;
     public ManagedDeviceLoadStatus LastLoadStatus { get; private set; } = ManagedDeviceLoadStatus.Ok;
+    public bool IsOperational => LoadErrorCode is null;
+    public string? LoadErrorCode => LastLoadStatus switch
+    {
+        ManagedDeviceLoadStatus.Corrupt => "VIEWER_DEVICE_STORE_CORRUPT",
+        ManagedDeviceLoadStatus.StorageUnavailable => "VIEWER_DEVICE_STORE_UNAVAILABLE",
+        ManagedDeviceLoadStatus.VersionUnsupported => "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+        _ => null
+    };
 
     public IReadOnlyList<ManagedDeviceProfile> Load() => LoadWithStatus().Devices;
 
@@ -42,6 +51,11 @@ public class ManagedDeviceStore
     {
         lock (_sync)
         {
+            if (!IsOperational)
+            {
+                return new ManagedDeviceLoadResult([], LastLoadStatus);
+            }
+
             try
             {
                 var devices = LoadUnsafe(allowMigrationWriteFailure: true)
@@ -54,11 +68,15 @@ public class ManagedDeviceStore
             {
                 return new ManagedDeviceLoadResult([], LastLoadStatus);
             }
+            catch (DeviceStoreVersionUnsupportedException)
+            {
+                return new ManagedDeviceLoadResult([], LastLoadStatus);
+            }
             catch (Exception exception) when (IsStorageException(exception))
             {
                 // A locked, read-only, or temporarily unavailable file is not
                 // corrupt. Preserve it and expose a non-normal load state.
-                LastLoadStatus = ManagedDeviceLoadStatus.StorageUnavailable;
+                LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
                 return new ManagedDeviceLoadResult([], LastLoadStatus);
             }
         }
@@ -182,6 +200,7 @@ public class ManagedDeviceStore
     {
         lock (_sync)
         {
+            ThrowIfNotOperational();
             var existing = string.IsNullOrWhiteSpace(input.Id)
                 ? null
                 : LoadUnsafe().FirstOrDefault(item => item.Id.Equals(input.Id, StringComparison.Ordinal));
@@ -291,19 +310,60 @@ public class ManagedDeviceStore
 
     private IReadOnlyList<ManagedDeviceProfile> LoadUnsafe(bool allowMigrationWriteFailure = false)
     {
-        var storedJson = _persistence.ReadIfExists(_path);
+        ThrowIfNotOperational();
+
+        string? storedJson;
+        try
+        {
+            storedJson = _persistence.ReadIfExists(_path);
+        }
+        catch (DecoderFallbackException exception)
+        {
+            throw CreateCorruptLoadException(exception);
+        }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
+            throw;
+        }
+
         if (storedJson is null)
         {
+            if (_hasObservedStoreFile)
+            {
+                LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
+                throw new IOException("VIEWER_DEVICE_STORE_UNAVAILABLE");
+            }
+
             LastLoadStatus = ManagedDeviceLoadStatus.Missing;
             return [];
         }
+        _hasObservedStoreFile = true;
 
         DeviceStoreEnvelope? envelope;
         try
         {
+            using var document = JsonDocument.Parse(storedJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("SchemaVersion", out var schemaElement)
+                || !schemaElement.TryGetInt32(out var schemaVersion)
+                || schemaVersion < 1)
+            {
+                throw new DeviceStoreFormatException();
+            }
+            if (schemaVersion > CurrentSchemaVersion)
+            {
+                LatchFailure(ManagedDeviceLoadStatus.VersionUnsupported);
+                throw new DeviceStoreVersionUnsupportedException();
+            }
+
             envelope = JsonSerializer.Deserialize<DeviceStoreEnvelope>(
                 storedJson, JsonOptions);
             ValidateEnvelope(envelope);
+        }
+        catch (DeviceStoreVersionUnsupportedException)
+        {
+            throw;
         }
         catch (Exception exception) when (
             exception is JsonException
@@ -311,9 +371,7 @@ public class ManagedDeviceStore
             or DecoderFallbackException
             or DeviceStoreFormatException)
         {
-            TryQuarantineCorruptFile();
-            LastLoadStatus = ManagedDeviceLoadStatus.Corrupt;
-            throw new DeviceStoreCorruptException(exception);
+            throw CreateCorruptLoadException(exception);
         }
 
         var devices = envelope!.Devices!;
@@ -323,7 +381,18 @@ public class ManagedDeviceStore
             if (string.IsNullOrWhiteSpace(item.ProtectedUsername)
                 && !string.IsNullOrWhiteSpace(item.LegacyUsername))
             {
-                item.ProtectedUsername = _protector.Protect(item.LegacyUsername);
+                try
+                {
+                    item.ProtectedUsername = _protector.Protect(item.LegacyUsername);
+                }
+                catch (Exception exception) when (IsCredentialProtectionException(exception))
+                {
+                    // A valid legacy file must not crash Viewer startup or be
+                    // rewritten when the current Windows profile cannot use
+                    // DPAPI. Preserve the source and fail closed for this run.
+                    LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
+                    throw new IOException("VIEWER_DEVICE_STORE_UNAVAILABLE", exception);
+                }
                 item.LegacyUsername = null;
                 migrated = true;
             }
@@ -357,7 +426,7 @@ public class ManagedDeviceStore
             {
                 // Keep the validated in-memory data available for this session,
                 // but do not report the migration as successfully persisted.
-                LastLoadStatus = ManagedDeviceLoadStatus.StorageUnavailable;
+                LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
                 return devices;
             }
         }
@@ -368,25 +437,71 @@ public class ManagedDeviceStore
 
     private void SaveUnsafe(IEnumerable<ManagedDeviceProfile> devices)
     {
+        ThrowIfNotOperational();
         var envelope = new DeviceStoreEnvelope
         {
             SchemaVersion = CurrentSchemaVersion,
             Devices = devices.OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToList()
         };
-        _persistence.WriteAtomically(_path, JsonSerializer.Serialize(envelope, JsonOptions));
+        try
+        {
+            _persistence.WriteAtomically(_path, JsonSerializer.Serialize(envelope, JsonOptions));
+            _hasObservedStoreFile = true;
+            LastLoadStatus = ManagedDeviceLoadStatus.Ok;
+        }
+        catch (Exception exception) when (IsStorageException(exception))
+        {
+            LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
+            throw;
+        }
     }
 
-    private void TryQuarantineCorruptFile()
+    private Exception CreateCorruptLoadException(Exception exception)
+    {
+        if (!TryQuarantineCorruptFile())
+        {
+            LatchFailure(ManagedDeviceLoadStatus.StorageUnavailable);
+            return new IOException("VIEWER_DEVICE_STORE_UNAVAILABLE", exception);
+        }
+
+        LatchFailure(ManagedDeviceLoadStatus.Corrupt);
+        return new DeviceStoreCorruptException(exception);
+    }
+
+    private bool TryQuarantineCorruptFile()
     {
         var quarantine = _path + $".corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}";
         try
         {
             _persistence.Quarantine(_path, quarantine);
+            return true;
         }
         catch (Exception exception) when (IsStorageException(exception))
         {
             // Keep the corrupt source in place if it cannot be moved. It must
             // never be deleted or treated as a normal empty device list.
+            return false;
+        }
+    }
+
+    private void LatchFailure(ManagedDeviceLoadStatus status)
+    {
+        if (IsOperational)
+        {
+            LastLoadStatus = status;
+        }
+    }
+
+    private void ThrowIfNotOperational()
+    {
+        switch (LastLoadStatus)
+        {
+            case ManagedDeviceLoadStatus.Corrupt:
+                throw new DeviceStoreCorruptException();
+            case ManagedDeviceLoadStatus.VersionUnsupported:
+                throw new DeviceStoreVersionUnsupportedException();
+            case ManagedDeviceLoadStatus.StorageUnavailable:
+                throw new IOException("VIEWER_DEVICE_STORE_UNAVAILABLE");
         }
     }
 
@@ -482,8 +597,13 @@ public class ManagedDeviceStore
     {
     }
 
-    private sealed class DeviceStoreCorruptException(Exception innerException)
+    private sealed class DeviceStoreCorruptException(Exception? innerException = null)
         : Exception("VIEWER_DEVICE_STORE_CORRUPT", innerException)
+    {
+    }
+
+    private sealed class DeviceStoreVersionUnsupportedException()
+        : Exception("VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED")
     {
     }
 }
@@ -497,7 +617,8 @@ public enum ManagedDeviceLoadStatus
     Ok,
     Missing,
     Corrupt,
-    StorageUnavailable
+    StorageUnavailable,
+    VersionUnsupported
 }
 
 internal sealed record ManagedDeviceLoadResult(

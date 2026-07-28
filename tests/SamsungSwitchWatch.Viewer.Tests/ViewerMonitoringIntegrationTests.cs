@@ -2,6 +2,8 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
@@ -1015,6 +1017,371 @@ public sealed class ViewerMonitoringIntegrationTests
         }
     }
 
+    [Theory]
+    [InlineData(
+        "Corrupt",
+        "VIEWER_DEVICE_STORE_CORRUPT")]
+    [InlineData(
+        "VersionUnsupported",
+        "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED")]
+    [InlineData(
+        "StorageUnavailable",
+        "VIEWER_DEVICE_STORE_UNAVAILABLE")]
+    [InlineData(
+        "MissingAfterObserved",
+        "VIEWER_DEVICE_STORE_UNAVAILABLE")]
+    public async Task RuntimeDeviceStoreFailure_StopsMonitoringWithoutFalseHealthyState(
+        string failureName,
+        string expectedErrorCode)
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new RuntimeManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            devices.Save(new ManagedDeviceDraft
+            {
+                DisplayName = "ACCESS-SW-01",
+                Model = "IES4224GP",
+                Host = "192.0.2.11",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true,
+                ConnectionVerified = true,
+                LastConnectionTestUtc = DateTimeOffset.UtcNow,
+                LastConnectionTestCode = "OK"
+            });
+            var client = new RecordingClient();
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                client,
+                new ViewerMonitoringStore(monitoringPath));
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    client.ExecuteRequests.Count > 0
+                    && viewModel.NormalCount == 1);
+                await viewModel.RunMonitoringCycleAsync();
+
+                var requestsBeforeFailure = client.ExecuteRequests.Count;
+                var monitoringStateBeforeFailure =
+                    File.ReadAllText(monitoringPath, Encoding.UTF8);
+                persistence.Fail(failureName);
+
+                await viewModel.RunMonitoringCycleAsync();
+                await viewModel.RunMonitoringCycleSafelyAsync(
+                    CancellationToken.None);
+
+                Assert.False(devices.IsOperational);
+                Assert.Equal(expectedErrorCode, devices.LoadErrorCode);
+                Assert.Equal(requestsBeforeFailure, client.ExecuteRequests.Count);
+                Assert.Equal(
+                    monitoringStateBeforeFailure,
+                    File.ReadAllText(monitoringPath, Encoding.UTF8));
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal("DeviceStoreUnavailable", device.CollectionState);
+                Assert.Equal(expectedErrorCode, device.CollectionErrorCode);
+                Assert.Equal(0, viewModel.NormalCount);
+                Assert.Equal(1, viewModel.WarningCount);
+                Assert.Equal(0, viewModel.MonitoredCount);
+                Assert.Equal(1, viewModel.UnmonitoredCount);
+                Assert.Equal(DeviceHealth.Warning, viewModel.MiniIssueHealth);
+                Assert.Contains("장비 목록 저장소", viewModel.MiniIssueTitle, StringComparison.Ordinal);
+                Assert.Contains("자동 감시 중지", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains(expectedErrorCode, viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains(viewModel.CollectorHealth, item =>
+                    item.Label == "Viewer 감시"
+                    && item.Value.Contains(expectedErrorCode, StringComparison.Ordinal)
+                    && item.Health == DeviceHealth.Warning);
+                Assert.Contains(viewModel.OperationalStatuses, item =>
+                    item.Code == expectedErrorCode
+                    && item.Detail.Contains("자동 감시 중지", StringComparison.Ordinal)
+                    && item.Health == DeviceHealth.Warning);
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("Corrupt")]
+    [InlineData("VersionUnsupported")]
+    [InlineData("StorageUnavailable")]
+    public async Task StartupDeviceStoreFailure_DoesNotStartMonitoringSession(
+        string failureName)
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new RuntimeManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            devices.Save(new ManagedDeviceDraft
+            {
+                DisplayName = "ACCESS-SW-01",
+                Model = "IES4224GP",
+                Host = "192.0.2.11",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true,
+                ConnectionVerified = true,
+                LastConnectionTestUtc = DateTimeOffset.UtcNow,
+                LastConnectionTestCode = "OK"
+            });
+            persistence.Fail(failureName);
+            var client = new RecordingClient();
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                client,
+                new ViewerMonitoringStore(monitoringPath));
+
+            await viewModel.InitializeAsync();
+
+            Assert.Empty(client.ExecuteRequests);
+            Assert.False(File.Exists(monitoringPath));
+
+            await viewModel.DisposeAsync();
+
+            Assert.False(File.Exists(monitoringPath));
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeDeviceStoreFailure_DisposeDoesNotCloseSession_AndRestartReportsGap()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new RuntimeManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var profile = devices.Save(new ManagedDeviceDraft
+            {
+                DisplayName = "ACCESS-SW-01",
+                Model = "IES4224GP",
+                Host = "192.0.2.11",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true,
+                ConnectionVerified = true,
+                LastConnectionTestUtc = DateTimeOffset.UtcNow,
+                LastConnectionTestCode = "OK"
+            });
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                new RecordingClient(),
+                new ViewerMonitoringStore(monitoringPath));
+
+            await viewModel.InitializeAsync();
+            await WaitUntilAsync(() =>
+                Assert.Single(viewModel.Devices).Health == DeviceHealth.Normal);
+
+            persistence.Fail("StorageUnavailable");
+            await viewModel.RunMonitoringCycleAsync();
+            await WaitUntilAsync(() =>
+                Assert.Single(viewModel.Devices).CollectionState
+                    == "DeviceStoreUnavailable");
+
+            var stateAtFailure = ReadSessionTimestamps(monitoringPath);
+            Assert.NotNull(stateAtFailure.LastHeartbeatUtc);
+            Assert.Null(stateAtFailure.LastStoppedUtc);
+
+            await viewModel.DisposeAsync();
+
+            var stateAfterDispose = ReadSessionTimestamps(monitoringPath);
+            Assert.Equal(
+                stateAtFailure.LastHeartbeatUtc,
+                stateAfterDispose.LastHeartbeatUtc);
+            Assert.Equal(
+                stateAtFailure.LastStoppedUtc,
+                stateAfterDispose.LastStoppedUtc);
+
+            BackdateOpenMonitoringSession(
+                monitoringPath,
+                DateTimeOffset.UtcNow.AddMinutes(-1));
+            var restartedStore = new ViewerMonitoringStore(monitoringPath);
+
+            var gap = Assert.Single(restartedStore.BeginSession([profile]));
+
+            Assert.Equal(profile.Id, gap.DeviceId);
+            Assert.Equal(DeviceHealth.Warning, gap.Severity);
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task DelayedAgentStartFailure_DoesNotHeartbeatAfterDeviceStoreWriteFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new RuntimeManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var profile = devices.Save(new ManagedDeviceDraft
+            {
+                DisplayName = "ACCESS-SW-01",
+                Model = "IES4224GP",
+                Host = "192.0.2.11",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true,
+                ConnectionVerified = true,
+                LastConnectionTestUtc = DateTimeOffset.UtcNow,
+                LastConnectionTestCode = "OK"
+            });
+            var pendingSave = devices.CreateEditDraft(profile.Id);
+            pendingSave.DisplayName = "ACCESS-SW-RENAMED";
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var client = new DelayedMonitorStartFailureClient();
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                client,
+                new ViewerMonitoringStore(monitoringPath));
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.MonitorStartEntered.Task.WaitAsync(
+                    TimeSpan.FromSeconds(5));
+                var stateBeforeFailure =
+                    File.ReadAllText(monitoringPath, Encoding.UTF8);
+
+                persistence.FailWrites();
+                Assert.Throws<IOException>(() => devices.Save(pendingSave));
+                Assert.False(devices.IsOperational);
+
+                client.ReleaseMonitorStart.TrySetResult();
+                await client.MonitorStartCompleted.Task.WaitAsync(
+                    TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState
+                        == "DeviceStoreUnavailable");
+
+                Assert.Equal(
+                    stateBeforeFailure,
+                    File.ReadAllText(monitoringPath, Encoding.UTF8));
+
+                await viewModel.DisposeAsync();
+
+                Assert.Equal(
+                    stateBeforeFailure,
+                    File.ReadAllText(monitoringPath, Encoding.UTF8));
+            }
+            finally
+            {
+                client.ReleaseMonitorStart.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task SuccessfulAgentResult_DoesNotHeartbeatAfterConcurrentDeviceStoreWriteFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var persistence = new RuntimeManagedDevicePersistence();
+            var devices = new ManagedDeviceStore(
+                "viewer-devices.json",
+                new TestProtector(),
+                persistence);
+            var profile = devices.Save(new ManagedDeviceDraft
+            {
+                DisplayName = "ACCESS-SW-01",
+                Model = "IES4224GP",
+                Host = "192.0.2.11",
+                Username = "operator",
+                Password = "password",
+                MonitoringEnabled = true,
+                ConnectionVerified = true,
+                LastConnectionTestUtc = DateTimeOffset.UtcNow,
+                LastConnectionTestCode = "OK"
+            });
+            var pendingSave = devices.CreateEditDraft(profile.Id);
+            pendingSave.DisplayName = "ACCESS-SW-RENAMED";
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var client = new BlockingMonitoringClient();
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                client,
+                new ViewerMonitoringStore(monitoringPath));
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(
+                    TimeSpan.FromSeconds(5));
+                var stateBeforeFailure =
+                    File.ReadAllText(monitoringPath, Encoding.UTF8);
+
+                persistence.FailWrites();
+                Assert.Throws<IOException>(() => devices.Save(pendingSave));
+                Assert.False(devices.IsOperational);
+
+                client.ReleaseMonitor.TrySetResult();
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState
+                        == "DeviceStoreUnavailable");
+
+                Assert.Equal(
+                    stateBeforeFailure,
+                    File.ReadAllText(monitoringPath, Encoding.UTF8));
+
+                await viewModel.DisposeAsync();
+
+                Assert.Equal(
+                    stateBeforeFailure,
+                    File.ReadAllText(monitoringPath, Encoding.UTF8));
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
     [Fact]
     public async Task AgentPreflightFailure_StopsCycleWithoutPerDeviceRequests()
     {
@@ -1257,6 +1624,48 @@ public sealed class ViewerMonitoringIntegrationTests
         Assert.True(condition());
     }
 
+    private static (
+        DateTimeOffset? LastHeartbeatUtc,
+        DateTimeOffset? LastStoppedUtc) ReadSessionTimestamps(string path)
+    {
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(path, Encoding.UTF8));
+        var root = document.RootElement;
+        return (
+            ReadNullableTimestamp(root, "LastHeartbeatUtc"),
+            ReadNullableTimestamp(root, "LastStoppedUtc"));
+    }
+
+    private static DateTimeOffset? ReadNullableTimestamp(
+        JsonElement root,
+        string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var property)
+            || property.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return property.GetDateTimeOffset();
+    }
+
+    private static void BackdateOpenMonitoringSession(
+        string path,
+        DateTimeOffset timestamp)
+    {
+        var root = JsonNode.Parse(
+                File.ReadAllText(path, Encoding.UTF8))
+            ?.AsObject()
+            ?? throw new InvalidDataException("MONITOR_STATE_NULL");
+        root["LastStartedUtc"] = timestamp;
+        root["LastHeartbeatUtc"] = timestamp;
+        root["LastStoppedUtc"] = null;
+        File.WriteAllText(
+            path,
+            root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
+            new UTF8Encoding(false));
+    }
+
     private sealed class TestProtector : IViewerSecretProtector
     {
         public string Protect(string plainText) =>
@@ -1267,6 +1676,56 @@ public sealed class ViewerMonitoringIntegrationTests
             var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(protectedText));
             return decoded["protected:".Length..];
         }
+    }
+
+    private sealed class RuntimeManagedDevicePersistence : IManagedDevicePersistence
+    {
+        public string? Content { get; private set; }
+        public Exception? ReadException { get; private set; }
+        public Exception? WriteException { get; private set; }
+
+        public string? ReadIfExists(string path)
+        {
+            if (ReadException is not null) throw ReadException;
+            return Content;
+        }
+
+        public void WriteAtomically(string path, string content)
+        {
+            if (WriteException is not null) throw WriteException;
+            Content = content;
+        }
+
+        public void Quarantine(string path, string destination) =>
+            Content = null;
+
+        public void Fail(string failureName)
+        {
+            switch (failureName)
+            {
+                case "Corrupt":
+                    Content = "{";
+                    break;
+                case "VersionUnsupported":
+                    Content = """{"SchemaVersion":2,"Devices":[]}""";
+                    break;
+                case "StorageUnavailable":
+                    ReadException = new IOException("simulated device-store read failure");
+                    break;
+                case "MissingAfterObserved":
+                    Content = null;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(failureName),
+                        failureName,
+                        null);
+            }
+        }
+
+        public void FailWrites() =>
+            WriteException =
+                new IOException("simulated device-store write failure");
     }
 
     private sealed class SelectiveProtector : IViewerSecretProtector
@@ -1818,6 +2277,47 @@ public sealed class ViewerMonitoringIntegrationTests
             ExecuteCount++;
             return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
         }
+    }
+
+    private sealed class DelayedMonitorStartFailureClient : StatelessClientBase
+    {
+        private int _startCount;
+
+        public TaskCompletionSource MonitorStartEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseMonitorStart { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource MonitorStartCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task StartAsync(
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _startCount) == 1)
+            {
+                RaiseConnectionState(AgentConnectionState.Demo);
+                return;
+            }
+
+            MonitorStartEntered.TrySetResult();
+            try
+            {
+                await ReleaseMonitorStart.Task.WaitAsync(cancellationToken);
+                throw new AgentClientException(
+                    "AGENT_UNREACHABLE",
+                    AgentConnectionState.Offline);
+            }
+            finally
+            {
+                MonitorStartCompleted.TrySetResult();
+            }
+        }
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "A failed monitor preflight must not execute a device command.");
     }
 
     private sealed class FailOnceMonitoringClient : StatelessClientBase

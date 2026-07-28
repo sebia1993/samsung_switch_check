@@ -230,20 +230,98 @@ public sealed class WpfSmokeTests
         var diagnosticEntries = new List<(string Stage, string ErrorCode)>();
         var settingsStore =
             new ViewerSettingsStore(Path.Combine(folder, "fault-settings.json"));
+        var agentFactory = new CountingAgentClientFactory();
         var viewModel = new DashboardViewModel(
             new ViewerSettings { DemoMode = true },
             settingsStore,
-            clientFactory: null,
+            agentFactory,
             synchronizationContext: SynchronizationContext.Current,
             deviceStore,
             monitoringStore,
             new ViewerSettingsSaveCoordinator(settingsStore),
             (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
             static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        viewModel.InitializeAsync().GetAwaiter().GetResult();
 
-        persistence.ReadException =
-            new IOException("private path host=192.0.2.15 password=initial-secret");
-        var initialFailureWindow = new DeviceManagementWindow(viewModel);
+        const string futureStoreContent =
+            """{"SchemaVersion":2,"Devices":{"Host":"192.0.2.99","Secret":"future-secret"}}""";
+        var futurePersistence = new FaultingManagedDevicePersistence();
+        futurePersistence.Seed(futureStoreContent);
+        var futureStore = new ManagedDeviceStore(
+            Path.Combine(folder, "future-devices.json"),
+            new TestSecretProtector(),
+            futurePersistence);
+        var futureViewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            clientFactory: null,
+            synchronizationContext: SynchronizationContext.Current,
+            futureStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        var futureWindow = new DeviceManagementWindow(futureViewModel);
+        futureWindow.Show();
+        futureWindow.UpdateLayout();
+
+        Assert.True(futureWindow.IsVisible);
+        Assert.Empty(futureWindow.DeviceList.Items);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+            futureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+            futureViewModel.OperationMessage,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-load", "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED"),
+            diagnosticEntries);
+        Assert.DoesNotContain(
+            "VIEWER_DEVICE_STORE_CORRUPT",
+            futureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "192.0.2.99",
+            futureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "future-secret",
+            futureWindow.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "192.0.2.99",
+            futureViewModel.OperationMessage,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "future-secret",
+            futureViewModel.OperationMessage,
+            StringComparison.Ordinal);
+        Assert.Equal(futureStoreContent, futurePersistence.Content);
+        futureWindow.Close();
+        futureViewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+        var initialFailurePersistence = new FaultingManagedDevicePersistence
+        {
+            ReadException =
+                new IOException("private path host=192.0.2.15 password=initial-secret")
+        };
+        var initialFailureStore = new ManagedDeviceStore(
+            Path.Combine(folder, "initial-fault-devices.json"),
+            new TestSecretProtector(),
+            initialFailurePersistence);
+        var initialFailureViewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            clientFactory: null,
+            synchronizationContext: SynchronizationContext.Current,
+            initialFailureStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        var initialFailureWindow = new DeviceManagementWindow(initialFailureViewModel);
         initialFailureWindow.Show();
         initialFailureWindow.UpdateLayout();
 
@@ -264,8 +342,8 @@ public sealed class WpfSmokeTests
             initialFailureWindow.ResultText.Text,
             StringComparison.Ordinal);
         initialFailureWindow.Close();
+        initialFailureViewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
 
-        persistence.ReadException = null;
         var window = new DeviceManagementWindow(viewModel);
         window.Show();
         window.UpdateLayout();
@@ -316,7 +394,30 @@ public sealed class WpfSmokeTests
             ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
             diagnosticEntries);
 
+        window.Close();
+        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
         persistence.ReadException = null;
+        deviceStore = new ManagedDeviceStore(
+            Path.Combine(folder, "fault-devices.json"),
+            new TestSecretProtector(),
+            persistence);
+        viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            agentFactory,
+            synchronizationContext: SynchronizationContext.Current,
+            deviceStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        viewModel.InitializeAsync().GetAwaiter().GetResult();
+        window = new DeviceManagementWindow(viewModel);
+        window.Show();
+        window.UpdateLayout();
+        original = Assert.IsType<ManagedDeviceProfile>(window.DeviceList.SelectedItem);
+        originalName = window.DisplayNameTextBox.Text;
+
         persistence.WriteException =
             new UnauthorizedAccessException("private path user=operator");
         window.DisplayNameTextBox.Text = "UNSAVED-LOCAL-NAME";
@@ -343,6 +444,59 @@ public sealed class WpfSmokeTests
         Assert.Contains(
             ("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
             diagnosticEntries);
+        Assert.NotEmpty(viewModel.Devices);
+        Assert.All(viewModel.Devices, item =>
+        {
+            Assert.Equal(DeviceHealth.Warning, item.Health);
+            Assert.Equal("DeviceStoreUnavailable", item.CollectionState);
+            Assert.Equal("VIEWER_DEVICE_STORE_UNAVAILABLE", item.CollectionErrorCode);
+        });
+        Assert.Equal(0, viewModel.NormalCount);
+        Assert.Equal(0, viewModel.MonitoredCount);
+        Assert.False(viewModel.ReadOnlyQueriesEnabled);
+        Assert.False(viewModel.ManualCheckCommand.CanExecute(null));
+        Assert.False(viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null));
+
+        var testRequestsBeforeStickyStoreTest = agentFactory.TelnetTestRequestCount;
+        window.TestButton.RaiseEvent(
+            new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+
+        Assert.Equal(
+            testRequestsBeforeStickyStoreTest,
+            agentFactory.TelnetTestRequestCount);
+        Assert.Contains(
+            "VIEWER_DEVICE_STORE_UNAVAILABLE",
+            window.ResultText.Text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
+            diagnosticEntries);
+        Assert.DoesNotContain("operator", window.ResultText.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("test-password", window.ResultText.Text, StringComparison.Ordinal);
+
+        window.Close();
+        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        persistence.WriteException = null;
+        deviceStore = new ManagedDeviceStore(
+            Path.Combine(folder, "fault-devices.json"),
+            new TestSecretProtector(),
+            persistence);
+        viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            clientFactory: null,
+            synchronizationContext: SynchronizationContext.Current,
+            deviceStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        window = new DeviceManagementWindow(viewModel);
+        window.Show();
+        window.UpdateLayout();
+        original = Assert.IsType<ManagedDeviceProfile>(window.DeviceList.SelectedItem);
+        window.DisplayNameTextBox.Text = "UNSAVED-LOCAL-NAME";
 
         const string injectedInvalidData =
             "host=192.0.2.11 user=operator password=secret-invalid-data";
@@ -409,7 +563,11 @@ public sealed class WpfSmokeTests
         Assert.Equal("UNSAVED-LOCAL-NAME", window.DisplayNameTextBox.Text);
         Assert.Equal(original.Id, Assert.IsType<ManagedDeviceProfile>(
             window.DeviceList.SelectedItem).Id);
-        Assert.Equal(2, deviceStore.Load().Count);
+        var preservedStore = new ManagedDeviceStore(
+            Path.Combine(folder, "fault-devices.json"),
+            new TestSecretProtector(),
+            persistence);
+        Assert.Equal(2, preservedStore.Load().Count);
         Assert.Contains(
             ("device-management-delete", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
             diagnosticEntries);
@@ -419,7 +577,32 @@ public sealed class WpfSmokeTests
                      || entry.Stage.Contains("secret", StringComparison.Ordinal)
                      || entry.ErrorCode.Contains("operator", StringComparison.Ordinal));
 
+        window.Close();
+        viewModel.DisposeAsync().AsTask().GetAwaiter().GetResult();
         persistence.WriteException = null;
+        deviceStore = new ManagedDeviceStore(
+            Path.Combine(folder, "fault-devices.json"),
+            new TestSecretProtector(),
+            persistence);
+        viewModel = new DashboardViewModel(
+            new ViewerSettings { DemoMode = true },
+            settingsStore,
+            clientFactory: null,
+            synchronizationContext: SynchronizationContext.Current,
+            deviceStore,
+            monitoringStore,
+            new ViewerSettingsSaveCoordinator(settingsStore),
+            (stage, errorCode) => diagnosticEntries.Add((stage, errorCode)),
+            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken));
+        window = new DeviceManagementWindow(viewModel);
+        window.Show();
+        window.UpdateLayout();
+        original = window.DeviceList.Items
+            .OfType<ManagedDeviceProfile>()
+            .Single(item => item.Id == original.Id);
+        window.DeviceList.SelectedItem = original;
+        window.UpdateLayout();
+
         Assert.True(window.DeleteConfirmed(original));
         Assert.Single(deviceStore.Load());
 
@@ -451,6 +634,8 @@ public sealed class WpfSmokeTests
         public Exception? ReadException { get; set; }
         public Exception? WriteException { get; set; }
 
+        public void Seed(string content) => Content = content;
+
         public string? ReadIfExists(string path)
         {
             if (ReadException is not null) throw ReadException;
@@ -464,6 +649,107 @@ public sealed class WpfSmokeTests
         }
 
         public void Quarantine(string path, string destination) => Content = null;
+    }
+
+    private sealed class CountingAgentClientFactory : IAgentClientFactory
+    {
+        private int _telnetTestRequestCount;
+
+        public int TelnetTestRequestCount => Volatile.Read(ref _telnetTestRequestCount);
+
+        public IAgentClient Create(ViewerSettings settings) =>
+            new CountingAgentClient(this);
+
+        private sealed class CountingAgentClient(CountingAgentClientFactory owner) : IAgentClient
+        {
+            public bool SupportsStatelessV4 => true;
+            public event EventHandler<AgentEventChangeDto>? EventChanged
+            {
+                add { }
+                remove { }
+            }
+
+            public event EventHandler<AgentConnectionState>? ConnectionStateChanged
+            {
+                add { }
+                remove { }
+            }
+
+            public Task StartAsync(CancellationToken cancellationToken) =>
+                Task.CompletedTask;
+
+            public Task<AgentIdentityDto> GetIdentityAsync(
+                CancellationToken cancellationToken) =>
+                Task.FromResult(new AgentIdentityDto(
+                    4,
+                    "wpf-smoke-agent",
+                    "wpf-smoke-instance",
+                    new string('A', 64),
+                    "https",
+                    8,
+                    65_536));
+
+            public Task<TelnetExecutionResultDto> TestTelnetAsync(
+                TelnetTargetDto target,
+                CancellationToken cancellationToken)
+            {
+                Interlocked.Increment(ref owner._telnetTestRequestCount);
+                var now = DateTimeOffset.UtcNow;
+                return Task.FromResult(new TelnetExecutionResultDto(
+                    4,
+                    target.RequestId,
+                    true,
+                    "user",
+                    ">",
+                    now,
+                    now,
+                    0,
+                    []));
+            }
+
+            public Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+                TelnetExecuteRequestDto request,
+                CancellationToken cancellationToken) =>
+                Task.FromException<TelnetExecutionResultDto>(
+                    new NotSupportedException());
+
+            public Task<AgentSnapshotDto> GetSnapshotAsync(
+                CancellationToken cancellationToken) =>
+                Task.FromException<AgentSnapshotDto>(
+                    new NotSupportedException());
+
+            public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(
+                int limit,
+                CancellationToken cancellationToken) =>
+                Task.FromResult<IReadOnlyList<SwitchEventDto>>([]);
+
+            public Task<EventChangePageDto> GetEventChangesAsync(
+                long cursor,
+                int limit,
+                CancellationToken cancellationToken) =>
+                Task.FromResult(new EventChangePageDto(cursor, cursor, false, []));
+
+            public Task<CommandResultDto> ExecuteRegisteredCheckAsync(
+                string deviceId,
+                string commandId,
+                CancellationToken cancellationToken) =>
+                Task.FromException<CommandResultDto>(
+                    new NotSupportedException());
+
+            public Task<ReadOnlyQueryResultDto> ExecuteReadOnlyQueryAsync(
+                string deviceId,
+                string command,
+                CancellationToken cancellationToken) =>
+                Task.FromException<ReadOnlyQueryResultDto>(
+                    new NotSupportedException());
+
+            public Task<bool> AcknowledgeAsync(
+                string eventId,
+                CancellationToken cancellationToken) =>
+                Task.FromResult(false);
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
     }
 
     private sealed class FaultingMonitoringPersistence : IViewerMonitoringPersistence

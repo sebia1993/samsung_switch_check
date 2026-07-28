@@ -181,15 +181,21 @@ public sealed class ViewerDiagnosticLogTests
             log.Write("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED");
             log.Write("device-management-delete", "VIEWER_DEVICE_NOT_FOUND");
             log.Write("device-management-close", "VIEWER_DEVICE_STORE_CORRUPT");
+            log.Write(
+                "device-management-load",
+                "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED");
 
             var lines = File.ReadAllLines(log.CurrentPath);
-            Assert.Equal(4, lines.Length);
+            Assert.Equal(5, lines.Length);
             var expected = new[]
             {
                 ("device-management-load", "VIEWER_DEVICE_STORE_UNAVAILABLE"),
                 ("device-management-save", "VIEWER_DEVICE_STORE_WRITE_FAILED"),
                 ("device-management-delete", "VIEWER_DEVICE_NOT_FOUND"),
-                ("device-management-close", "VIEWER_DEVICE_STORE_CORRUPT")
+                ("device-management-close", "VIEWER_DEVICE_STORE_CORRUPT"),
+                (
+                    "device-management-load",
+                    "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED")
             };
             for (var index = 0; index < expected.Length; index++)
             {
@@ -201,6 +207,58 @@ public sealed class ViewerDiagnosticLogTests
                 Assert.Equal(
                     expected[index].Item2,
                     document.RootElement.GetProperty("errorCode").GetString());
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void DiagnosticLog_PreservesDeviceStoreLifecycleStagesWithoutSensitiveContext()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(
+                folder,
+                applicationVersion: "password=login-secret");
+            var expected = new[]
+            {
+                (
+                    Stage: "device-store-startup",
+                    ErrorCode: "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED"),
+                (
+                    Stage: "device-store-monitoring",
+                    ErrorCode: "VIEWER_DEVICE_STORE_UNAVAILABLE")
+            };
+
+            foreach (var entry in expected)
+            {
+                log.Write(entry.Stage, entry.ErrorCode);
+            }
+
+            var content = File.ReadAllText(log.CurrentPath);
+            Assert.DoesNotContain("login-secret", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("password", content, StringComparison.OrdinalIgnoreCase);
+
+            var lines = File.ReadAllLines(log.CurrentPath);
+            Assert.Equal(expected.Length, lines.Length);
+            for (var index = 0; index < expected.Length; index++)
+            {
+                using var document = JsonDocument.Parse(lines[index]);
+                Assert.Equal(4, document.RootElement.EnumerateObject().Count());
+                Assert.Equal(
+                    expected[index].Stage,
+                    document.RootElement.GetProperty("stage").GetString());
+                Assert.Equal(
+                    expected[index].ErrorCode,
+                    document.RootElement.GetProperty("errorCode").GetString());
+                Assert.Equal(
+                    "unknown",
+                    document.RootElement.GetProperty("appVersion").GetString());
+                Assert.True(document.RootElement.TryGetProperty("timestampUtc", out _));
             }
         }
         finally
