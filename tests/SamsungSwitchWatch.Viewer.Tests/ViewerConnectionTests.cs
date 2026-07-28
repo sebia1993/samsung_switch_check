@@ -355,10 +355,13 @@ public sealed class ViewerConnectionTests
                     : JsonResponse(HttpStatusCode.OK, IdentityJson(certificate));
             });
         await using var client = fixture.Client;
+        var states = new List<AgentConnectionState>();
+        client.ConnectionStateChanged += (_, state) => states.Add(state);
 
         await client.StartAsync(CancellationToken.None);
         await Assert.ThrowsAsync<AgentClientException>(
             () => client.StartAsync(CancellationToken.None));
+        Assert.Equal(AgentConnectionState.Stale, states[^1]);
         var recovered = await client.TestTelnetAsync(Target(), CancellationToken.None);
 
         Assert.True(recovered.Success);
@@ -443,7 +446,46 @@ public sealed class ViewerConnectionTests
         Assert.Equal(1, fixture.ControlHandler.RequestCount);
         Assert.Equal(2, fixture.QueryHandler.RequestCount);
         Assert.Contains(AgentConnectionState.Connected, states);
+        Assert.Equal(AgentConnectionState.Connected, states[^1]);
         Assert.DoesNotContain(AgentConnectionState.Offline, states);
+    }
+
+    [Fact]
+    public async Task InitialIdentityHttpError_DoesNotRemainConnected()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ => JsonResponse(
+                HttpStatusCode.ServiceUnavailable,
+                """{"error":{"code":"AGENT_NOT_READY"}}"""));
+        await using var client = fixture.Client;
+        var states = new List<AgentConnectionState>();
+        client.ConnectionStateChanged += (_, state) => states.Add(state);
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.StartAsync(CancellationToken.None));
+
+        Assert.Equal("AGENT_NOT_READY", failure.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, states[^1]);
+    }
+
+    [Fact]
+    public async Task MalformedIdentityResponse_DoesNotRemainConnected()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(
+            certificate,
+            controlResponse: _ => JsonResponse(HttpStatusCode.OK, """{"apiVersion":4}"""));
+        await using var client = fixture.Client;
+        var states = new List<AgentConnectionState>();
+        client.ConnectionStateChanged += (_, state) => states.Add(state);
+
+        var failure = await Assert.ThrowsAsync<AgentClientException>(
+            () => client.StartAsync(CancellationToken.None));
+
+        Assert.Equal("AGENT_RESPONSE_INVALID", failure.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, states[^1]);
     }
 
     [Fact]

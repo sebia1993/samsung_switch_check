@@ -178,8 +178,12 @@ public sealed class HttpAgentClient : IAgentClient
             PublishConnectionState(typed.SuggestedConnectionState);
             throw typed;
         }
-        catch (AgentClientException)
+        catch (AgentClientException typed)
         {
+            // Identity is the connection trust boundary. An HTTP response proves
+            // transport reachability, but a rejected or malformed identity must
+            // not leave the Viewer reporting a validated Agent connection.
+            PublishConnectionState(typed.SuggestedConnectionState);
             throw;
         }
         catch (Exception exception)
