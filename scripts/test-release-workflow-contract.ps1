@@ -25,11 +25,11 @@ foreach ($path in @(
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required release file is missing: $path" }
 }
 
-$workflow = Get-Content -LiteralPath $workflowPath -Raw
-$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
-$packageContract = Get-Content -LiteralPath $packageContractPath -Raw
+$workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw -Encoding UTF8
+$packageContract = Get-Content -LiteralPath $packageContractPath -Raw -Encoding UTF8
 $releaseProcess = Get-Content -LiteralPath $releaseProcessPath -Raw -Encoding UTF8
-$windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw
+$windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw -Encoding UTF8
 $agents = Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8
 $readme = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
 $install = Get-Content -LiteralPath $installPath -Raw -Encoding UTF8
