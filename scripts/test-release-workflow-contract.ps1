@@ -108,7 +108,10 @@ Assert-Pattern $workflow '--source-digest' 'Attestation verification must constr
 Assert-Pattern $workflow '--source-ref' 'Attestation verification must constrain the source ref.'
 Assert-Pattern $workflow '\$internalExpected\s*=\s*@\(' 'The exact six-file internal validation set must be enumerated.'
 Assert-Pattern $workflow '\$publicAssetNames\s*=\s*@\(' 'The exact two-file public release set must be enumerated.'
-Assert-Pattern $workflow '\$arguments\s*=\s*@\(\$tag\)\s*\+\s*\$publicAssets' 'Only the explicit public ZIP allowlist may be passed to GitHub Release creation.'
+Assert-Pattern $workflow '\$arguments\s*=\s*@\(\$tag\)\s*\+\s*@\(' 'Release creation must stage an empty draft before asset upload.'
+if ($workflow -match '\$arguments\s*=\s*@\(\$tag\)\s*\+\s*\$publicAssets') {
+    throw 'Release draft creation must not combine draft creation and asset upload.'
+}
 Assert-Pattern $workflow '\$remoteNames\s+-join\s+''\|''\)\s+-ne\s+\(\$publicAssetNames\s+-join\s+''\|''' 'Remote draft assets must match the public ZIP allowlist.'
 Assert-Pattern $workflow 'Exact release notes are missing' 'Publishing must require exact-version release notes.'
 Assert-Pattern $workflow '\$hashRows\s*=\s*@\(\$publicAssetNames\s*\|\s*ForEach-Object' 'Release notes must derive SHA-256 rows from the exact public asset allowlist.'
@@ -116,10 +119,16 @@ Assert-Pattern $workflow '''--notes-file'',\s*\$releaseNotesWithHashes' 'Publish
 Assert-Pattern $workflow 'gh release create @arguments' 'Release assets must be staged through the GitHub CLI.'
 Assert-Pattern $workflow '\$draftCreateOutput\s*=\s*@\(gh release create @arguments\)' 'Draft creation output must be captured without retrying creation.'
 Assert-Pattern $workflow "'--verify-tag',\s*'--draft'" 'Assets must be staged in a draft before immutable publication.'
+Assert-Pattern $workflow 'foreach\s*\(\$path\s+in\s+\$publicAssets\)\s*\{\s*gh release upload\s+\$tag\s+\$path' `
+    'Public assets must be uploaded only after the exact draft ID is confirmed.'
+if ($workflow -match 'gh release upload.+--clobber') {
+    throw 'Release asset upload must never overwrite an existing draft asset.'
+}
 Assert-Pattern $workflow 'foreach\s*\(\$draftLookupAttempt\s+in\s+1\.\.12\)' 'Draft discovery must use a bounded eventual-consistency retry.'
 Assert-Pattern $workflow 'Created release draft was not discoverable within the bounded lookup window' 'Draft discovery must fail closed when the retry budget is exhausted.'
 Assert-Pattern $workflow '\[string\]\$candidate\.html_url\s+-ne\s+\$draftUrl' 'Draft discovery must bind the candidate to the URL returned by creation.'
-Assert-Pattern $workflow 'Created release draft identity changed before asset verification' 'The selected draft must be revalidated by numeric release ID.'
+Assert-Pattern $workflow 'Created release draft identity changed before asset upload' 'The selected draft must be revalidated by numeric release ID before upload.'
+Assert-Pattern $workflow 'Created release draft identity changed after asset upload' 'The selected draft must be revalidated by numeric release ID after upload.'
 Assert-Pattern $workflow 'Uploaded draft digest or size differs' 'GitHub draft asset digests and sizes must be compared locally.'
 Assert-Pattern $workflow 'gh release verify\s+\$tag' 'The immutable GitHub release attestation must be verified.'
 Assert-Pattern $workflow 'gh release verify-asset\s+\$tag' 'Every published release asset must be verified against the release attestation.'
@@ -258,14 +267,19 @@ if ([regex]::Matches($workflow, 'foreach\s*\(\$name\s+in\s+\$publicAssetNames\)'
 $draftDigestIndex = $workflow.IndexOf('Uploaded draft digest or size differs', [StringComparison]::Ordinal)
 $draftCreateOutputIndex = $workflow.IndexOf('$draftCreateOutput = @(gh release create @arguments)', [StringComparison]::Ordinal)
 $draftLookupRetryIndex = $workflow.IndexOf('foreach ($draftLookupAttempt in 1..12)', [StringComparison]::Ordinal)
-$draftIdentityIndex = $workflow.IndexOf('Created release draft identity changed before asset verification', [StringComparison]::Ordinal)
+$draftIdentityBeforeUploadIndex = $workflow.IndexOf('Created release draft identity changed before asset upload', [StringComparison]::Ordinal)
+$draftUploadIndex = $workflow.IndexOf('gh release upload $tag $path', [StringComparison]::Ordinal)
+$draftIdentityAfterUploadIndex = $workflow.IndexOf('Created release draft identity changed after asset upload', [StringComparison]::Ordinal)
 $finalTagCheckIndex = $workflow.IndexOf('# The active v* tag ruleset closes the remaining fetch-to-publish race.', [StringComparison]::Ordinal)
 $publishIndex = $workflow.IndexOf('--method PATCH', [StringComparison]::Ordinal)
 if ($draftCreateOutputIndex -lt $createIndex -or $draftLookupRetryIndex -lt $draftCreateOutputIndex -or
-    $draftIdentityIndex -lt $draftLookupRetryIndex -or $draftDigestIndex -lt $draftIdentityIndex -or
+    $draftIdentityBeforeUploadIndex -lt $draftLookupRetryIndex -or
+    $draftUploadIndex -lt $draftIdentityBeforeUploadIndex -or
+    $draftIdentityAfterUploadIndex -lt $draftUploadIndex -or
+    $draftDigestIndex -lt $draftIdentityAfterUploadIndex -or
     $finalTagCheckIndex -lt $draftDigestIndex -or
     $publishIndex -lt $finalTagCheckIndex) {
-    throw 'Draft creation, bounded discovery, ID verification, digest verification, and final tag verification must remain ordered before publication.'
+    throw 'Draft creation, bounded discovery, ID verification, asset upload, digest verification, and final tag verification must remain ordered before publication.'
 }
 
 $postPublishRetryStart = $workflow.IndexOf('$releaseAttestationVerified = $false', [StringComparison]::Ordinal)

@@ -339,7 +339,7 @@ jobs:
           $serverConfirmedImmutable = $false
           try {
             Assert-ReleaseTag
-            $arguments = @($tag) + $publicAssets + @(
+            $arguments = @($tag) + @(
               '--verify-tag', '--draft', '--title', "Samsung Switch Watch $version",
               '--repo', $env:SSW_REPOSITORY, '--notes-file', $releaseNotesWithHashes
             )
@@ -406,7 +406,26 @@ jobs:
             $draft = ($draftJson -join "`n") | ConvertFrom-Json
             if ([long]$draft.id -ne $releaseId -or $draft.tag_name -ne $tag -or
                 [string]$draft.html_url -ne $draftUrl -or -not $draft.draft -or $draft.immutable) {
-              throw 'Created release draft identity changed before asset verification.'
+              throw 'Created release draft identity changed before asset upload.'
+            }
+            if (@($draft.assets).Count -ne 0) {
+              throw 'New release draft unexpectedly contained assets before upload.'
+            }
+
+            foreach ($path in $publicAssets) {
+              gh release upload $tag $path --repo $env:SSW_REPOSITORY
+              if ($LASTEXITCODE -ne 0) {
+                throw "GitHub release draft asset upload failed: $(Split-Path -Leaf $path)"
+              }
+            }
+
+            $draftJson = gh api -H 'X-GitHub-Api-Version: 2026-03-10' `
+              "repos/$($env:SSW_REPOSITORY)/releases/$releaseId"
+            if ($LASTEXITCODE -ne 0) { throw 'Uploaded release draft lookup by ID failed.' }
+            $draft = ($draftJson -join "`n") | ConvertFrom-Json
+            if ([long]$draft.id -ne $releaseId -or $draft.tag_name -ne $tag -or
+                [string]$draft.html_url -ne $draftUrl -or -not $draft.draft -or $draft.immutable) {
+              throw 'Created release draft identity changed after asset upload.'
             }
             $remoteNames = @($draft.assets | ForEach-Object { [string]$_.name } | Sort-Object)
             if (($remoteNames -join '|') -ne ($publicAssetNames -join '|')) {
