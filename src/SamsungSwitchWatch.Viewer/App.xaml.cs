@@ -53,6 +53,17 @@ public partial class App : Application
             _diagnosticLog.Write);
         var settings = _settingsStore.Load();
         _deviceStore = new ManagedDeviceStore();
+        var managedDeviceLoadStatus = _deviceStore.LoadWithStatus().Status;
+        if (!_deviceStore.IsOperational
+            && _deviceStore.LoadErrorCode is { } deviceStoreErrorCode)
+        {
+            _diagnosticLog.Write(
+                "device-store-startup",
+                deviceStoreErrorCode);
+            _startupWarning =
+                $"{ViewerConnectionMessages.ForCode(deviceStoreErrorCode)} "
+                + $"· 자동 감시 중지 · {deviceStoreErrorCode}";
+        }
         var monitoringLoadStatus = ViewerMonitoringLoadStatus.Missing;
         try
         {
@@ -64,7 +75,7 @@ public partial class App : Application
                 _diagnosticLog.Write(
                     "monitoring-store-startup",
                     monitoringErrorCode);
-                _startupWarning =
+                _startupWarning ??=
                     $"{ViewerConnectionMessages.ForCode(monitoringErrorCode)} "
                     + $"· {monitoringErrorCode}";
             }
@@ -76,7 +87,7 @@ public partial class App : Application
             _diagnosticLog.Write(
                 "monitoring-store-startup",
                 "VIEWER_MONITOR_STATE_UNAVAILABLE");
-            _startupWarning =
+            _startupWarning ??=
                 $"감시 이력을 열 수 없어 주기 감시를 시작하지 않았습니다. "
                 + ViewerConnectionMessages.ForCode("VIEWER_MONITOR_STATE_UNAVAILABLE");
         }
@@ -106,7 +117,8 @@ public partial class App : Application
         if (StartupWindowPolicy.ShouldShowMainWindow(
                 settings,
                 needsConnection,
-                monitoringLoadStatus))
+                monitoringLoadStatus,
+                managedDeviceLoadStatus))
         {
             _mainWindow.Show();
         }
@@ -376,10 +388,14 @@ internal static class StartupWindowPolicy
     public static bool ShouldShowMainWindow(
         ViewerSettings settings,
         bool needsConnection,
-        ViewerMonitoringLoadStatus monitoringLoadStatus) =>
+        ViewerMonitoringLoadStatus monitoringLoadStatus,
+        ManagedDeviceLoadStatus managedDeviceLoadStatus) =>
         needsConnection
         || monitoringLoadStatus is ViewerMonitoringLoadStatus.Corrupt
             or ViewerMonitoringLoadStatus.VersionUnsupported
             or ViewerMonitoringLoadStatus.StorageUnavailable
+        || managedDeviceLoadStatus is ManagedDeviceLoadStatus.Corrupt
+            or ManagedDeviceLoadStatus.VersionUnsupported
+            or ManagedDeviceLoadStatus.StorageUnavailable
         || !settings.StartMinimizedToTray;
 }

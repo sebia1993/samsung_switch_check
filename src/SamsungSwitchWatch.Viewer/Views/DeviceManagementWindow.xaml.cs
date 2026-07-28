@@ -229,10 +229,20 @@ public partial class DeviceManagementWindow : Window
                 AgentClientException typed => typed.ErrorCode,
                 InvalidDataException invalid when invalid.Message == "VIEWER_CREDENTIAL_CORRUPT" =>
                     "VIEWER_CREDENTIAL_CORRUPT",
-                _ => "CONNECTION_TEST_FAILED"
+                _ => DeviceManagementFailureMapper.ToErrorCode(
+                    exception,
+                    DeviceManagementOperation.Load)
             };
             _lastTestCode = code;
             _lastTestUtc = DateTimeOffset.UtcNow;
+            if (code.StartsWith(
+                    "VIEWER_DEVICE_STORE_",
+                    StringComparison.Ordinal))
+            {
+                _dashboard.ReportDeviceManagementFailure(
+                    "device-management-load",
+                    code);
+            }
             ShowResult($"접속 실패 · {ViewerConnectionMessages.ForCode(code)} ({code})", false);
         }
         finally

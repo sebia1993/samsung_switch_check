@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.21-poc"
+VERSION = "0.9.22-poc"
 DOCUMENT_DATE = "2026-07-28"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -961,6 +961,16 @@ Viewer PC IPv4 예     : 192.0.2.25
     )
     add_callout(
         doc,
+        "장비 목록 파일 오류",
+        "장비 목록 파일이 손상됐거나 현재 Viewer보다 새로운 형식이거나 읽기·쓰기가 불가능하면 "
+        "Viewer는 원본을 보존하고 해당 실행의 자동 감시와 장비 명령을 중지합니다. 기존 장비가 "
+        "정상으로 보이거나 빈 목록으로 덮어써지지 않습니다. 화면의 오류 코드에 따라 격리 파일, "
+        "Viewer 버전, 사용자 폴더 권한·파일 잠금과 Windows 사용자 프로필을 확인한 뒤 Viewer를 "
+        "다시 시작하세요.",
+        "danger",
+    )
+    add_callout(
+        doc,
         "감시 이력 파일 오류",
         "감시 이력 파일이 손상됐거나 현재 Viewer보다 새로운 형식이거나 읽기·쓰기가 불가능하면 "
         "Viewer는 이전 장애를 정상으로 오판하지 않도록 자동 감시와 이력 저장을 중지합니다. "
@@ -1134,9 +1144,10 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("TELNET_SESSION_CLOSED", "재연결 1회 뒤에도 종료됨. 완료된 결과와 남은 명령을 확인"),
             ("PROMPT_PARSE_FAILED", "로그인 후 > 또는 # 프롬프트 형식을 확인"),
             ("OUTPUT_LIMIT_EXCEEDED", "세션 처리 안전 한도 초과. 더 좁은 show 명령 사용"),
-            ("VIEWER_DEVICE_STORE_CORRUPT", "손상 파일은 자동 격리됨. 장비 관리에서 장비를 다시 등록"),
-            ("VIEWER_DEVICE_STORE_UNAVAILABLE", "Viewer 사용자 폴더의 파일 권한과 다른 프로세스의 잠금 확인"),
-            ("VIEWER_DEVICE_STORE_WRITE_FAILED", "입력은 유지됨. Viewer 사용자 폴더 권한·잠금·디스크 확인 후 다시 저장"),
+            ("VIEWER_DEVICE_STORE_CORRUPT", "원본은 .corrupt-*로 격리되고 이번 실행의 감시·명령이 중지됨. 격리 파일 보존 → Viewer 재시작 → 장비 재등록"),
+            ("VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED", "원본을 변경하지 말고 같거나 최신 Viewer를 설치해 다시 시작"),
+            ("VIEWER_DEVICE_STORE_UNAVAILABLE", "감시·명령 중지됨. 사용자 폴더 권한·잠금·Windows 사용자 프로필 확인 후 Viewer 재시작"),
+            ("VIEWER_DEVICE_STORE_WRITE_FAILED", "입력·원본은 유지됨. 사용자 폴더 권한·잠금·디스크 확인 후 Viewer 재시작"),
             ("VIEWER_SETTINGS_WRITE_FAILED", "Agent 연결은 유지됨. Viewer 사용자 폴더 권한과 디스크 여유 공간 확인"),
             ("VIEWER_MONITOR_STATE_CORRUPT", "이번 실행의 자동 감시가 중지됨. 격리된 원본을 보존하고 Viewer를 다시 시작해 새 기준선 생성"),
             ("VIEWER_MONITOR_STATE_VERSION_UNSUPPORTED", "파일을 변경하지 말고 같거나 최신 버전의 Viewer로 실행"),

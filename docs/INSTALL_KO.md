@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.21-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.22-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.21-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.21-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.22-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.22-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -423,6 +423,11 @@ Agent 신원 불일치가 발생합니다.
 
 ## 10. 주요 진단 코드
 
+`VIEWER_DEVICE_STORE_*` 오류가 표시되면 Viewer는 기존 장비를 정상으로 오판하지 않도록
+해당 실행의 자동 감시와 장비 명령을 중지합니다. 오류가 난 Viewer에서 장비를 다시 등록하거나
+파일을 덮어쓰지 마십시오. 원본·격리 파일을 보존하고 아래 조치를 마친 뒤 Viewer를 다시
+시작하십시오.
+
 | 코드 | 의미 |
 |---|---|
 | `DEPLOYMENT_ALREADY_RUNNING` | 같은 제품의 설치 또는 제거가 진행 중임. 먼저 실행한 작업이 끝난 뒤 다시 실행 |
@@ -463,8 +468,10 @@ Agent 신원 불일치가 발생합니다.
 | `COMMAND_TIMEOUT` | 장비 출력 또는 프롬프트 복귀 시간 초과 |
 | `OUTPUT_LIMIT_EXCEEDED` | 장비 출력이 세션 처리 안전 한도를 초과함 |
 | `PROMPT_PARSE_FAILED` | 장비 프롬프트를 안전하게 판별하지 못함 |
-| `VIEWER_DEVICE_STORE_UNAVAILABLE` | 장비 목록 파일을 읽지 못함. 기존 목록을 유지하고 사용자 폴더 권한과 파일 잠금 확인 |
-| `VIEWER_DEVICE_STORE_WRITE_FAILED` | 장비 설정 파일 저장 실패. 사용자 폴더 권한, 파일 잠금과 디스크 여유 공간 확인 |
+| `VIEWER_DEVICE_STORE_CORRUPT` | 장비 목록 파일이 손상되어 원본을 `.corrupt-*`로 격리하고 이번 실행의 자동 감시·장비 명령을 중지함. 격리 파일을 보존하고 Viewer를 다시 시작한 뒤 장비를 다시 등록 |
+| `VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED` | 장비 목록 파일이 현재 Viewer보다 새로운 형식임. 원본을 수정하지 말고 같거나 최신 Viewer를 설치해 다시 시작 |
+| `VIEWER_DEVICE_STORE_UNAVAILABLE` | 장비 목록 파일을 읽거나 Windows 사용자 자격 증명으로 보호할 수 없음. 원본을 유지하고 사용자 폴더 권한·파일 잠금·Windows 사용자 프로필을 확인한 뒤 Viewer 재시작 |
+| `VIEWER_DEVICE_STORE_WRITE_FAILED` | 장비 설정 파일 저장 실패. 입력과 원본을 보존하며 이번 실행의 자동 감시·장비 명령을 중지함. 사용자 폴더 권한, 파일 잠금과 디스크 여유 공간 확인 후 Viewer 재시작 |
 | `VIEWER_MONITOR_STATE_WRITE_FAILED` | 장비 설정 저장은 완료될 수 있음. 중복 등록하지 말고 감시 이력 파일 권한·잠금·디스크 확인 |
 
 정상 명령 출력이 64KiB 응답 상한에서 잘리면 오류 코드 대신 Viewer의 `잘림` 표시를

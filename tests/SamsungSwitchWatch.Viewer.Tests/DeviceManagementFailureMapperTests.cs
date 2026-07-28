@@ -40,6 +40,11 @@ public sealed class DeviceManagementFailureMapperTests
             DeviceManagementFailureMapper.ToErrorCode(
                 new Exception("VIEWER_DEVICE_STORE_CORRUPT"),
                 DeviceManagementOperation.Load));
+        Assert.Equal(
+            "VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED",
+            DeviceManagementFailureMapper.ToErrorCode(
+                new Exception("VIEWER_DEVICE_STORE_VERSION_UNSUPPORTED"),
+                DeviceManagementOperation.Load));
     }
 
     [Fact]
