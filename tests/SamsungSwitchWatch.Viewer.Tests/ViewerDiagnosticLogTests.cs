@@ -13,7 +13,9 @@ public sealed class ViewerDiagnosticLogTests
         var folder = TemporaryFolder();
         try
         {
-            var log = new ViewerDiagnosticLog(folder);
+            var log = new ViewerDiagnosticLog(
+                folder,
+                applicationVersion: "1.2.3-poc+private-build-metadata");
             log.Write(
                 "startup host=192.0.2.10 user=operator command=show-running-config",
                 "PASSWORD=login-secret");
@@ -38,7 +40,10 @@ public sealed class ViewerDiagnosticLogTests
             var lines = File.ReadAllLines(log.CurrentPath);
             Assert.Equal(5, lines.Length);
             using var rejected = JsonDocument.Parse(lines[0]);
-            Assert.Equal(3, rejected.RootElement.EnumerateObject().Count());
+            Assert.Equal(4, rejected.RootElement.EnumerateObject().Count());
+            Assert.Equal(
+                "1.2.3-poc",
+                rejected.RootElement.GetProperty("appVersion").GetString());
             Assert.Equal("diagnostic", rejected.RootElement.GetProperty("stage").GetString());
             Assert.Equal(
                 "VIEWER_UNEXPECTED_ERROR",
@@ -62,7 +67,7 @@ public sealed class ViewerDiagnosticLogTests
                 accepted.RootElement.GetProperty("errorCode").GetString());
 
             using var monitoringCycle = JsonDocument.Parse(lines[3]);
-            Assert.Equal(3, monitoringCycle.RootElement.EnumerateObject().Count());
+            Assert.Equal(4, monitoringCycle.RootElement.EnumerateObject().Count());
             Assert.Equal(
                 "monitoring-cycle",
                 monitoringCycle.RootElement.GetProperty("stage").GetString());
@@ -71,7 +76,7 @@ public sealed class ViewerDiagnosticLogTests
                 monitoringCycle.RootElement.GetProperty("errorCode").GetString());
 
             using var settingsSave = JsonDocument.Parse(lines[4]);
-            Assert.Equal(3, settingsSave.RootElement.EnumerateObject().Count());
+            Assert.Equal(4, settingsSave.RootElement.EnumerateObject().Count());
             Assert.Equal(
                 "settings-save-background",
                 settingsSave.RootElement.GetProperty("stage").GetString());
@@ -137,7 +142,7 @@ public sealed class ViewerDiagnosticLogTests
             for (var index = 0; index < expected.Length; index++)
             {
                 using var document = JsonDocument.Parse(lines[index]);
-                Assert.Equal(3, document.RootElement.EnumerateObject().Count());
+                Assert.Equal(4, document.RootElement.EnumerateObject().Count());
                 Assert.Equal(
                     expected[index].Item1,
                     document.RootElement.GetProperty("stage").GetString());
@@ -166,6 +171,100 @@ public sealed class ViewerDiagnosticLogTests
 
         Assert.Null(exception);
         Assert.Equal(1, fileSystem.CreateDirectoryAttempts);
+    }
+
+    [Fact]
+    public void ConnectionTransitions_DeduplicateAndWriteRecoveryOnlyAfterFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(
+                folder,
+                applicationVersion: "1.2.3-poc");
+
+            log.WriteConnectionTransition("agent-http", "AGENT_CONNECTED", "recovered");
+            log.WriteConnectionTransition(
+                "agent-http",
+                "AGENT_CONNECTION_REFUSED",
+                "failed");
+            log.WriteConnectionTransition(
+                "agent-http",
+                "AGENT_CONNECTION_REFUSED",
+                "failed");
+            log.WriteConnectionTransition("agent-http", "AGENT_CONNECTED", "recovered");
+            log.WriteConnectionTransition("agent-http", "AGENT_CONNECTED", "recovered");
+
+            var lines = File.ReadAllLines(log.CurrentPath);
+            Assert.Equal(2, lines.Length);
+
+            using var failure = JsonDocument.Parse(lines[0]);
+            Assert.Equal(5, failure.RootElement.EnumerateObject().Count());
+            Assert.Equal(
+                "1.2.3-poc",
+                failure.RootElement.GetProperty("appVersion").GetString());
+            Assert.Equal(
+                "agent-http",
+                failure.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                failure.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "failed",
+                failure.RootElement.GetProperty("transition").GetString());
+
+            using var recovery = JsonDocument.Parse(lines[1]);
+            Assert.Equal(5, recovery.RootElement.EnumerateObject().Count());
+            Assert.Equal(
+                "agent-http",
+                recovery.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "AGENT_CONNECTION_REFUSED",
+                recovery.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "recovered",
+                recovery.RootElement.GetProperty("transition").GetString());
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public void ConnectionTransitions_RejectSensitiveFieldsAndUnknownValues()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(
+                folder,
+                applicationVersion: "password=login-secret");
+
+            log.WriteConnectionTransition(
+                "host=192.0.2.10 user=operator",
+                "PASSWORD_LOGIN_SECRET",
+                "raw-command-output");
+
+            var content = File.ReadAllText(log.CurrentPath);
+            Assert.DoesNotContain("192.0.2.10", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("operator", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("login-secret", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("PASSWORD_LOGIN_SECRET", content, StringComparison.Ordinal);
+            Assert.DoesNotContain("raw-command-output", content, StringComparison.Ordinal);
+
+            using var document = JsonDocument.Parse(content);
+            Assert.Equal("unknown", document.RootElement.GetProperty("appVersion").GetString());
+            Assert.Equal("agent-http", document.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "VIEWER_UNEXPECTED_ERROR",
+                document.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal("failed", document.RootElement.GetProperty("transition").GetString());
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
     }
 
     [Fact]

@@ -2,10 +2,10 @@
 
 ## 1. 필요한 파일
 
-공식 GitHub `v0.9.17-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.9.18-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.9.17-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.9.17-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.9.18-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.9.18-poc-win-x64.zip`
 
 GitHub가 자동으로 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다.
 각 ZIP에는 self-contained Windows x64 실행 파일이 있으므로 .NET이나 Python을 별도로
@@ -179,10 +179,38 @@ Agent는 `NT SERVICE\SamsungSwitchWatchAgent` 전용 가상 계정의 Windows �
 
 1. Viewer ZIP을 운영자 PC의 임시 폴더에 압축 해제합니다.
 2. `Install-or-Update-Viewer.cmd`를 더블클릭합니다.
-3. 설치 완료 메시지를 확인합니다. Viewer는 현재 Windows 사용자에게 설치되고 바로
-   실행되며, 다음 로그인부터 자동 시작됩니다.
+3. UAC 관리자 승인을 한 번 진행합니다.
+4. 설치 완료 메시지를 확인합니다. Viewer 프로그램은
+   `C:\Program Files\SamsungSwitchWatch\Viewer`에 설치되고, 원래 설치를 시작한 Windows
+   사용자에게 시작 메뉴와 로그인 자동 시작 바로 가기를 만든 뒤 일반 사용자 권한으로
+   실행됩니다.
 
-Viewer 설치에는 관리자 권한이나 UAC 승인이 필요하지 않습니다.
+UAC는 Program Files의 프로그램 파일을 설치하거나 업데이트하는 단계에만 사용합니다.
+장비 목록, DPAPI 자격 증명, 감시 이력과 화면 설정은 관리자 계정으로 옮기지 않고 기존과
+같이 원래 사용자의 `%LOCALAPPDATA%\SamsungSwitchWatch`에 보존합니다.
+
+설치기는 다음 두 단계를 분리합니다.
+
+1. 관리자 단계: 패키지를 보호된 staging에서 다시 검증하고 Program Files 설치본을
+   교체한 뒤, 설치된 파일의 SHA-256과 무화면 자체점검을 확인합니다. 이전 Program Files
+   버전은 설치 폴더 옆의 관리자 보호 rollback 슬롯에 다음 업데이트까지 보존합니다.
+2. 원래 사용자 단계: 시작 메뉴와 로그인 자동 시작 바로 가기를 반영하고 Viewer를
+   일반 사용자 권한으로 실행합니다.
+
+원래 사용자 실행 검사 또는 바로 가기 단계가 실패하면 이전 Program Files 버전을 되돌리기
+위한 UAC가 한 번 더 표시될 수 있습니다. 이 복구 UAC를 취소하거나 복구가 실패하면
+rollback 슬롯을 자동 삭제하지 않습니다. 설치 폴더나 rollback 슬롯을 수동 정리하지 말고
+표시된 `Recovery`와 진단 코드를 Windows 관리자에게 전달하십시오.
+
+현재 설치의 실행 파일이나 매니페스트가 EDR 격리 또는 파일 손상으로 사라져도 자동 복구는
+현재 설치의 정상 패키지 검증을 요구하지 않습니다. 보호된 정확한 설치 경로를 격리한 뒤
+이미 검증된 `Viewer.__rollback`만 활성 경로로 복원합니다. 제거할 때도 Viewer 프로세스
+종료와 활성 프로그램 폴더 삭제가 모두 확인된 경우에만 rollback 슬롯을 삭제합니다.
+
+다른 관리자 계정으로 UAC를 승인했는데 그 계정이 압축 해제 원본을 읽을 수 없으면
+설치 대상은 변경하지 않고 중단합니다. 원본 폴더 ACL을 완화하거나 파일 차단을 해제해
+우회하지 말고, 사내 정책상 관리자도 읽을 수 있는 임시 폴더에 공식 ZIP을 다시 압축
+해제하여 실행하십시오.
 
 ### Viewer 설치가 이전 상태로 복구된 경우
 
@@ -214,10 +242,15 @@ v0.9.17부터 Viewer 실행 파일뿐 아니라 매니페스트에 선언된 모
 SHA-256을 설치 전과 staging 복사 후 각각 검사합니다. 실제 Viewer 창과 Agent 연결을
 사용하지 않는 20초 제한 무화면 자체점검을 통과한 뒤에만 설치를 확정합니다.
 
+v0.9.18부터 기본 프로그램 설치 위치는 Program Files입니다. 새 설치본의 무결성과
+원래 사용자 자체점검이 성공해도 기존 사용자별 프로그램 폴더는 자동 삭제하지 않고 복구용으로
+보존합니다. 새 바로 가기는 Program Files 설치본을 가리킵니다. 장비·계정·감시 데이터가 있는
+`%LOCALAPPDATA%\SamsungSwitchWatch`도 삭제하지 않습니다.
+
 ### 고급 설치
 
-설치 전 검사, 설치 위치 또는 자동 시작 상태를 직접 지정할 때만 일반 사용자 PowerShell에서
-다음 명령을 사용합니다.
+설치 전 검사 또는 자동 시작 상태를 직접 지정할 때만 PowerShell에서 다음 명령을 사용합니다.
+기본 설치는 UAC를 거쳐 Program Files를 사용합니다.
 
 ```powershell
 .\install-viewer.ps1 -SourceDirectory . -StartWithWindows -Preflight
@@ -233,6 +266,14 @@ SHA-256을 설치 전과 staging 복사 후 각각 검사합니다. 실제 Viewe
 ```
 
 더블클릭 설치는 주기 감시가 계속 시작되도록 `-StartWithWindows`를 기본 적용합니다.
+
+사내 보안 정책상 Program Files 설치 승인을 받을 수 없어 기존 사용자별 설치를 유지해야 할
+때만 다음 호환 옵션을 명시적으로 사용합니다. 이 방식은 기본 경로가 아니며 AppLocker,
+WDAC 또는 EDR이 사용자 폴더 실행을 차단하는 환경에서는 동작하지 않을 수 있습니다.
+
+```powershell
+.\install-viewer.ps1 -SourceDirectory . -StartWithWindows -PerUser
+```
 
 Viewer의 `Agent 연결`에는 **Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만**
 입력합니다. 스위치 IP나 Viewer PC 주소를 입력하지 마십시오. HTTPS와 고정 포트 `18443`은
@@ -338,8 +379,14 @@ Viewer에서 `AGENT_CONNECTION_REFUSED`가 보이면 다음 순서로 확인합�
 
 1. Viewer의 `Agent 연결`에 스위치 IP가 아니라 Agent를 설치한 PC의 주소가 입력됐는지
    확인합니다. Agent와 Viewer가 다른 PC라면 `localhost`를 사용하지 않습니다.
-2. Agent PC에서 위 진단을 실행하고 `service`, `agentLive`, `agentReady`가 각각
-   `OK`, `LIVE`, `READY`인지 확인합니다.
+2. Agent PC에서 위 진단을 실행하고 다음 항목을 확인합니다.
+   - `service.status`: `Running`
+   - `listener.status`: `Listening`
+   - `firewall.enabled`: `true`
+   - `firewall.exact`: `true`
+   - `network.activeCategories`: `DomainAuthenticated` 또는 `Private` 포함
+   - `health.live`: `LIVE`
+   - `health.ready`: `READY`
 3. Viewer PC의 PowerShell에서 다음 명령을 실행합니다. 실제 주소는 화면에만 입력하고
    진단 파일이나 외부 문의 자료에는 기록하지 않습니다.
 
@@ -388,6 +435,11 @@ Agent 신원 불일치가 발생합니다.
 | `AGENT_RECEIPT_TRUST_INVALID` | 데이터 영구 삭제에 필요한 install receipt가 SYSTEM·Administrators 전용 일반 파일이 아님. ACL 완화·파일 재작성으로 우회하지 말고 설치 증거와 데이터 보존 |
 | `AGENT_HTTPS_UNREACHABLE` | Viewer 또는 로컬 검사에서 HTTPS Agent에 도달하지 못함 |
 | `AGENT_CONNECTION_REFUSED` | 입력한 주소의 TCP/18443에 listener가 없음. 실제 Agent PC 주소와 `SamsungSwitchWatchAgent` 서비스를 확인하고, Viewer PC IPv4가 바뀌었다면 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 허용 IP 갱신 |
+| `VIEWER_SOURCE_ACCESS_DENIED` | UAC에 사용한 관리자 계정이 압축 해제 원본을 읽을 수 없음. ACL을 완화하지 말고 관리자도 읽을 수 있는 승인된 임시 폴더에 공식 ZIP을 다시 압축 해제 |
+| `VIEWER_INSTALL_PATH_EXECUTION_BLOCKED` | Program Files에 설치된 Viewer 실행이 AppLocker·WDAC·EDR 등에 의해 차단됨. 보안 정책 담당자에게 설치 진단 코드와 배포 파일 해시 전달 |
+| `VIEWER_USER_PHASE_FAILED` | 원래 사용자 권한의 실행 검사 또는 바로 가기 반영 실패. 이어지는 복구 UAC를 승인하고 `Recovery` 결과 확인 |
+| `VIEWER_MACHINE_ROLLBACK_INCOMPLETE` | 이전 Program Files 버전 자동 복구가 완료되지 않음. 현재 설치와 `Viewer.__rollback`을 삭제하지 말고 관리자 확인 |
+| `VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED` | 사용자 단계 실패 뒤 복구 UAC가 취소되었거나 시작되지 않음. rollback 슬롯을 보존하고 관리자에게 재시도 요청 |
 | `VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE` | 시작 메뉴 또는 시작프로그램 폴더를 만들 수 없음. Viewer를 설치할 동일 Windows 사용자로 실행했는지와 폴더 쓰기 권한·보안 정책 확인 |
 | `VIEWER_SHORTCUT_SETUP_FAILED` | Viewer 바로 가기 생성 또는 자동 시작 반영 실패. `Recovery` 결과를 확인하고 보안 프로그램의 바로 가기 생성 차단 여부 점검 |
 | `VIEWER_SMOKE_CHECK_FAILED` | 새 Viewer 무화면 자체점검 실패. `Detail`, 선택적 `ExitCode`, 복구 결과, 설치 journal과 Viewer 진단 로그를 확인 |
@@ -396,8 +448,12 @@ Agent 신원 불일치가 발생합니다.
 | `VIEWER_UNSUPPORTED_ARCHITECTURE` | 32비트 Windows에서는 win-x64 Viewer를 설치할 수 없음. 64비트 Windows PC에서 실행 |
 | `VIEWER_SELF_CHECK_START_FAILED` | 무화면 자체점검 프로세스를 시작하지 못함. Windows x64 여부와 AppLocker·WDAC·EDR 실행 차단 확인 |
 | `VIEWER_SELF_CHECK_WAIT_FAILED` | 무화면 자체점검 프로세스의 완료 상태를 읽지 못함. 설치 journal과 Windows Application 로그를 확인한 뒤 다시 설치 |
-| `VIEWER_SELF_CHECK_TIMEOUT` | 무화면 자체점검이 20초 안에 끝나지 않음. 남은 프로세스와 보안 프로그램 지연·차단 확인 |
 | `VIEWER_SELF_CHECK_EXITED_NONZERO` | 무화면 자체점검이 비정상 종료됨. 표시된 `ExitCode`, Windows Application 로그와 EDR 기록 확인 |
+| `VIEWER_SELF_CHECK_ACCESS_DENIED` | 설치된 Viewer 자체점검 실행 권한이 거부됨. Program Files 실행 정책과 EDR·AppLocker·WDAC 기록 확인 |
+| `FILE_MISSING` | 자체점검 대상 파일이 없어짐. EDR 격리 여부와 패키지 무결성 확인 |
+| `BAD_IMAGE` | 설치된 실행 파일을 현재 Windows에서 로드하지 못함. win-x64 환경과 파일 손상·격리 여부 확인 |
+| `TIMEOUT` | 무화면 자체점검이 20초 안에 끝나지 않음. 남은 프로세스와 보안 프로그램 지연·차단 확인 |
+| `VIEWER_UNINSTALL_ROLLBACK_PRESERVED` | 실행 중 Viewer 또는 활성 프로그램 폴더를 제거하지 못해 rollback 슬롯을 보존함. 잠긴 Viewer를 정상 종료하고 관리자 제거를 다시 실행 |
 | `TARGET_NOT_ALLOWED` | 장비 IPv4가 Agent 허용 스위치 IP 또는 고급 대상 CIDR 밖임. Agent ZIP의 허용 IP 설정 도구로 갱신 |
 | `TCP_TIMEOUT` | Agent에서 장비 TCP/23 연결 시간 초과 |
 | `AUTH_FAILED` | Telnet 로그인 실패 |

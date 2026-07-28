@@ -15,8 +15,8 @@ if not exist "%SSW_POWERSHELL_PATH%" (
 
 echo Requesting administrator permission (UAC)...
 set "SSW_INSTALLER_PATH=%INSTALLER%"
-"%SSW_POWERSHELL_PATH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$s = '$Host.UI.RawUI.WindowTitle = ''Samsung Switch Watch - Agent installer''; try { & $env:SSW_INSTALLER_PATH } catch { Write-Host ''''; Write-Host ''Agent installation failed.'' -ForegroundColor Red; Write-Host (''Cause: '' + $_.Exception.Message) -ForegroundColor Yellow; Write-Host ''The requested Agent installation did not complete. Verify the service before reconnecting Viewer.''; [void](Read-Host ''Press Enter after recording the cause above''); exit 1 }'; $e = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)); try { $p = Start-Process -FilePath $env:SSW_POWERSHELL_PATH -Verb RunAs -Wait -PassThru -ArgumentList ('-NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $e) } catch { Write-Host 'Administrator permission was not granted or elevated PowerShell could not start.' -ForegroundColor Red; exit 5 }; exit $p.ExitCode"
+"%SSW_POWERSHELL_PATH%" -NoLogo -NoProfile -Command ^
+  "$s = '$Host.UI.RawUI.WindowTitle = ''Samsung Switch Watch - Agent installer''; try { & $env:SSW_INSTALLER_PATH } catch { Write-Host ''''; Write-Host ''Agent installation failed.'' -ForegroundColor Red; Write-Host (''Cause: '' + $_.Exception.Message) -ForegroundColor Yellow; Write-Host ''The requested Agent installation did not complete. Verify the service before reconnecting Viewer.''; [void](Read-Host ''Press Enter after recording the cause above''); exit 1 }'; $e = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s)); try { $p = Start-Process -FilePath $env:SSW_POWERSHELL_PATH -Verb RunAs -Wait -PassThru -ArgumentList ('-NoLogo -NoProfile -EncodedCommand ' + $e) } catch { Write-Host 'Administrator permission was not granted or elevated PowerShell could not start.' -ForegroundColor Red; exit 5 }; exit $p.ExitCode"
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" (
   echo Agent install or update failed.

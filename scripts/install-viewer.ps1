@@ -1,13 +1,25 @@
 ﻿param(
     [string]$SourceDirectory = $PSScriptRoot,
-    [string]$InstallDirectory = "$env:LOCALAPPDATA\Programs\SamsungSwitchWatch\Viewer",
+    [string]$InstallDirectory,
     [switch]$StartWithWindows,
     [switch]$DisableStartWithWindows,
     [switch]$DoNotStart,
-    [switch]$Preflight
+    [switch]$Preflight,
+    [switch]$PerUser,
+    [switch]$MachinePhase,
+    [switch]$MachineRollbackPhase
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+
+if ([string]::IsNullOrWhiteSpace($InstallDirectory)) {
+    $InstallDirectory = if ($PerUser) {
+        Join-Path $env:LOCALAPPDATA 'Programs\SamsungSwitchWatch\Viewer'
+    }
+    else {
+        Join-Path $env:ProgramFiles 'SamsungSwitchWatch\Viewer'
+    }
+}
 
 $source = [IO.Path]::GetFullPath($SourceDirectory)
 $install = [IO.Path]::GetFullPath($InstallDirectory)
@@ -17,6 +29,395 @@ $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Samsu
 $startup = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Samsung Switch Watch.lnk'
 $startMenuParent = Split-Path $startMenu -Parent
 $startupParent = Split-Path $startup -Parent
+
+function Test-SswViewerAccessDeniedException {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [UnauthorizedAccessException] -or
+            $current -is [Security.SecurityException] -or
+            ($current -is [ComponentModel.Win32Exception] -and
+                $current.NativeErrorCode -eq 5)) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Assert-SswViewerSourceReadable {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    try {
+        $directoryItem = Get-Item -LiteralPath $Directory -Force -ErrorAction Stop
+        if (-not $directoryItem.PSIsContainer) {
+            throw 'Viewer 패키지 원본 경로가 폴더가 아닙니다.'
+        }
+        foreach ($item in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction Stop)) {
+            if ($item.PSIsContainer) { continue }
+            $stream = $null
+            try {
+                $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+                $stream = [IO.File]::Open(
+                    $item.FullName,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    $share)
+            }
+            finally {
+                if ($stream) { $stream.Dispose() }
+            }
+        }
+    }
+    catch {
+        if (Test-SswViewerAccessDeniedException -Exception $_.Exception) {
+            throw [InvalidOperationException]::new(
+                'VIEWER_SOURCE_ACCESS_DENIED: 승인한 관리자 계정이 압축 해제한 Viewer 원본을 읽을 수 없습니다. 관리자 계정도 읽을 수 있는 로컬 폴더에 ZIP을 다시 푼 뒤 재시도하세요.',
+                $_.Exception)
+        }
+        throw
+    }
+}
+
+function Get-SswViewerSelfCheckDetailCode {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [ComponentModel.Win32Exception]) {
+            switch ([int]$current.NativeErrorCode) {
+                2 { return 'FILE_MISSING' }
+                3 { return 'FILE_MISSING' }
+                5 { return 'VIEWER_SELF_CHECK_ACCESS_DENIED' }
+                193 { return 'BAD_IMAGE' }
+                216 { return 'BAD_IMAGE' }
+                577 { return 'VIEWER_INSTALL_PATH_EXECUTION_BLOCKED' }
+                1260 { return 'VIEWER_INSTALL_PATH_EXECUTION_BLOCKED' }
+            }
+        }
+        if ($current -is [UnauthorizedAccessException] -or
+            $current -is [Security.SecurityException]) {
+            return 'VIEWER_SELF_CHECK_ACCESS_DENIED'
+        }
+        $current = $current.InnerException
+    }
+    return 'VIEWER_SELF_CHECK_START_FAILED'
+}
+
+function Invoke-SswViewerSelfCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$ViewerExecutable,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    if (-not (Test-Path -LiteralPath $ViewerExecutable -PathType Leaf)) {
+        throw 'FILE_MISSING: 설치된 Viewer 실행 파일을 찾지 못했습니다.'
+    }
+
+    $process = $null
+    try {
+        try {
+            $process = Start-Process -FilePath $ViewerExecutable -WorkingDirectory $WorkingDirectory `
+                -ArgumentList '--install-smoke-check' -WindowStyle Hidden -PassThru -ErrorAction Stop
+        }
+        catch {
+            $detailCode = Get-SswViewerSelfCheckDetailCode -Exception $_.Exception
+            throw [InvalidOperationException]::new(
+                "$detailCode`: Viewer 설치 전용 자체 점검을 시작하지 못했습니다.",
+                $_.Exception)
+        }
+
+        try {
+            $completed = $process.WaitForExit(20000)
+        }
+        catch {
+            throw [InvalidOperationException]::new(
+                'VIEWER_SELF_CHECK_WAIT_FAILED: Viewer 설치 전용 자체 점검 완료 여부를 확인하지 못했습니다.',
+                $_.Exception)
+        }
+        if (-not $completed) {
+            try { $process.Kill() } catch { }
+            throw 'TIMEOUT: Viewer 설치 전용 자체 점검이 20초 안에 끝나지 않았습니다.'
+        }
+        if ($process.ExitCode -ne 0) {
+            $failure = New-Object InvalidOperationException(
+                "VIEWER_SELF_CHECK_EXITED_NONZERO: Viewer 설치 전용 자체 점검이 실패했습니다. 종료 코드: $($process.ExitCode)")
+            $failure.Data['ExitCode'] = [int]$process.ExitCode
+            throw $failure
+        }
+    }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
+function Enter-SswViewerMachineDeploymentLock {
+    $name = 'Global\SamsungSwitchWatch.Viewer.Machine.Deployment.v1'
+    $mutex = $null
+    $acquired = $false
+    try {
+        $security = New-Object Security.AccessControl.MutexSecurity
+        $security.SetAccessRuleProtection($true, $false)
+        foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+            $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+            $security.AddAccessRule((New-Object Security.AccessControl.MutexAccessRule(
+                $sid,
+                [Security.AccessControl.MutexRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow)))
+        }
+        $createdNew = $false
+        $mutex = [Threading.Mutex]::new($false, $name, [ref]$createdNew, $security)
+        try {
+            $acquired = $mutex.WaitOne(0)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $acquired = $true
+            throw 'DEPLOYMENT_PREVIOUS_RUN_INTERRUPTED: 이전 Viewer 설치·제거 작업의 비정상 종료를 감지했습니다.'
+        }
+        if (-not $acquired) {
+            throw 'DEPLOYMENT_ALREADY_RUNNING: Viewer 시스템 설치 또는 제거 작업이 이미 실행 중입니다.'
+        }
+        return [pscustomobject]@{ Name = $name; Mutex = $mutex }
+    }
+    catch {
+        if ($mutex) {
+            if ($acquired) { try { $mutex.ReleaseMutex() } catch { } }
+            try { $mutex.Dispose() } catch { }
+        }
+        throw
+    }
+}
+
+function Get-SswViewerMachineRollbackSlot {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    $resolvedInstall = [IO.Path]::GetFullPath($InstallDirectory)
+    $installParent = Split-Path $resolvedInstall -Parent
+    $slot = "$resolvedInstall.__rollback"
+    Assert-SswChildPath -Parent $installParent -Child $slot
+    if ((Split-Path $slot -Parent) -cne $installParent) {
+        throw 'VIEWER_ROLLBACK_SLOT_INVALID: Viewer rollback slot은 설치 폴더와 같은 보호된 부모에 있어야 합니다.'
+    }
+    return $slot
+}
+
+function Get-SswValidatedViewerRollbackPackage {
+    param([Parameter(Mandatory = $true)][string]$RollbackSlot)
+
+    if (-not (Test-Path -LiteralPath $RollbackSlot -PathType Container)) {
+        throw 'VIEWER_ROLLBACK_SLOT_INVALID: 보존된 Viewer rollback slot이 폴더가 아닙니다.'
+    }
+    Assert-SswTrustedDirectoryRootOwner -Path $RollbackSlot | Out-Null
+    return Get-SswValidatedViewerPackage -Directory $RollbackSlot `
+        -ManifestPath (Join-Path $RollbackSlot 'BUILD-MANIFEST.json')
+}
+
+function Initialize-SswViewerMachineRollbackSlot {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    $rollbackSlot = Get-SswViewerMachineRollbackSlot -InstallDirectory $InstallDirectory
+    if (-not (Test-Path -LiteralPath $rollbackSlot)) { return $rollbackSlot }
+
+    $rollbackPackage = Get-SswValidatedViewerRollbackPackage -RollbackSlot $rollbackSlot
+    if (-not (Test-Path -LiteralPath $InstallDirectory)) {
+        Move-Item -LiteralPath $rollbackSlot -Destination $InstallDirectory
+        $restoredPackage = Get-SswValidatedViewerPackage -Directory $InstallDirectory `
+            -ManifestPath (Join-Path $InstallDirectory 'BUILD-MANIFEST.json')
+        if ($restoredPackage.ManifestSha256 -ne $rollbackPackage.ManifestSha256) {
+            throw 'VIEWER_ROLLBACK_RESTORE_INVALID: 중단된 이전 설치의 rollback slot 복원 결과가 일치하지 않습니다.'
+        }
+        Write-SswStep '중단된 이전 설치의 검증된 Viewer rollback slot 복원 완료'
+        return $rollbackSlot
+    }
+
+    $recovery = Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory
+    if ($recovery -cne 'PREVIOUS_VIEWER_RESTORED') {
+        throw "VIEWER_ROLLBACK_RESTORE_INVALID: 다음 업데이트 전 rollback 복구 결과가 올바르지 않습니다: $recovery"
+    }
+    Write-SswStep '다음 업데이트 전 검증된 Viewer rollback slot 우선 복원 완료'
+    return $rollbackSlot
+}
+
+function Invoke-SswViewerMachineRollbackCore {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    $resolvedInstall = [IO.Path]::GetFullPath($InstallDirectory)
+    $installParent = Split-Path $resolvedInstall -Parent
+    Assert-SswTrustedDirectoryRootOwner -Path $installParent | Out-Null
+    $rollbackSlot = Get-SswViewerMachineRollbackSlot -InstallDirectory $resolvedInstall
+    $rollbackPackage = $null
+    if (Test-Path -LiteralPath $rollbackSlot) {
+        $rollbackPackage = Get-SswValidatedViewerRollbackPackage -RollbackSlot $rollbackSlot
+    }
+
+    $currentInstallPresent = Test-Path -LiteralPath $resolvedInstall
+    if ($currentInstallPresent) {
+        Assert-SswNoReparsePoint -Parent $installParent -Child $resolvedInstall
+    }
+    if (-not $currentInstallPresent -and $null -eq $rollbackPackage) {
+        return 'NO_MACHINE_INSTALL_PRESENT'
+    }
+
+    $viewerProcesses = @(Get-Process -Name 'SamsungSwitchWatch.Viewer' -ErrorAction SilentlyContinue)
+    if ($viewerProcesses.Count -gt 0) {
+        $viewerProcesses | Stop-Process
+        foreach ($process in $viewerProcesses) {
+            try { $process.WaitForExit(5000) | Out-Null } catch { }
+        }
+        if (Get-Process -Name 'SamsungSwitchWatch.Viewer' -ErrorAction SilentlyContinue) {
+            throw 'VIEWER_ROLLBACK_PROCESS_STOP_FAILED: Viewer 프로세스를 종료하지 못해 rollback을 중단했습니다.'
+        }
+    }
+
+    $quarantine = "$resolvedInstall.__failed_$([Guid]::NewGuid().ToString('N'))"
+    Assert-SswChildPath -Parent $installParent -Child $quarantine
+    $currentQuarantined = $false
+    $rollbackMoved = $false
+    try {
+        # 현재 설치는 바로 가기 실행 실패, EDR 격리 또는 파일 손상 상태일 수 있으므로
+        # 패키지 검증을 복구의 선행 조건으로 삼지 않는다. 보호된 정확한 경로를 먼저
+        # 격리한 뒤, 별도로 검증한 rollback slot만 활성 경로로 복원한다.
+        if ($currentInstallPresent) {
+            Move-Item -LiteralPath $resolvedInstall -Destination $quarantine -ErrorAction Stop
+            $currentQuarantined = $true
+        }
+
+        if ($null -ne $rollbackPackage) {
+            Move-Item -LiteralPath $rollbackSlot -Destination $resolvedInstall -ErrorAction Stop
+            $rollbackMoved = $true
+            $restoredPackage = Get-SswValidatedViewerPackage -Directory $resolvedInstall `
+                -ManifestPath (Join-Path $resolvedInstall 'BUILD-MANIFEST.json')
+            if ($restoredPackage.ManifestSha256 -ne $rollbackPackage.ManifestSha256) {
+                throw 'VIEWER_ROLLBACK_RESTORE_INVALID: 복원된 Viewer가 검증된 rollback slot과 일치하지 않습니다.'
+            }
+        }
+
+        if ($currentQuarantined -and (Test-Path -LiteralPath $quarantine)) {
+            try {
+                Remove-Item -LiteralPath $quarantine -Recurse -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Warning 'VIEWER_FAILED_INSTALL_QUARANTINE_PRESERVED: 이전의 실패한 Viewer 설치 격리 폴더를 정리하지 못했지만 검증된 버전 복원은 완료했습니다.'
+            }
+        }
+        return $(if ($null -ne $rollbackPackage) {
+            'PREVIOUS_VIEWER_RESTORED'
+        }
+        else {
+            'PARTIAL_INSTALL_REMOVED'
+        })
+    }
+    catch {
+        $rollbackFailure = $_
+        if ($rollbackMoved -and
+            (Test-Path -LiteralPath $resolvedInstall) -and
+            -not (Test-Path -LiteralPath $rollbackSlot)) {
+            try {
+                Move-Item -LiteralPath $resolvedInstall -Destination $rollbackSlot -ErrorAction Stop
+                $rollbackMoved = $false
+            }
+            catch { }
+        }
+        if ($currentQuarantined -and
+            (Test-Path -LiteralPath $quarantine) -and
+            -not (Test-Path -LiteralPath $resolvedInstall)) {
+            try { Move-Item -LiteralPath $quarantine -Destination $resolvedInstall } catch { }
+        }
+        throw [InvalidOperationException]::new(
+            'VIEWER_MACHINE_ROLLBACK_INCOMPLETE: Viewer rollback을 완료하지 못했습니다. rollback slot과 격리 폴더를 삭제하지 마세요.',
+            $rollbackFailure.Exception)
+    }
+}
+
+function Invoke-SswViewerMachineRollbackPhase {
+    param([Parameter(Mandatory = $true)][string]$InstallDirectory)
+
+    Assert-SswAdministrator
+    $lock = Enter-SswViewerMachineDeploymentLock
+    try {
+        return Invoke-SswViewerMachineRollbackCore -InstallDirectory $InstallDirectory
+    }
+    finally {
+        Exit-SswDeploymentLock -Lock $lock
+    }
+}
+
+function Invoke-SswViewerUserIntegration {
+    param(
+        [Parameter(Mandatory = $true)][string]$ViewerExecutable,
+        [switch]$EnableStartup,
+        [switch]$DisableStartup
+    )
+
+    $integrationId = [Guid]::NewGuid().ToString('N')
+    $backupRoot = Join-Path ([IO.Path]::GetTempPath()) "SamsungSwitchWatch-Viewer-links-$integrationId"
+    $startMenuWasPresent = Test-Path -LiteralPath $startMenu -PathType Leaf
+    $startupWasPresent = Test-Path -LiteralPath $startup -PathType Leaf
+    $startParentMade = $false
+    $startupParentMade = $false
+    $mutationStarted = $false
+    try {
+        New-Item -ItemType Directory -Path $backupRoot | Out-Null
+        if ($startMenuWasPresent) {
+            Copy-Item -LiteralPath $startMenu -Destination (Join-Path $backupRoot 'start-menu.lnk')
+        }
+        if ($startupWasPresent) {
+            Copy-Item -LiteralPath $startup -Destination (Join-Path $backupRoot 'startup.lnk')
+        }
+
+        $startParentMade = New-SswDirectoryIfMissing -Path $startMenuParent `
+            -FailureCode 'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE' -Description '시작 메뉴'
+        $keepStartup = $EnableStartup -or ($startupWasPresent -and -not $DisableStartup)
+        if ($keepStartup) {
+            $startupParentMade = New-SswDirectoryIfMissing -Path $startupParent `
+                -FailureCode 'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE' -Description '시작프로그램'
+        }
+
+        $mutationStarted = $true
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($startMenu)
+        $shortcut.TargetPath = $ViewerExecutable
+        $shortcut.WorkingDirectory = Split-Path $ViewerExecutable -Parent
+        $shortcut.Save()
+        if ($keepStartup) {
+            Copy-Item -LiteralPath $startMenu -Destination $startup -Force
+        }
+        elseif ($DisableStartup -and (Test-Path -LiteralPath $startup -PathType Leaf)) {
+            Remove-Item -LiteralPath $startup -Force
+        }
+    }
+    catch {
+        $failure = $_
+        if ($mutationStarted) {
+            foreach ($link in @($startMenu, $startup)) {
+                if (Test-Path -LiteralPath $link -PathType Leaf) {
+                    Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+                }
+            }
+            if ($startMenuWasPresent -and
+                (Test-Path -LiteralPath (Join-Path $backupRoot 'start-menu.lnk') -PathType Leaf)) {
+                Copy-Item -LiteralPath (Join-Path $backupRoot 'start-menu.lnk') `
+                    -Destination $startMenu -Force -ErrorAction SilentlyContinue
+            }
+            if ($startupWasPresent -and
+                (Test-Path -LiteralPath (Join-Path $backupRoot 'startup.lnk') -PathType Leaf)) {
+                Copy-Item -LiteralPath (Join-Path $backupRoot 'startup.lnk') `
+                    -Destination $startup -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($startupParentMade) { Remove-SswEmptyDirectoryBestEffort -Path $startupParent }
+        if ($startParentMade) { Remove-SswEmptyDirectoryBestEffort -Path $startMenuParent }
+        throw [InvalidOperationException]::new(
+            'VIEWER_SHORTCUT_SETUP_FAILED: 현재 사용자 바로 가기 또는 자동 시작을 구성하지 못했습니다.',
+            $failure.Exception)
+    }
+    finally {
+        if (Test-Path -LiteralPath $backupRoot) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 function Get-SswValidatedViewerPackage {
     param(
@@ -168,6 +569,138 @@ function Get-SswValidatedViewerPackage {
     }
 }
 
+function ConvertTo-SswPowerShellLiteral {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Invoke-SswViewerElevatedMachinePhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$PackageSource,
+        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory
+    )
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+        throw 'VIEWER_POWERSHELL_NOT_FOUND: Windows PowerShell을 찾지 못했습니다.'
+    }
+
+    $installerLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallerPath
+    $sourceLiteral = ConvertTo-SswPowerShellLiteral -Value $PackageSource
+    $installLiteral = ConvertTo-SswPowerShellLiteral -Value $MachineInstallDirectory
+    $command = @"
+try {
+    & $installerLiteral -MachinePhase -SourceDirectory $sourceLiteral -InstallDirectory $installLiteral
+    exit 0
+}
+catch {
+    Write-Host ''
+    Write-Host ('Viewer machine installation failed: ' + `$_.Exception.Message) -ForegroundColor Red
+    `$current = `$_.Exception
+    while (`$null -ne `$current) {
+        if (`$current -is [UnauthorizedAccessException] -or
+            `$current -is [Security.SecurityException] -or
+            (`$current -is [ComponentModel.Win32Exception] -and `$current.NativeErrorCode -eq 5)) {
+            exit 41
+        }
+        `$current = `$current.InnerException
+    }
+    if (`$_.Exception.Message -like 'VIEWER_SOURCE_ACCESS_DENIED:*') { exit 41 }
+    exit 1
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    try {
+        $process = Start-Process -FilePath $powerShellPath -Verb RunAs -Wait -PassThru `
+            -ArgumentList "-NoLogo -NoProfile -EncodedCommand $encoded" -ErrorAction Stop
+    }
+    catch {
+        throw [InvalidOperationException]::new(
+            'VIEWER_ELEVATION_NOT_GRANTED: 관리자 승격을 승인하지 않았거나 승격된 Windows PowerShell을 시작하지 못했습니다.',
+            $_.Exception)
+    }
+
+    if ($process.ExitCode -eq 41) {
+        throw 'VIEWER_SOURCE_ACCESS_DENIED: 승인한 관리자 계정이 압축 해제한 Viewer 원본을 읽을 수 없습니다. 관리자 계정도 읽을 수 있는 로컬 폴더에 ZIP을 다시 푼 뒤 재시도하세요.'
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "VIEWER_MACHINE_PHASE_FAILED: 관리자 설치 단계가 실패했습니다. 승격된 창에 표시된 안전 진단 코드를 확인하세요. 종료 코드: $($process.ExitCode)"
+    }
+}
+
+function Invoke-SswViewerElevatedRollbackPhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$MachineInstallDirectory
+    )
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+        throw 'VIEWER_POWERSHELL_NOT_FOUND: Windows PowerShell을 찾지 못했습니다.'
+    }
+    $installerLiteral = ConvertTo-SswPowerShellLiteral -Value $InstallerPath
+    $installLiteral = ConvertTo-SswPowerShellLiteral -Value $MachineInstallDirectory
+    $command = @"
+try {
+    `$recovery = & $installerLiteral -MachineRollbackPhase -InstallDirectory $installLiteral
+    Write-Host ('Recovery: ' + `$recovery) -ForegroundColor Yellow
+    exit 0
+}
+catch {
+    Write-Host 'Recovery: ROLLBACK_INCOMPLETE' -ForegroundColor Red
+    Write-Host (`$_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    try {
+        $process = Start-Process -FilePath $powerShellPath -Verb RunAs -Wait -PassThru `
+            -ArgumentList "-NoLogo -NoProfile -EncodedCommand $encoded" -ErrorAction Stop
+    }
+    catch {
+        throw [InvalidOperationException]::new(
+            'VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED: rollback 관리자 승격이 취소되었거나 시작되지 않았습니다.',
+            $_.Exception)
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "VIEWER_MACHINE_ROLLBACK_INCOMPLETE: 승격된 rollback 단계가 완료되지 않았습니다. 종료 코드: $($process.ExitCode)"
+    }
+}
+
+function Preserve-SswLegacyViewerInstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$LegacyDirectory,
+        [Parameter(Mandatory = $true)][string]$CurrentSource
+    )
+
+    if (-not (Test-Path -LiteralPath $LegacyDirectory)) { return }
+    Assert-SswProductPath -Path $LegacyDirectory -BaseRoot $env:LOCALAPPDATA `
+        -ProductRelativeRoot 'Programs\SamsungSwitchWatch\Viewer' -RequireExactProductRoot
+    if (-not (Test-Path -LiteralPath $LegacyDirectory -PathType Container)) {
+        Write-Warning 'VIEWER_LEGACY_INSTALL_PRESERVED_UNVERIFIED: 이전 사용자 설치 경로가 폴더가 아니므로 그대로 보존합니다.'
+        return
+    }
+    $legacyPrefix = $LegacyDirectory.TrimEnd('\') + '\'
+    if ($CurrentSource.Equals($LegacyDirectory, [StringComparison]::OrdinalIgnoreCase) -or
+        $CurrentSource.StartsWith($legacyPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Warning 'VIEWER_LEGACY_INSTALL_PRESERVED_IN_USE: 현재 설치 원본이 이전 사용자 설치 폴더 안에 있어 자동 삭제하지 않습니다.'
+        return
+    }
+
+    try {
+        $legacyManifestPath = Join-Path $LegacyDirectory 'BUILD-MANIFEST.json'
+        $null = Get-SswValidatedViewerPackage -Directory $LegacyDirectory `
+            -ManifestPath $legacyManifestPath
+    }
+    catch {
+        Write-Warning 'VIEWER_LEGACY_INSTALL_PRESERVED_UNVERIFIED: 이전 사용자 설치의 제품 identity를 검증하지 못해 폴더와 사용자 데이터를 모두 보존합니다.'
+        return
+    }
+
+    Write-Warning 'VIEWER_LEGACY_INSTALL_PRESERVED_RECOVERABLE: 검증된 이전 사용자별 프로그램 폴더를 자동 삭제하지 않고 복구용으로 보존합니다.'
+}
+
 Write-SswStep 'Viewer 설치 전 검사'
 if ($env:OS -ne 'Windows_NT') { throw 'Viewer는 Windows x64에서만 설치할 수 있습니다.' }
 if (-not [Environment]::Is64BitOperatingSystem) {
@@ -176,6 +709,25 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 if ($StartWithWindows -and $DisableStartWithWindows) {
     throw '-StartWithWindows와 -DisableStartWithWindows는 동시에 사용할 수 없습니다.'
 }
+if (($MachinePhase -and ($PerUser -or $MachineRollbackPhase)) -or
+    ($MachineRollbackPhase -and ($PerUser -or $Preflight -or
+        $StartWithWindows -or $DisableStartWithWindows))) {
+    throw 'VIEWER_INSTALL_MODE_INVALID: 내부 machine phase 옵션 또는 -PerUser 조합이 올바르지 않습니다.'
+}
+if ($PerUser) {
+    Assert-SswProductPath -Path $install -BaseRoot $env:LOCALAPPDATA `
+        -ProductRelativeRoot 'Programs\SamsungSwitchWatch\Viewer'
+}
+else {
+    Assert-SswProductPath -Path $install -BaseRoot $env:ProgramFiles `
+        -ProductRelativeRoot 'SamsungSwitchWatch\Viewer'
+}
+if ($MachineRollbackPhase) {
+    $machineRecovery = Invoke-SswViewerMachineRollbackPhase -InstallDirectory $install
+    return $machineRecovery
+}
+
+Assert-SswViewerSourceReadable -Directory $source
 if (-not (Test-Path -LiteralPath $sourceExe -PathType Leaf)) {
     throw "VIEWER_PACKAGE_FILE_MISSING: Viewer 배포 파일을 찾지 못했습니다: $sourceExe"
 }
@@ -184,7 +736,6 @@ if (-not (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) {
 }
 $sourcePackage = Get-SswValidatedViewerPackage -Directory $source -ManifestPath $sourceManifestPath
 $sourceManifest = $sourcePackage.Manifest
-Assert-SswProductPath -Path $install -BaseRoot $env:LOCALAPPDATA -ProductRelativeRoot 'Programs\SamsungSwitchWatch\Viewer'
 if ($source.TrimEnd('\') -eq $install.TrimEnd('\')) { throw '배포 ZIP을 설치 대상 폴더 밖에서 실행하세요.' }
 
 Write-Host "  source  : $source"
@@ -194,14 +745,78 @@ if ($Preflight) {
     return
 }
 
-$deploymentLock = Enter-SswDeploymentLock -Product 'Viewer'
+if (-not $PerUser -and -not $MachinePhase) {
+    if (Test-SswAdministrator) {
+        throw 'VIEWER_ORIGINAL_USER_PHASE_REQUIRES_UNELEVATED: 기본 설치는 현재 사용자의 바로 가기와 자동 시작을 올바르게 구성하도록 승격되지 않은 창에서 시작해야 합니다.'
+    }
+    Write-SswStep '관리자 권한으로 Viewer 시스템 프로그램 설치'
+    Invoke-SswViewerElevatedMachinePhase -InstallerPath $PSCommandPath `
+        -PackageSource $source -MachineInstallDirectory $install
+
+    $viewerExe = Join-Path $install 'SamsungSwitchWatch.Viewer.exe'
+    try {
+        Write-SswStep '원래 Windows 사용자 권한으로 설치 경로 실행 확인'
+        Invoke-SswViewerSelfCheck -ViewerExecutable $viewerExe -WorkingDirectory $install
+        Invoke-SswViewerUserIntegration -ViewerExecutable $viewerExe `
+            -EnableStartup:$StartWithWindows -DisableStartup:$DisableStartWithWindows
+    }
+    catch {
+        $userPhaseFailure = $_
+        Write-Warning 'VIEWER_USER_PHASE_FAILED: 원래 사용자 실행 확인 또는 바로 가기 설정이 실패해 이전 시스템 설치 복원을 요청합니다.'
+        try {
+            Invoke-SswViewerElevatedRollbackPhase -InstallerPath $PSCommandPath `
+                -MachineInstallDirectory $install
+            Write-Host 'Recovery: MACHINE_ROLLBACK_COMPLETED' -ForegroundColor Yellow
+        }
+        catch {
+            Write-Host 'Recovery: ROLLBACK_INCOMPLETE' -ForegroundColor Red
+            Write-Warning 'VIEWER_MACHINE_ROLLBACK_INCOMPLETE: rollback slot은 보존했습니다. 새 설치와 rollback slot을 수동 삭제하지 말고 관리자에게 확인하세요.'
+            throw [InvalidOperationException]::new(
+                'VIEWER_USER_PHASE_FAILED_ROLLBACK_INCOMPLETE: 사용자 단계와 자동 rollback이 모두 완료되지 않았습니다.',
+                $userPhaseFailure.Exception)
+        }
+        throw $userPhaseFailure
+    }
+
+    $legacyInstall = Join-Path $env:LOCALAPPDATA 'Programs\SamsungSwitchWatch\Viewer'
+    Preserve-SswLegacyViewerInstall -LegacyDirectory $legacyInstall -CurrentSource $source
+    Write-SswStep "Viewer 시스템 설치 및 현재 사용자 통합 완료: $viewerExe"
+    if (-not $MachinePhase -and -not $DoNotStart) {
+        try {
+            Start-Process -FilePath $viewerExe -WorkingDirectory $install -ErrorAction Stop | Out-Null
+        }
+        catch {
+            $postStartDetail = Get-SswViewerSelfCheckDetailCode -Exception $_.Exception
+            Write-Warning "VIEWER_POST_START_FAILED: 설치는 완료됐지만 Viewer를 자동으로 시작하지 못했습니다. Detail: $postStartDetail"
+        }
+    }
+    return
+}
+
+if ($MachinePhase) { Assert-SswAdministrator }
+$deploymentLock = if ($MachinePhase) {
+    Enter-SswViewerMachineDeploymentLock
+}
+else {
+    Enter-SswDeploymentLock -Product 'Viewer'
+}
 try {
 $installParent = Split-Path $install -Parent
 $transactionId = [Guid]::NewGuid().ToString('N')
 $staging = "$install.__staging_$transactionId"
-$backup = "$install.__backup_$transactionId"
+$backup = if ($MachinePhase) {
+    Get-SswViewerMachineRollbackSlot -InstallDirectory $install
+}
+else {
+    "$install.__backup_$transactionId"
+}
 $shortcutBackup = Join-Path ([IO.Path]::GetTempPath()) "SamsungSwitchWatch-Viewer-$transactionId"
-$journalPath = Join-Path $env:LOCALAPPDATA 'SamsungSwitchWatch-Operations\viewer-install.json'
+$journalPath = if ($MachinePhase) {
+    Join-Path $env:ProgramData 'SamsungSwitchWatch-Viewer-Operations\viewer-install.json'
+}
+else {
+    Join-Path $env:LOCALAPPDATA 'SamsungSwitchWatch-Operations\viewer-install.json'
+}
 $installSwapped = $false
 $shortcutBackupsReady = $false
 $shortcutMutationStarted = $false
@@ -222,8 +837,18 @@ Write-SswOperationJournal -Path $journalPath -Operation 'viewer-install' -Transa
     -Stage 'prepared' -Status 'running' -Version ([string]$sourceManifest.version)
 
 try {
+    if ($MachinePhase) {
+        $backup = Initialize-SswViewerMachineRollbackSlot -InstallDirectory $install
+        $previousInstallExisted = Test-Path -LiteralPath $install -PathType Container
+    }
     Write-SswStep '검증된 임시 폴더에 Viewer 배포 파일 준비'
-    New-Item -ItemType Directory -Path $installParent, $staging, $shortcutBackup -Force | Out-Null
+    New-Item -ItemType Directory -Path $installParent, $staging -Force | Out-Null
+    if ($MachinePhase) {
+        Assert-SswTrustedDirectoryRootOwner -Path $installParent
+    }
+    if (-not $MachinePhase) {
+        New-Item -ItemType Directory -Path $shortcutBackup -Force | Out-Null
+    }
     foreach ($file in @($sourcePackage.Files)) {
         Copy-Item -LiteralPath (Join-Path $source ([string]$file.Name)) -Destination $staging -Force
     }
@@ -234,9 +859,11 @@ try {
     if ($stagedPackage.ManifestSha256 -ne $sourcePackage.ManifestSha256) {
         throw '임시 폴더의 BUILD-MANIFEST.json이 검증한 원본과 일치하지 않습니다.'
     }
-    if ($startMenuExisted) { Copy-Item -LiteralPath $startMenu -Destination (Join-Path $shortcutBackup 'start-menu.lnk') -Force }
-    if ($startupExisted) { Copy-Item -LiteralPath $startup -Destination (Join-Path $shortcutBackup 'startup.lnk') -Force }
-    $shortcutBackupsReady = $true
+    if (-not $MachinePhase) {
+        if ($startMenuExisted) { Copy-Item -LiteralPath $startMenu -Destination (Join-Path $shortcutBackup 'start-menu.lnk') -Force }
+        if ($startupExisted) { Copy-Item -LiteralPath $startup -Destination (Join-Path $shortcutBackup 'startup.lnk') -Force }
+        $shortcutBackupsReady = $true
+    }
 
     $failureCode = 'VIEWER_PROCESS_STOP_FAILED'
     $viewerProcesses = @(Get-Process -Name 'SamsungSwitchWatch.Viewer' -ErrorAction SilentlyContinue)
@@ -251,82 +878,69 @@ try {
 
     $failureCode = 'VIEWER_PROGRAM_SWAP_FAILED'
     Write-SswStep 'Viewer 프로그램 폴더 원자적 교체'
-    if (Test-Path -LiteralPath $install) { Move-Item -LiteralPath $install -Destination $backup }
+    if (Test-Path -LiteralPath $install) {
+        $previousPackage = $null
+        if ($MachinePhase) {
+            $previousPackage = Get-SswValidatedViewerPackage -Directory $install `
+                -ManifestPath (Join-Path $install 'BUILD-MANIFEST.json')
+            Assert-SswTrustedDirectoryRootOwner -Path $install
+        }
+        Move-Item -LiteralPath $install -Destination $backup
+        if ($MachinePhase) {
+            $rollbackPackage = Get-SswValidatedViewerRollbackPackage -RollbackSlot $backup
+            if ($rollbackPackage.ManifestSha256 -ne $previousPackage.ManifestSha256) {
+                throw 'VIEWER_ROLLBACK_SLOT_INVALID: 이동한 이전 Viewer가 검증된 설치와 일치하지 않습니다.'
+            }
+        }
+    }
     Move-Item -LiteralPath $staging -Destination $install
     $installSwapped = $true
 
-    $failureCode = 'VIEWER_SHORTCUT_SETUP_FAILED'
-    Write-SswStep 'Viewer 바로 가기 폴더 준비'
-    $startMenuParentCreated = New-SswDirectoryIfMissing -Path $startMenuParent `
-        -FailureCode 'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE' -Description '시작 메뉴'
-    if ($StartWithWindows) {
-        $startupParentCreated = New-SswDirectoryIfMissing -Path $startupParent `
-            -FailureCode 'VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE' -Description '시작프로그램'
-    }
-
     $viewerExe = Join-Path $install 'SamsungSwitchWatch.Viewer.exe'
-    $shortcutMutationStarted = $true
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($startMenu)
-        $shortcut.TargetPath = $viewerExe
-        $shortcut.WorkingDirectory = $install
-        $shortcut.Save()
-        if ($StartWithWindows) { Copy-Item -LiteralPath $startMenu -Destination $startup -Force }
-        elseif ($DisableStartWithWindows -and (Test-Path -LiteralPath $startup -PathType Leaf)) {
-            Remove-Item -LiteralPath $startup -Force
-        }
-    }
-    catch {
-        throw [InvalidOperationException]::new(
-            'VIEWER_SHORTCUT_SETUP_FAILED: 시작 메뉴 또는 시작프로그램 바로 가기를 만들지 못했습니다. 같은 Windows 사용자로 실행하고 폴더 쓰기 권한 및 보안 정책을 확인하세요.',
-            $_.Exception)
+    $failureCode = 'VIEWER_INSTALLED_PACKAGE_INVALID'
+    Write-SswStep '교체된 설치 폴더의 전체 Viewer 패키지 재검증'
+    $installedPackage = Get-SswValidatedViewerPackage -Directory $install `
+        -ManifestPath (Join-Path $install 'BUILD-MANIFEST.json')
+    if ($installedPackage.ManifestSha256 -ne $stagedPackage.ManifestSha256) {
+        throw 'VIEWER_INSTALLED_PACKAGE_INVALID: 설치된 BUILD-MANIFEST.json이 검증된 staging과 일치하지 않습니다.'
     }
 
     $failureCode = 'VIEWER_SMOKE_CHECK_FAILED'
-    $failureDetailCode = 'VIEWER_SELF_CHECK_START_FAILED'
     Write-SswStep '새 Viewer 설치 전용 자체 점검'
     try {
-        $smokeProcess = Start-Process -FilePath $viewerExe -WorkingDirectory $install `
-            -ArgumentList '--install-smoke-check' -WindowStyle Hidden -PassThru -ErrorAction Stop
+        Invoke-SswViewerSelfCheck -ViewerExecutable $viewerExe -WorkingDirectory $install
     }
     catch {
-        throw [InvalidOperationException]::new(
-            'Viewer 설치 전용 자체 점검 프로세스를 시작하지 못했습니다.',
-            $_.Exception)
+        if ($_.Exception.Message -match '^([A-Z][A-Z0-9_]{1,63}):') {
+            $failureDetailCode = $Matches[1]
+        }
+        if ($_.Exception.Data.Contains('ExitCode')) {
+            $failureExitCode = [int]$_.Exception.Data['ExitCode']
+        }
+        throw
     }
-    $failureDetailCode = 'VIEWER_SELF_CHECK_WAIT_FAILED'
-    try {
-        $smokeCompleted = $smokeProcess.WaitForExit(20000)
-    }
-    catch {
-        throw [InvalidOperationException]::new(
-            'Viewer 설치 전용 자체 점검 완료 여부를 확인하지 못했습니다.',
-            $_.Exception)
-    }
-    if (-not $smokeCompleted) {
-        $failureDetailCode = 'VIEWER_SELF_CHECK_TIMEOUT'
-        throw 'Viewer 설치 전용 자체 점검이 20초 안에 끝나지 않았습니다.'
-    }
-    $failureExitCode = $smokeProcess.ExitCode
-    if ($failureExitCode -ne 0) {
-        $failureDetailCode = 'VIEWER_SELF_CHECK_EXITED_NONZERO'
-        throw "Viewer 설치 전용 자체 점검이 실패했습니다. 종료 코드: $failureExitCode"
-    }
-    $smokeProcess.Dispose()
-    $smokeProcess = $null
     $failureDetailCode = $null
     $failureExitCode = $null
     Write-SswStep 'Viewer 설치 전용 자체 점검을 통과했습니다.'
 
-    # 성공 상태를 먼저 영구 기록한 뒤 백업을 정리합니다. 이후 정리 실패는 새 설치를 롤백하지 않습니다.
+    if (-not $MachinePhase) {
+        $failureCode = 'VIEWER_SHORTCUT_SETUP_FAILED'
+        $shortcutMutationStarted = $true
+        Invoke-SswViewerUserIntegration -ViewerExecutable $viewerExe `
+            -EnableStartup:$StartWithWindows -DisableStartup:$DisableStartWithWindows
+    }
+
+    # Machine rollback slot은 원래 사용자 검증 뒤에도 다음 업데이트까지 보존합니다.
+    # PerUser 임시 백업만 durable commit 뒤 정리합니다.
     $failureCode = 'VIEWER_INSTALL_COMMIT_FAILED'
     Write-SswOperationJournal -Path $journalPath -Operation 'viewer-install' -TransactionId $transactionId `
         -Stage 'completed' -Status 'succeeded' -Version ([string]$sourceManifest.version)
     $transactionCommitted = $true
     $cleanupErrors = @(Invoke-SswBestEffortPlan -Plan @(
         [pscustomobject]@{ Name = 'cleanup-program-backup'; Action = {
-            if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+            if (-not $MachinePhase -and (Test-Path -LiteralPath $backup)) {
+                Remove-Item -LiteralPath $backup -Recurse -Force
+            }
         } },
         [pscustomobject]@{ Name = 'cleanup-shortcut-backup'; Action = {
             if (Test-Path -LiteralPath $shortcutBackup) { Remove-Item -LiteralPath $shortcutBackup -Recurse -Force }
@@ -337,7 +951,7 @@ try {
             ($cleanupErrors -join ', '))
     }
     Write-SswStep "Viewer 설치 완료: $viewerExe"
-    if (-not $DoNotStart) {
+    if (-not $MachinePhase -and -not $DoNotStart) {
         Write-SswStep '설치된 Viewer 시작'
         try {
             Start-Process -FilePath $viewerExe -WorkingDirectory $install -ErrorAction Stop |
@@ -355,7 +969,8 @@ catch {
         Write-Warning "Viewer 설치는 완료됐지만 후속 정리에 실패했습니다: $($failure.Exception.Message)"
         return
     }
-    if ($failure.Exception.Message -match '^(VIEWER_[A-Z0-9_]{2,63}):') {
+    if ([string]::IsNullOrWhiteSpace([string]$failureDetailCode) -and
+        $failure.Exception.Message -match '^(VIEWER_[A-Z0-9_]{2,63}):') {
         $failureCode = $Matches[1]
     }
     Write-Warning 'Viewer 설치 실패를 감지해 설치 전 상태로 되돌립니다.'

@@ -262,6 +262,10 @@ foreach ($required in @(
 }
 Assert-AddressTest -Condition (-not ($launcherText -match '(?im)^\s*powershell\.exe(?:\s|$)')) `
     -Message 'Allowed IP launcher must not resolve Windows PowerShell through the current directory or PATH.'
+Assert-AddressTest -Condition (-not $launcherText.Contains('-ExecutionPolicy Bypass')) `
+    -Message 'Allowed IP launcher must respect the Windows PowerShell execution policy.'
+Assert-AddressTest -Condition (-not $launcherText.Contains('Unblock-File')) `
+    -Message 'Allowed IP launcher must not unblock downloaded files.'
 Assert-AddressTest -Condition $launcherText.Contains(
     '& $env:SSW_INSTALLER_PATH -ReconfigureAddresses') `
     -Message 'Allowed IP launcher must invoke the packaged installer in reconfiguration mode.'

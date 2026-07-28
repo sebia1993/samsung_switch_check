@@ -13,15 +13,16 @@ if not exist "%SSW_POWERSHELL_PATH%" (
   exit /b 3
 )
 
-echo Installing or updating Viewer for the current Windows user...
-"%SSW_POWERSHELL_PATH%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%INSTALLER%" -StartWithWindows
+echo Installing or updating Viewer in Program Files...
+echo Windows will request administrator approval for the machine installation.
+"%SSW_POWERSHELL_PATH%" -NoLogo -NoProfile -File "%INSTALLER%" -StartWithWindows
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" (
   echo Viewer install or update failed.
   echo Review the error shown above. See INSTALL_KO.md.
 ) else (
-  echo Viewer installation or update completed.
-  echo Viewer will start automatically when this Windows user signs in.
+  echo Viewer installation or update completed in Program Files.
+  echo Current-user shortcuts and automatic startup were configured after elevation ended.
 )
 pause
 exit /b %RESULT%

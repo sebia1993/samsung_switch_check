@@ -1378,13 +1378,13 @@ public sealed class ViewerManagedDeviceTests
                 Assert.Equal("enable-secret", request.EnablePassword);
                 Assert.Equal(["show running-config"], request.Commands);
                 Assert.Equal("sensitive raw output", viewModel.ReadOnlyQueryOutput);
-                Assert.DoesNotContain("sensitive raw output", File.ReadAllText(devicePath), StringComparison.Ordinal);
-                Assert.DoesNotContain("sensitive raw output", File.ReadAllText(monitorPath), StringComparison.Ordinal);
             }
             finally
             {
                 await viewModel.DisposeAsync();
             }
+            Assert.DoesNotContain("sensitive raw output", File.ReadAllText(devicePath), StringComparison.Ordinal);
+            Assert.DoesNotContain("sensitive raw output", File.ReadAllText(monitorPath), StringComparison.Ordinal);
         }
         finally
         {

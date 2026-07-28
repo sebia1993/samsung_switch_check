@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.9.17-poc"
-DOCUMENT_DATE = "2026-07-27"
+VERSION = "0.9.18-poc"
+DOCUMENT_DATE = "2026-07-28"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -484,12 +484,21 @@ def add_code_block(doc, text):
     return p
 
 
-def add_bullets(doc, items, bullet_num_id):
+def add_bullets(
+    doc,
+    items,
+    bullet_num_id,
+    *,
+    font_size=11,
+    space_after=6,
+    line=1.25,
+):
     for item in items:
         p = doc.add_paragraph()
         apply_numbering(p, bullet_num_id)
+        set_paragraph_spacing(p, after=space_after, line=line)
         run = p.add_run(item)
-        set_run_font(run)
+        set_run_font(run, size=font_size)
 
 
 def add_steps(doc, items):
@@ -670,7 +679,7 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 Install-or-Update-Agent.cmd를 실행합니다.",
-            "Viewer PC에서 Viewer ZIP을 풀고 Install-or-Update-Viewer.cmd를 실행합니다.",
+            "Viewer PC에서 Viewer ZIP을 풀고 Install-or-Update-Viewer.cmd를 실행한 뒤 UAC를 승인합니다.",
             "Viewer가 열리면 Agent를 설치한 원격 PC의 주소만 입력합니다. HTTPS/18443은 자동입니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
@@ -713,7 +722,7 @@ Viewer PC                 Agent PC                    Samsung Switch
             "Agent는 Windows 서비스로 실행되어 RDP 종료나 사용자 로그오프 뒤에도 계속 대기합니다.",
             "Agent는 장비 목록, Telnet 계정, 수동 명령 원문, 스위치 출력 원문을 보관하지 않습니다.",
             "일반 사용자가 볼 수 있는 Agent 창이나 트레이 아이콘은 없습니다.",
-            "Viewer는 일반 사용자 권한으로 실행하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
+            "Viewer 프로그램은 Program Files에 설치되지만 일반 사용자 권한으로 실행하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
         ],
         bullet_num_id,
     )
@@ -769,7 +778,8 @@ Viewer PC IPv4 예     : 192.0.2.25
         "Viewer PC 또는 스위치 주소가 바뀌면 현재 Agent와 같은 버전 ZIP의 "
         "Configure-Agent-Allowed-IPs.cmd를 실행합니다. 일반 IPv4만 입력하며 내부에서 "
         "정확한 /32 정책으로 변환합니다. DHCP 또는 32대를 넘는 장비는 INSTALL_KO.md의 "
-        "고급 CIDR 절차를 사용하세요.",
+        "고급 CIDR 절차를 사용하세요. 기존 값과 같아도 서비스, TCP/18443 listener, "
+        "방화벽, 활성 프로필과 live/ready를 확인해 정상일 때만 변경 없음으로 끝납니다.",
         "info",
     )
     doc.add_page_break()
@@ -788,9 +798,19 @@ Viewer PC IPv4 예     : 192.0.2.25
         doc,
         [
             "Viewer 릴리스 ZIP을 운영자 PC의 임시 폴더에 압축 해제합니다.",
-            "Install-or-Update-Viewer.cmd를 더블클릭합니다. 관리자 권한은 필요하지 않습니다.",
-            "설치 완료 뒤 Viewer가 실행되고 다음 Windows 로그인부터 자동 시작되는지 확인합니다.",
+            "Install-or-Update-Viewer.cmd를 더블클릭하고 Program Files 설치를 위한 UAC를 승인합니다.",
+            "설치 완료 뒤 Viewer가 일반 사용자 권한으로 실행되고 다음 Windows 로그인부터 자동 시작되는지 확인합니다.",
         ],
+    )
+    add_callout(
+        doc,
+        "프로그램과 사용자 데이터 분리",
+        "프로그램은 C:\\Program Files\\SamsungSwitchWatch\\Viewer에 설치합니다. 장비 목록, "
+        "DPAPI 자격 증명, 감시 이력과 화면 설정은 설치를 시작한 원래 사용자의 "
+        "%LOCALAPPDATA%\\SamsungSwitchWatch에 그대로 보존합니다. 관리자 단계가 성공한 "
+        "뒤에만 원래 사용자 단계에서 바로 가기와 자동 시작을 반영합니다. 이전 Program Files "
+        "버전과 기존 사용자별 프로그램 폴더는 자동 삭제하지 않습니다.",
+        "info",
     )
     add_callout(
         doc,
@@ -798,17 +818,24 @@ Viewer PC IPv4 예     : 192.0.2.25
         "설치 창의 Cause, Detail, 선택적 ExitCode, Recovery와 두 진단 경로를 확인하세요. "
         "PREVIOUS_VIEWER_RESTORED이면 "
         "시작 메뉴에서 Viewer를 다시 실행합니다. ROLLBACK_INCOMPLETE이면 백업과 진단 파일을 "
-        "보존하고 Windows 관리자에게 전달하세요. 자세한 코드는 INSTALL_KO.md를 확인하세요.",
+        "보존하고 Windows 관리자에게 전달하세요. Program Files 실행이 차단되면 보안 정책을 "
+        "우회하거나 파일 차단을 해제하지 말고 해당 코드를 EDR·AppLocker·WDAC 담당자에게 "
+        "전달하세요. 사용자 단계 실패 뒤에는 이전 Program Files 버전 복구 UAC가 한 번 더 "
+        "표시될 수 있습니다. 취소하거나 실패하면 Viewer.__rollback을 삭제하지 마세요. "
+        "새 설치 파일이나 매니페스트가 EDR에 의해 격리 또는 손상돼도 보호된 현재 설치를 "
+        "격리한 뒤 검증된 rollback 슬롯을 먼저 복원합니다. 제거 중 Viewer 프로세스나 활성 "
+        "프로그램 폴더가 남으면 rollback 슬롯을 삭제하지 않습니다. "
+        "자세한 코드는 INSTALL_KO.md를 확인하세요.",
         "danger",
     )
     add_callout(
         doc,
         "고급 설치",
         "설치 전 검사, 설치 위치 또는 자동 시작 상태를 직접 지정할 때만 INSTALL_KO.md의 "
-        "install-viewer.ps1 옵션을 사용하세요.",
+        "install-viewer.ps1 옵션을 사용하세요. 기존 사용자별 설치는 -PerUser를 명시하는 "
+        "호환 경로이며 기본 설치가 아닙니다.",
         "info",
     )
-    doc.add_page_break()
     add_heading(doc, "Viewer에서 Agent 연결", 2, heading_num_id)
     add_image(
         doc,
@@ -1011,6 +1038,7 @@ Viewer PC IPv4 예     : 192.0.2.25
         doc,
         ["데이터", "위치", "보호/수명"],
         [
+            ("Viewer 프로그램", "C:\\Program Files\\\nSamsungSwitchWatch\\Viewer", "UAC 설치, 일반 사용자 권한으로 실행"),
             ("장비명·모델·IPv4", "Viewer 사용자 프로필", "현재 Windows 사용자 범위"),
             ("ID·로그인 PW·enable PW", "Viewer 사용자 프로필", "DPAPI CurrentUser 암호화"),
             ("주기 감시 기준 해시·이벤트", "Viewer 사용자 프로필", "원문 없이 로컬 저장"),
@@ -1041,7 +1069,13 @@ Viewer PC IPv4 예     : 192.0.2.25
         ],
         bullet_num_id,
     )
-    add_heading(doc, "문제 해결", 1, heading_num_id)
+    add_heading(
+        doc,
+        "문제 해결",
+        1,
+        heading_num_id,
+        page_break_before=False,
+    )
     add_callout(
         doc,
         "운영 원칙",
@@ -1063,6 +1097,11 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("AGENT_HTTPS_UNREACHABLE", "Agent 서비스 → TCP/18443 경로 → Viewer PC 허용 IP 방화벽"),
             ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → 서비스 → 허용 IP 설정 도구 → Viewer PC의 원격 TCP/18443"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
+            ("VIEWER_SOURCE_ACCESS_DENIED", "UAC 관리자도 읽을 수 있는 승인된 임시 폴더에 공식 ZIP 다시 압축 해제"),
+            ("VIEWER_INSTALL_PATH_EXECUTION_BLOCKED", "Program Files 실행 정책 → AppLocker·WDAC·EDR 기록 → 보안 담당자"),
+            ("VIEWER_USER_PHASE_FAILED", "원래 사용자 실행 검사·바로 가기 → 복구 UAC → Recovery 결과"),
+            ("VIEWER_MACHINE_ROLLBACK_INCOMPLETE", "현재 설치와 Viewer.__rollback 보존 → Windows 관리자 확인"),
+            ("VIEWER_ROLLBACK_ELEVATION_NOT_GRANTED", "복구 UAC 취소 여부 → rollback 슬롯 보존 → 관리자 재시도"),
             ("VIEWER_SHORTCUT_DIRECTORY_UNAVAILABLE", "Viewer를 설치할 동일 Windows 사용자 → 시작 메뉴·시작프로그램 폴더 쓰기 권한 → 보안 정책"),
             ("VIEWER_SHORTCUT_SETUP_FAILED", "Recovery 결과 → 바로 가기 생성 권한 → 보안 프로그램 차단"),
             ("VIEWER_SMOKE_CHECK_FAILED", "Detail·ExitCode → 기존 Viewer 복구 → 설치 journal·Viewer 진단 로그 → 보안 프로그램"),
@@ -1071,8 +1110,12 @@ Viewer PC IPv4 예     : 192.0.2.25
             ("VIEWER_UNSUPPORTED_ARCHITECTURE", "64비트 Windows PC에서 win-x64 Viewer 설치"),
             ("VIEWER_SELF_CHECK_START_FAILED", "Windows x64 → AppLocker·WDAC·EDR 실행 차단 확인"),
             ("VIEWER_SELF_CHECK_WAIT_FAILED", "설치 journal → Windows Application 로그 → 다시 설치"),
-            ("VIEWER_SELF_CHECK_TIMEOUT", "20초 자체점검 제한 → 남은 프로세스·보안 프로그램 지연 확인"),
             ("VIEWER_SELF_CHECK_EXITED_NONZERO", "표시된 ExitCode → Windows Application 로그·EDR 기록 확인"),
+            ("VIEWER_SELF_CHECK_ACCESS_DENIED", "Program Files 실행 권한 → EDR·AppLocker·WDAC 기록 확인"),
+            ("FILE_MISSING", "설치 파일 누락 또는 EDR 격리 기록 확인"),
+            ("BAD_IMAGE", "Windows x64 → 파일 손상·격리와 실행 파일 형식 확인"),
+            ("TIMEOUT", "20초 자체점검 제한 → 남은 프로세스·보안 프로그램 지연 확인"),
+            ("VIEWER_UNINSTALL_ROLLBACK_PRESERVED", "Viewer 프로세스·활성 프로그램 폴더 정리 → 관리자 제거 재실행"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 등록된 허용 IP인지 → Agent 허용 IP 설정 도구"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
@@ -1135,7 +1178,7 @@ Viewer PC IPv4 예     : 192.0.2.25
             ),
             (
                 "Agent PC",
-                "진단 결과의 service, agentLive, agentReady가 각각 OK, LIVE, READY인지 확인합니다.",
+                "service.status=Running, listener.status=Listening, firewall.enabled/exact=true, 지원 프로필 포함, health.live=LIVE, health.ready=READY인지 확인합니다.",
             ),
             (
                 "Viewer PC",
@@ -1199,11 +1242,12 @@ Viewer PC IPv4 예     : 192.0.2.25
             "Agent 서비스가 창 없이 Running이고 Viewer가 주소만으로 HTTPS 연결되는지 확인",
             "계정은 Viewer에만 저장되고 접속 시험 실패 장비의 주기 감시는 꺼지는지 확인",
             "show port status와 syslog 명령이 모델별로 동작하는지 확인",
-            "show running-config 결과가 파일/이벤트 내보내기에 남지 않는지 확인",
-            "Viewer 종료 후 재실행 시 감시 공백이 표시되는지 확인",
-            "익명 모의 출력으로 업링크 Down·복구·중복 팝업 억제를 확인하고 실제 모델은 사내 관리망에서 읽기 전용 검증",
+            "민감 출력 비저장·Viewer 재실행·장애/복구·중복 억제는 모의 검증 후 사내 장비로 확인",
         ],
         bullet_num_id,
+        font_size=10,
+        space_after=2,
+        line=1.05,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

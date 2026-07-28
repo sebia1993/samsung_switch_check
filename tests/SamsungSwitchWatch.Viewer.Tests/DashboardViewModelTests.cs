@@ -670,6 +670,81 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
+    public async Task ClientSwap_IgnoresLateFailureFromBlockedOldRefresh()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var original = new FakeAgentClient
+            {
+                Snapshot = Snapshot(DateTimeOffset.UtcNow, 0,
+                    [Device("old", DeviceHealth.Warning, DateTimeOffset.UtcNow)])
+            };
+            var replacement = new FakeAgentClient
+            {
+                Snapshot = Snapshot(DateTimeOffset.UtcNow, 0,
+                    [Device("new", DeviceHealth.Normal, DateTimeOffset.UtcNow)])
+            };
+            var store = new ViewerSettingsStore(Path.Combine(folder, "settings.json"));
+            var diagnosticLog = new ViewerDiagnosticLog(Path.Combine(folder, "logs"));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings { DemoMode = true },
+                store,
+                new QueueFactory(original, replacement),
+                synchronizationContext: null,
+                deviceStore: null,
+                monitoringStore: null,
+                settingsSaveCoordinator: new ViewerSettingsSaveCoordinator(
+                    store,
+                    diagnosticLog.Write),
+                writeDiagnostic: diagnosticLog.Write,
+                settingsSaveDelay: static (delay, cancellationToken) =>
+                    Task.Delay(delay, cancellationToken),
+                writeConnectionDiagnostic: diagnosticLog.WriteConnectionTransition);
+            await viewModel.InitializeAsync();
+            original.BlockSnapshotCall = 2;
+            original.SnapshotExceptionCall = 2;
+            original.SnapshotException = new AgentClientException(
+                "AGENT_CONNECTION_REFUSED",
+                AgentConnectionState.Offline);
+
+            viewModel.RefreshCommand.Execute(null);
+            await original.SnapshotBlocked.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await viewModel.SwitchClientAsync(new ViewerSettings
+            {
+                DemoMode = true,
+                AgentUri = "http://replacement.example.test:18443"
+            });
+            original.ReleaseSnapshot.TrySetResult();
+            await WaitUntilAsync(() => !viewModel.IsBusy);
+
+            Assert.Equal("new", Assert.Single(viewModel.Devices).Id);
+            Assert.Equal(AgentConnectionState.Connected, viewModel.ConnectionState);
+            Assert.DoesNotContain(
+                "AGENT_CONNECTION_REFUSED",
+                viewModel.OperationMessage,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "Agent 상태 미확인",
+                viewModel.OperationMessage,
+                StringComparison.Ordinal);
+            if (File.Exists(diagnosticLog.CurrentPath))
+            {
+                Assert.DoesNotContain(
+                    "AGENT_CONNECTION_REFUSED",
+                    File.ReadAllText(diagnosticLog.CurrentPath),
+                    StringComparison.Ordinal);
+            }
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public async Task OverlappingRefresh_DoesNotApplyOlderSnapshotAfterNewerOne()
     {
         using var fixture = new ViewModelFixture();
@@ -1189,6 +1264,8 @@ public sealed class DashboardViewModelTests
         public int ChangeExceptionAfterCalls { get; set; } = int.MaxValue;
         public bool BlockSnapshot { get; set; }
         public int BlockSnapshotCall { get; set; } = int.MaxValue;
+        public int SnapshotExceptionCall { get; set; } = int.MaxValue;
+        public Exception? SnapshotException { get; set; }
         private int _snapshotCalls;
         public TaskCompletionSource SnapshotStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource SnapshotBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1236,6 +1313,10 @@ public sealed class DashboardViewModelTests
             {
                 SnapshotBlocked.TrySetResult();
                 await ReleaseSnapshot.Task.WaitAsync(cancellationToken);
+            }
+            if (call == SnapshotExceptionCall && SnapshotException is not null)
+            {
+                throw SnapshotException;
             }
             return result;
         }
