@@ -472,7 +472,7 @@ public sealed class TelnetClientTests
         var factory = new SequenceTransportFactory(first, second);
         var client = CreateResilientClient(
             factory,
-            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(100),
             retryCount: 1);
 
         var result = await client.ExecuteAsync(
@@ -503,7 +503,7 @@ public sealed class TelnetClientTests
         var second = new ScriptedTransport();
         var client = CreateResilientClient(
             new SequenceTransportFactory(first, second),
-            TimeSpan.FromSeconds(5),
+            TimeSpan.FromSeconds(100),
             retryCount: 1);
 
         var exception = await Assert.ThrowsAsync<TelnetExecutionException>(() => client.ExecuteAsync(
@@ -710,6 +710,60 @@ public sealed class TelnetClientTests
         Assert.Equal(2, factory.CreateCalls);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_SplitsMaximumCommandRequestBeforeSessionBudgetIsExceeded()
+    {
+        var commands = Enumerable.Range(1, 8)
+            .Select(index => $"show item {index}")
+            .ToArray();
+        var firstCommands = commands.Take(6).ToArray();
+        var first = new ScriptedTransport(InteractiveReads(firstCommands));
+        var second = new ScriptedTransport(InteractiveReads(commands.Skip(6)));
+        var factory = new SequenceTransportFactory(first, second);
+        var client = CreateResilientClient(factory, TimeSpan.FromSeconds(200), retryCount: 0);
+
+        var result = await client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create().Telnet,
+            commands);
+
+        Assert.Equal(commands, result.Outputs.Select(output => output.Command));
+        Assert.Equal(2, result.SessionCount);
+        Assert.Equal(0, result.ReconnectCount);
+        Assert.Equal(2, factory.CreateCalls);
+        Assert.DoesNotContain(second.Writes, write =>
+            firstCommands.Any(command =>
+                Encoding.ASCII.GetString(write).Contains(command, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReportsLaterBatchesWhenAPlannedSessionFails()
+    {
+        var commands = Enumerable.Range(1, 8)
+            .Select(index => $"show item {index}")
+            .ToArray();
+        var first = new ScriptedTransport(InteractiveReads(commands.Take(6)));
+        var failedSecond = new ScriptedTransport();
+        var client = CreateResilientClient(
+            new SequenceTransportFactory(first, failedSecond),
+            TimeSpan.FromSeconds(200),
+            retryCount: 0);
+
+        var exception = await Assert.ThrowsAsync<TelnetExecutionException>(() => client.ExecuteAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create().Telnet,
+            commands));
+
+        Assert.Equal(commands.Take(6), exception.CompletedOutputs.Select(output => output.Command));
+        Assert.Equal(["command-7", "command-8"], exception.RemainingCommandIds);
+        Assert.Equal(2, exception.SessionCount);
+        Assert.Equal(0, exception.ReconnectCount);
+        Assert.True(first.WasClosed);
+        Assert.True(failedSecond.WasClosed);
+    }
+
     private static TelnetClient CreateClient(
         ScriptedTransport transport,
         TimeSpan? connect = null,
@@ -766,6 +820,15 @@ public sealed class TelnetClientTests
             new ReadOnlyCommandDefinition(CommandIds.System, "System", "show system", commandTimeout, 60)
         ]);
     }
+
+    private static byte[][] InteractiveReads(IEnumerable<string> commands) =>
+    [
+        Bytes("Login:"),
+        Bytes("Password:"),
+        Bytes("ACCESS-SW-01#"),
+        .. commands.Select(command =>
+            Bytes($"{command}\r\nsynthetic output for {command}\r\nACCESS-SW-01#"))
+    ];
 
     private static byte[] Bytes(string value) => Encoding.ASCII.GetBytes(value);
 

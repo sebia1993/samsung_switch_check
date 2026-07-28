@@ -168,69 +168,82 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         ValidateEndpoint(endpoint);
         var startedAt = _timeProvider.GetUtcNow();
         var outputs = new List<CommandOutput>(definitions.Length);
-        IReadOnlyList<ReadOnlyCommandDefinition> remaining = definitions;
         var sessionCount = 0;
         var reconnectCount = 0;
-        InteractiveSessionAttempt result;
-        while (true)
+        InteractiveSessionAttempt? lastResult = null;
+        IReadOnlyList<IReadOnlyList<ReadOnlyCommandDefinition>> batches =
+            definitions.Length == 0
+                ? [Array.Empty<ReadOnlyCommandDefinition>()]
+                : PlanCommandBatches(definitions);
+        foreach (var batch in batches)
         {
-            sessionCount++;
-            try
+            IReadOnlyList<ReadOnlyCommandDefinition> remaining = batch;
+            while (true)
             {
-                result = await ExecuteInteractiveSessionAsync(
-                        endpoint,
-                        credentials,
-                        promptProfile,
-                        remaining,
-                        CalculateSessionBudget(remaining),
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                outputs.AddRange(result.Outputs);
-                break;
-            }
-            catch (InteractiveAttemptException exception)
-            {
-                outputs.AddRange(exception.CompletedOutputs);
-                remaining = remaining.Skip(exception.CompletedOutputs.Count).ToArray();
-                if (string.Equals(
-                        exception.Failure.Error.Code,
-                        ErrorCodes.TelnetSessionClosed,
-                        StringComparison.Ordinal) &&
-                    string.Equals(
-                        exception.Failure.Error.Stage,
-                        "command",
-                        StringComparison.Ordinal) &&
-                    remaining.Count > 0 &&
-                    reconnectCount < _options.SessionCloseRetryCount)
+                sessionCount++;
+                try
                 {
-                    reconnectCount++;
-                    await Task.Delay(
-                            _options.SessionCloseRetryDelay,
-                            _timeProvider,
+                    lastResult = await ExecuteInteractiveSessionAsync(
+                            endpoint,
+                            credentials,
+                            promptProfile,
+                            remaining,
+                            CalculateSessionBudget(remaining),
                             cancellationToken)
                         .ConfigureAwait(false);
-                    continue;
+                    outputs.AddRange(lastResult.Outputs);
+                    break;
                 }
-
-                if (outputs.Count == 0)
+                catch (InteractiveAttemptException exception)
                 {
-                    throw exception.Failure;
-                }
+                    outputs.AddRange(exception.CompletedOutputs);
+                    remaining = remaining.Skip(exception.CompletedOutputs.Count).ToArray();
+                    if (string.Equals(
+                            exception.Failure.Error.Code,
+                            ErrorCodes.TelnetSessionClosed,
+                            StringComparison.Ordinal) &&
+                        string.Equals(
+                            exception.Failure.Error.Stage,
+                            "command",
+                            StringComparison.Ordinal) &&
+                        remaining.Count > 0 &&
+                        reconnectCount < _options.SessionCloseRetryCount)
+                    {
+                        reconnectCount++;
+                        await Task.Delay(
+                                _options.SessionCloseRetryDelay,
+                                _timeProvider,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        continue;
+                    }
 
-                throw new TelnetExecutionException(
-                    exception.Failure.Error,
-                    outputs.ToArray(),
-                    remaining.Select(static command => command.Id).ToArray(),
-                    sessionCount,
-                    reconnectCount,
-                    exception.Failure);
+                    if (outputs.Count == 0)
+                    {
+                        throw exception.Failure;
+                    }
+
+                    var completedIds = outputs.Select(static output => output.CommandId)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var remainingIds = definitions
+                        .Where(command => !completedIds.Contains(command.Id))
+                        .Select(static command => command.Id)
+                        .ToArray();
+                    throw new TelnetExecutionException(
+                        exception.Failure.Error,
+                        outputs.ToArray(),
+                        remainingIds,
+                        sessionCount,
+                        reconnectCount,
+                        exception.Failure);
+                }
             }
         }
 
         return new TelnetInteractiveResult(
             outputs,
-            result.Privilege,
-            result.PromptTerminator,
+            lastResult!.Privilege,
+            lastResult.PromptTerminator,
             startedAt,
             _timeProvider.GetUtcNow())
         {
