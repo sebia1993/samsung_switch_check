@@ -54,10 +54,13 @@ public sealed class SetupDiagnosticsService(
             {
                 throw new SetupException(
                     SetupErrorCodes.PathNotWritable,
-                    "Program Files 또는 ProgramData 설치 경로를 사용할 수 없습니다.");
+                    "Program Files 또는 ProgramData 설치 경로의 상위 폴더를 확인할 수 없습니다.");
             }
 
-            steps.Add(Success("PATHS_READY", "경로 확인", "설치 및 데이터 경로를 사용할 수 있습니다."));
+            steps.Add(Success(
+                "PATHS_READY",
+                "경로 사전 확인",
+                "설치·데이터 경로 형식과 상위 폴더를 확인했습니다. 실제 쓰기 권한과 EDR 허용 여부는 설치 중 확인합니다."));
             firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
                 paths.AgentExecutablePath);

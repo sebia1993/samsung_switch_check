@@ -115,6 +115,9 @@
         "resolved": "10.0.10",
         "contentHash": "5wu/GrYVd8mG2DVUw3vFJzF+O336TyTGg/Kmcgw9bfwYhCoFiV5lR5QeEmKecJyrW4W54nMfD3p3589E8a7czQ=="
       },
+      "samsungswitchwatch.agent.setup": {
+        "type": "Project"
+      },
       "samsungswitchwatch.core": {
         "type": "Project"
       },

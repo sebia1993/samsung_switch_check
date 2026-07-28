@@ -447,24 +447,61 @@ public sealed class AgentDeploymentOrchestrator(
 
         try
         {
-            if (stagingActivated && fileSystem.DirectoryExists(paths.InstallDirectory))
+            var installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
+            var backupExists = installMovedToBackup &&
+                               backupDirectory is not null &&
+                               fileSystem.DirectoryExists(backupDirectory);
+            var failedExists = stagingActivated &&
+                               failedDirectory is not null &&
+                               fileSystem.DirectoryExists(failedDirectory);
+            // A previous rollback may have moved backup -> install and then
+            // failed while restoring the install ACL. In that state the failed
+            // new version and restored old version both exist, so repeating the
+            // install -> failed move would collide and strand recovery.
+            var backupWasAlreadyRestored = installMovedToBackup &&
+                                           installExists &&
+                                           !backupExists &&
+                                           failedExists;
+
+            if (stagingActivated && installExists && !backupWasAlreadyRestored)
             {
                 if (failedDirectory is null)
                 {
                     throw new InvalidOperationException();
                 }
+                if (failedExists)
+                {
+                    throw new InvalidOperationException();
+                }
 
                 fileSystem.MoveDirectory(paths.InstallDirectory, failedDirectory);
+                installExists = false;
                 fileSystem.EnsureDirectoryAccess(
                     failedDirectory,
                     DirectoryAccessKind.AdministratorOnly);
             }
 
-            if (installMovedToBackup &&
-                backupDirectory is not null &&
-                fileSystem.DirectoryExists(backupDirectory))
+            if (installMovedToBackup)
             {
-                fileSystem.MoveDirectory(backupDirectory, paths.InstallDirectory);
+                if (backupDirectory is null)
+                {
+                    throw new InvalidOperationException();
+                }
+                if (backupExists)
+                {
+                    if (installExists)
+                    {
+                        throw new InvalidOperationException();
+                    }
+
+                    fileSystem.MoveDirectory(backupDirectory, paths.InstallDirectory);
+                    installExists = true;
+                }
+                if (!installExists)
+                {
+                    throw new InvalidOperationException();
+                }
+
                 fileSystem.EnsureDirectoryAccess(
                     paths.InstallDirectory,
                     DirectoryAccessKind.ProgramReadExecute);

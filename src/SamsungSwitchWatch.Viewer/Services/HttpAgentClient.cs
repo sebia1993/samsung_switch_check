@@ -150,7 +150,8 @@ public sealed class HttpAgentClient : IAgentClient
                 HttpMethod.Get,
                 AgentApiRoutes.IdentityV4,
                 null,
-                requestCancellation.Token).ConfigureAwait(false);
+                requestCancellation.Token,
+                publishConnected: false).ConfigureAwait(false);
             var json = await ReadBoundedUtf8Async(
                     response.Content,
                     MaximumIdentityResponseBytes,
@@ -164,6 +165,7 @@ public sealed class HttpAgentClient : IAgentClient
             }
             Volatile.Write(ref _identity, identity);
             Volatile.Write(ref _identityValidationReady, 1);
+            PublishConnectionState(AgentConnectionState.Connected);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -178,8 +180,12 @@ public sealed class HttpAgentClient : IAgentClient
             PublishConnectionState(typed.SuggestedConnectionState);
             throw typed;
         }
-        catch (AgentClientException)
+        catch (AgentClientException typed)
         {
+            // Identity is the connection trust boundary. An HTTP response proves
+            // transport reachability, but a rejected or malformed identity must
+            // not leave the Viewer reporting a validated Agent connection.
+            PublishConnectionState(typed.SuggestedConnectionState);
             throw;
         }
         catch (Exception exception)
@@ -366,7 +372,8 @@ public sealed class HttpAgentClient : IAgentClient
         HttpMethod method,
         string route,
         byte[]? jsonBody,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool publishConnected = true)
     {
         try
         {
@@ -385,7 +392,10 @@ public sealed class HttpAgentClient : IAgentClient
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken)
                 .ConfigureAwait(false);
-            PublishConnectionState(AgentConnectionState.Connected);
+            if (publishConnected)
+            {
+                PublishConnectionState(AgentConnectionState.Connected);
+            }
             if (response.IsSuccessStatusCode) return response;
             var statusCode = response.StatusCode;
             string body;

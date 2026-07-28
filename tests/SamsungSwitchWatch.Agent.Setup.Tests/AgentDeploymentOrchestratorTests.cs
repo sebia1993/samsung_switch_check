@@ -122,6 +122,38 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task DeployAsync_RestoredBackupAclFailureCanResumeAndNextDeploySucceeds()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.AccessFailurePath = fixture.Paths.InstallDirectory;
+        fixture.FileSystem.AccessFailureKind = DirectoryAccessKind.ProgramReadExecute;
+        fixture.FileSystem.AccessFailureOccurrence = 2;
+
+        var first = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(first.Succeeded);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, first.Code);
+        Assert.Equal("old-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.True(new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths).Exists);
+
+        var second = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(second.Succeeded);
+        Assert.Equal("new-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.True(fixture.Services.State.Running);
+        Assert.False(new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths).Exists);
+    }
+
+    [Fact]
     public async Task DeployAsync_BackupCleanupFailureKeepsCommittedInstallSuccessful()
     {
         using var folder = new TemporaryFolder();
@@ -168,6 +200,8 @@ public sealed class AgentDeploymentOrchestratorTests
             operation => operation is "apply" || operation.StartsWith("remove:", StringComparison.Ordinal));
         Assert.Empty(fixture.FileSystem.AccessRequests);
         Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        var pathStep = Assert.Single(result.Steps, step => step.Code == "PATHS_READY");
+        Assert.Contains("실제 쓰기 권한", pathStep.Message, StringComparison.Ordinal);
     }
 
     [Fact]
