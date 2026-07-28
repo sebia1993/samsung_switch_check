@@ -78,6 +78,25 @@ function Assert-OnlyActiveVersion {
     }
 }
 
+function Assert-EmbeddedPowerShell {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptText,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+    if ($ScriptText -match '[^\u0000-\u007F]') {
+        throw "Embedded release PowerShell must remain ASCII near $Context."
+    }
+    $tokens = $null
+    $parseErrors = $null
+    [Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$parseErrors) | Out-Null
+    if ($parseErrors) {
+        throw "Embedded release PowerShell failed to parse near ${Context}: $($parseErrors[0].Message)"
+    }
+}
+
 Assert-Pattern $workflow "push:\s*\r?\n\s*tags:\s*\['v\*'\]" 'Publishing must be triggered only by v* tags.'
 Assert-Pattern $workflow '\$buildParameters\s*=\s*@\{\s*Version\s*=\s*\$env:' 'PowerShell script parameters must use a hashtable splat.'
 Assert-Pattern $workflow '\.\\scripts\\build-release\.ps1\s+@buildParameters' 'Release build must use the named-parameter splat.'
@@ -139,8 +158,12 @@ $runIndent = -1
 foreach ($line in $lines) {
     if ($line -match '^(?<indent>\s*)run:\s*(?<tail>.*)$') {
         $runIndent = $Matches.indent.Length
-        $insideRunBlock = $Matches.tail -eq '|'
+        $runTail = $Matches.tail
+        $insideRunBlock = $runTail -eq '|'
         if ($line -match '\$\{\{') { throw 'GitHub expressions must enter PowerShell through env, not source interpolation.' }
+        if (-not $insideRunBlock -and -not [string]::IsNullOrWhiteSpace($runTail)) {
+            Assert-EmbeddedPowerShell $runTail 'inline workflow run command'
+        }
         continue
     }
     if ($insideRunBlock) {
@@ -174,15 +197,18 @@ for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
     $scriptText = (($body | ForEach-Object {
         if ($_.Length -ge $bodyIndent) { $_.Substring($bodyIndent) } else { '' }
     }) -join "`r`n")
-    if ($scriptText -match '[^\u0000-\u007F]') {
-        throw "Embedded release PowerShell must remain ASCII near workflow line $($lineIndex + 1)."
-    }
-    $tokens = $null
-    $parseErrors = $null
-    [Management.Automation.Language.Parser]::ParseInput($scriptText, [ref]$tokens, [ref]$parseErrors) | Out-Null
-    if ($parseErrors) {
-        throw "Embedded release PowerShell failed to parse near workflow line $($lineIndex + 1): $($parseErrors[0].Message)"
-    }
+    Assert-EmbeddedPowerShell $scriptText "workflow line $($lineIndex + 1)"
+}
+
+$inlineEncodingGuardPassed = $false
+try {
+    Assert-EmbeddedPowerShell "Write-Host '$([char]0xD55C)'" 'inline encoding guard self-test'
+}
+catch {
+    $inlineEncodingGuardPassed = $true
+}
+if (-not $inlineEncodingGuardPassed) {
+    throw 'Inline release PowerShell encoding guard must reject non-ASCII source.'
 }
 
 $usesLines = $lines | Where-Object { $_ -match '^\s*uses:\s*' }
