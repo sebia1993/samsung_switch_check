@@ -106,6 +106,67 @@ public sealed class AgentContractMapperTests
     """;
 
     [Fact]
+    public void MapIdentityV4_ReadsOptionalProductVersion()
+    {
+        const string json = """
+        {
+          "apiVersion": 4,
+          "productVersion": "0.10.0-poc+source",
+          "agentId": "agent-test",
+          "instanceId": "instance-test",
+          "certificatePublicKeySha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "protocol": "https",
+          "maxCommandsPerRequest": 8,
+          "maxOutputBytes": 65536
+        }
+        """;
+
+        var identity = AgentContractMapper.MapIdentityV4(json);
+
+        Assert.Equal("0.10.0-poc", identity.ProductVersion);
+        Assert.Equal(4, identity.ApiVersion);
+    }
+
+    [Fact]
+    public void MapIdentityV4_AllowsOlderIdentityWithoutProductVersion()
+    {
+        const string json = """
+        {
+          "apiVersion": 4,
+          "agentId": "agent-test",
+          "instanceId": "instance-test",
+          "certificatePublicKeySha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "protocol": "https",
+          "maxCommandsPerRequest": 8,
+          "maxOutputBytes": 65536
+        }
+        """;
+
+        var identity = AgentContractMapper.MapIdentityV4(json);
+
+        Assert.Null(identity.ProductVersion);
+    }
+
+    [Fact]
+    public void MapIdentityV4_RejectsNonStringProductVersion()
+    {
+        const string json = """
+        {
+          "apiVersion": 4,
+          "productVersion": 10,
+          "agentId": "agent-test",
+          "instanceId": "instance-test",
+          "certificatePublicKeySha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "protocol": "https",
+          "maxCommandsPerRequest": 8,
+          "maxOutputBytes": 65536
+        }
+        """;
+
+        Assert.Throws<JsonException>(() => AgentContractMapper.MapIdentityV4(json));
+    }
+
+    [Fact]
     public void MapSnapshot_ComposesStatusAndDevicesContracts()
     {
         var result = AgentContractMapper.MapSnapshot(StatusJson, DevicesJson);

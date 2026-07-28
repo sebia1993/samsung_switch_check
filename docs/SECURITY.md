@@ -1,209 +1,215 @@
-# Samsung Switch Watch 보안 설계
+# Samsung Switch Watch v0.10 보안 설계
 
-## 신뢰 경계
-
-이 POC에는 세 가지 서로 다른 경계가 있습니다.
+## 1. 신뢰 경계
 
 | 경계 | 보호 방식 | 남는 위험 |
 |---|---|---|
-| Viewer 로컬 저장소 | DPAPI CurrentUser | 같은 Windows 사용자 권한 탈취 |
-| Viewer → Agent | HTTPS, 자동 Agent 신원 고정, 관리 CIDR 방화벽 | 애플리케이션 사용자 인증 없음 |
-| Agent → 스위치 | 대상 CIDR 제한, TCP/23 고정, 한 줄 show 정책 | Telnet 평문 노출 |
+| Viewer 로컬 저장소 | DPAPI CurrentUser | 같은 Windows 사용자 세션 또는 계정 탈취 |
+| Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, Viewer 고정 IPv4 `/32` 방화벽 | 애플리케이션 사용자 인증 없음 |
+| Agent → 스위치 | Setup에서 선택한 직접 연결 관리망 제한, TCP/23 고정, 한 줄 `show` 정책 | Telnet 평문 노출 |
+| Agent 서비스와 데이터 | 전용 서비스 SID, 제한된 서비스·폴더 ACL, 무창 서비스 | 로컬 관리자는 제어 가능 |
 
-HTTPS를 사용해도 같은 허용 관리 CIDR의 API 클라이언트는 Agent를 호출할 수 있습니다.
-Agent PC를 사용자 VLAN, 공용 Wi-Fi, 인터넷 또는 신뢰하지 않는 프록시에 노출하면 안 됩니다.
+HTTPS를 사용하더라도 방화벽에서 허용된 Viewer IPv4를 사용하는 클라이언트는 Agent API에 접근할
+수 있습니다. Agent PC와 Viewer PC를 일반 사용자 VLAN, 공용 Wi-Fi 또는 인터넷에 노출하지
+마십시오.
 
-## 자격 증명
+## 2. 자격 증명
 
 장비 ID, 로그인 PW와 enable PW는 Viewer PC의 현재 Windows 사용자 범위 DPAPI로 암호화합니다.
 
-- Viewer가 명령을 실행할 때만 메모리에서 복호화합니다.
-- HTTPS 요청으로 Agent에 전달한 뒤 Agent 메모리에서만 사용합니다.
-- Agent 설정, 파일, DB, 로그, 이벤트와 진단 JSON에 저장하지 않습니다.
-- API 응답이나 오류 메시지에 반사하지 않습니다.
-- Viewer 편집 화면은 기존 비밀번호를 다시 표시하지 않습니다.
+- Viewer가 접속 시험 또는 명령을 실행할 때만 메모리에서 복호화합니다.
+- HTTPS 요청으로 Agent에 전달된 값은 해당 요청의 Telnet 세션에서만 사용합니다.
+- Agent 설정, 파일, 데이터베이스, 로그 또는 진단 자료에 저장하지 않습니다.
+- API 응답과 오류 메시지에 되돌려 보내지 않습니다.
+- Viewer 편집 화면은 저장된 비밀번호를 다시 평문으로 표시하지 않습니다.
 
 DPAPI 파일을 다른 PC나 다른 Windows 사용자에게 복사해도 복호화할 수 없는 것이 정상입니다.
-운영자 계정이 탈취되면 해당 사용자의 DPAPI 자료도 보호할 수 없으므로 Windows 로그인, 화면
-잠금과 원격접속 권한을 별도로 관리해야 합니다.
+Windows 계정과 원격 접속 권한이 탈취되면 DPAPI만으로 보호할 수 없으므로 화면 잠금과 계정
+권한을 별도로 관리해야 합니다.
 
-## Agent HTTPS 신원
+수동 명령과 원문 출력은 Viewer 프로세스 메모리에서만 사용합니다. 특히
+`show running-config` 결과에는 비밀정보가 포함될 수 있으므로 캡처, 메일, 이슈 첨부 또는 외부
+반출을 금지합니다.
 
-Agent는 최초 정상 시작 때 ECDSA P-256 키와 자체 서명 인증서를 생성합니다. 개인 키가 포함된
-PFX 자료는 정확히 `%ProgramData%\SamsungSwitchWatch`인 DataDirectory 아래에 영구 저장하고
-DPAPI LocalMachine으로 보호합니다. 다른 DataDirectory는 설치·업데이트·제거 대상으로
-허용하지 않습니다.
+## 3. Agent 설치와 권한
 
-DPAPI LocalMachine만으로는 같은 컴퓨터의 다른 사용자가 파일을 읽는 상황을 충분히 막지
-못합니다. 설치기는 `%ProgramData%\SamsungSwitchWatch` 전체에 폐쇄형 ACL을 적용합니다.
+`SamsungSwitchWatch.Agent.Setup.exe`는 Windows 서비스, 방화벽과 보호된 폴더를 구성하기 위해
+최초 설치 또는 업데이트 때 UAC 승인이 필요합니다. 설치 완료 후 Setup 창을 계속 실행할 필요는
+없습니다.
+
+Agent는 다음 특성을 갖습니다.
+
+- `SamsungSwitchWatchAgent` 이름의 자동 시작 Windows 서비스
+- `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정과 서비스 SID
+- 사용자 데스크톱에 창이나 트레이 아이콘 없음
+- 서비스 실패 후 5초, 15초, 60초 재시작 정책
+- 일반 사용자에게 서비스 정지·구성 권한을 주지 않는 제한 ACL
+
+Windows 로컬 관리자는 운영체제 정책상 서비스를 중지하거나 제거할 수 있습니다. 이 설계의
+목표는 다른 일반 사용자의 실수로 Agent 창을 닫는 일을 방지하는 것이지, 로컬 관리자를 막는
+것이 아닙니다.
+
+Setup은 설치 폴더와 `%ProgramData%\SamsungSwitchWatch`에 폐쇄형 ACL을 적용합니다.
 
 - `SYSTEM`: FullControl
 - 로컬 `Administrators`: FullControl
-- `SamsungSwitchWatchAgent` 서비스 SID: Modify
-- 일반 Users와 로그인 사용자의 직접·상속 읽기 권한: 제거
+- Agent 서비스 SID: 프로그램은 ReadAndExecute, 데이터는 Modify
+- 일반 Users: 직접 접근 권한 없음
 
-서비스 자체는 암호가 필요 없는 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정으로
-실행합니다. 계정과 서비스 SID는 해당 서비스 이름에 결속되며 공유 `LocalService` 계정으로
-신규 등록하지 않습니다.
+HTTPS 개인 키는 Agent DataDirectory에 저장하고 DPAPI LocalMachine으로 보호합니다. DPAPI만으로
+같은 PC의 다른 사용자를 모두 차단할 수 없으므로 파일 ACL도 함께 필요합니다.
 
-설치·업데이트·제거는 기존 설치 폴더와 DataDirectory의 내용을 읽거나 삭제하기 전에 루트
-소유자를 SID로 직접 확인합니다. 루트는 `SYSTEM`, 로컬 `Administrators` 또는 현재 elevated
-관리자 소유만 신뢰합니다. 계정명을 SID로 변환하거나 다른 로컬·도메인 그룹을 전개하지
-않으므로 폐쇄망의 디렉터리 조회 지연에 의존하지 않습니다.
+Setup은 공개 ZIP 안에서 네이티브 코드로 설치를 수행합니다. 공개 ZIP에 PowerShell 또는 CMD
+설치 스크립트를 포함하지 않으므로 실행 정책 때문에 설치가 중단되는 흐름에 의존하지 않습니다.
+저장소에 남은 유지보수 스크립트는 개발·CI용 source-only 자료입니다.
 
-신규 설치는 DataDirectory 경로가 비어 있더라도 이미 존재하면 채택하지 않습니다. 업데이트와
-제거는 ACL 변경 전 전체 트리를 읽기 전용으로 검사한 다음 루트를 Administrators 소유와
-폐쇄형 ACL로 먼저 잠급니다. 이후 부모 디렉터리를 잠근 뒤 자식을 열거하는 순서로 소유자와
-ACE를 다시 검사·이관합니다. 기존 `LocalService` 서비스에서 생성된 DataDirectory 하위
-항목은 해당 서비스를 먼저 중지한 업데이트에서만 한 번 이관 대상으로 신뢰합니다. 정확한
-Agent 서비스 SID 소유 하위 항목은 정상 운영 결과로 허용하지만 프로그램 트리에는 두 예외를
-적용하지 않습니다. Builtin Users 등 비신뢰 owner나 junction·symlink가 발견되면
-`AGENT_DIRECTORY_TRUST_INVALID`로 fail-closed 중단합니다.
+## 4. 설치 무결성과 rollback
 
-마지막에는 트리를 새로 재열거하여 모든 owner가 Administrators인지, 루트와 상속 ACL에
-SYSTEM·Administrators·정확한 서비스 SID 외 규칙이 없는지, reparse point가 없는지 확인합니다.
-따라서 일반 PC 사용자는 PFX를 읽을 수 없습니다.
+Setup은 패키지를 변경하기 전에 다음을 확인합니다.
 
-`install-receipt.json`은 상위 DataDirectory와 달리 서비스 SID 권한을 상속하지 않습니다.
-파일 owner는 Administrators이고 SYSTEM·Administrators만 FullControl을 갖습니다. 설치
-영수증은 설치 경로와 증거를 확인하기 위한 자료이며 CIDR 권한원이 아닙니다. 업데이트의 스위치
-대상 CIDR은 검증된 `appsettings.Production.json`, Viewer 관리 CIDR은 정확히 제품이 소유한
-방화벽 규칙에서 가져옵니다. 데이터 영구 제거가 이 ACL 검사를 통과하지 못하면
-`AGENT_RECEIPT_TRUST_INVALID`로 중단합니다.
+- 패키지 매니페스트 형식과 버전
+- 포함 파일 SHA-256
+- Agent 실행 파일 SHA-256
+- Program Files와 ProgramData 사용 가능 여부
+- 관리자 권한
+- Viewer IPv4와 관리망 선택의 유효성
 
-설치 패키지는 먼저 SYSTEM·Administrators 전용 staging으로 복사한 뒤, 복사본의 모든 파일과
-Agent EXE SHA-256을 메모리에 읽어 둔 패키지 매니페스트와 다시 비교합니다. 이 재검증을
-통과한 staging만 프로그램 폴더와 교체합니다.
+검증한 파일은 보호된 staging에 복사한 뒤 설치 폴더와 교체합니다. 서비스, 방화벽 또는 readiness
+확인이 실패하면 기존 프로그램, 서비스 상태와 방화벽 규칙의 rollback을 시도합니다. rollback이
+완전히 끝나지 않으면 성공으로 처리하지 않고 안정적인 Setup 오류 코드로 관리자 확인을
+요청합니다.
 
-업데이트는 DataDirectory 전체를 동일하게 제한된 트랜잭션 폴더에 백업합니다. HTTPS
-readiness 실패 시 이전 자료를 복구한 뒤 폐쇄형 ACL을 다시 적용합니다. 서비스 중지·삭제나
-선행 복구가 확인되지 않으면 실행 중인 파일을 삭제·덮어쓰는 후속 복구를 차단합니다. legacy
-program/data 이동이 일부만 완료된 경우에도 원래 위치와 archive를 그대로 보존합니다. rollback
-오류가 남으면 transaction snapshot, program backup, legacy archive와 journal 등 남아 있는
-증거를 자동 정리하지 않습니다. 모든 복구가 성공한 경우에만 설치 트랜잭션용 복제본을
-제거합니다.
+v0.10 업데이트는 기존 DataDirectory를 유지하여 Agent ID와 HTTPS 신원을 보존합니다. 대상
+관리망은 현재 Setup에서 선택한 1~2개 망으로, Viewer 방화벽 경계는 현재 입력한 고정 IPv4
+`/32`로 명시적으로 다시 적용합니다.
 
-Agent 설치·제거 journal은 `%ProgramData%\SamsungSwitchWatch-Operations`에 저장합니다.
-설치기와 제거기는 기존 루트의 관리자 소유권과 reparse 여부를 확인한 뒤 루트 ACL을 먼저
-잠급니다. 이후 부모부터 각 하위 항목을 검증·이관하고, 전체 재열거에서 허용 이름·소유권·ACL과
-reparse point를 다시 확인합니다. 최종 소유자는 로컬 Administrators, ACL은
-SYSTEM·Administrators 전용입니다. 두 journal은 시스템 전역 배포 잠금을 획득한 상태에서만
-읽고 쓰며, 64KiB를 넘거나 형식·상태 조합이 잘못되면 자동 변경을 중단합니다. 미완료 기록은
-복구 증거이므로 자동 삭제하지 않습니다.
-기존 개별 owner는 현재 실행 중인 관리자일 때만 자동 이관합니다. 폐쇄망에서 제한 없이
-지연될 수 있는 로컬·도메인 그룹 조회는 수행하지 않으며, 다른 계정 owner는 관리자 권한을
-추측하지 않고 `AGENT_DEPLOYMENT_JOURNAL_TRUST_INVALID`로 중단합니다.
+릴리스는 서명 인증서가 없는 `-poc` 배포물일 수 있습니다. SHA-256은 전송 중 변경을 확인할 수
+있지만 게시자 신원을 증명하지 않습니다. 사내 반입 전에 조직의 백신·EDR·SmartScreen 정책에
+맞는 승인과 검사를 받아야 합니다.
 
-v0.7에서 v0.9로 이관할 때 기존 Agent 장비 목록 설정 사본, 자격 증명과 SQLite 원문·이력
-자료는 자동 삭제하지 않습니다. `legacy-v0.7-backup-*` 폴더로 이동한 뒤 루트와 모든 하위
-항목의 ACL을 SYSTEM과
-Administrators 전용으로 다시 구성합니다. Agent 서비스 SID는 이 백업 ACL에 포함하지
-않습니다. 보존 기간 종료 뒤 정리는 관리자가 사내 정책과 별도 승인을 확인해 수동으로
-수행해야 합니다.
+## 5. Viewer 방화벽 경계
 
-이전 현재 사용자 예약 작업을 서비스로 전환할 때도 작업 이름만 신뢰하지 않습니다. 현재
-사용자 SID, 작업 설명, 실행 경로·인수, 설치 영수증, 패키지 매니페스트와 실행 파일·숨김
-실행기·보존 설정 해시를 모두 확인합니다.
-완전한 DPAPI LocalMachine HTTPS 신원 쌍은 새 DataDirectory로 복사하고, 이전 프로그램과
-데이터 전체는 `legacy-background-backup-*`으로 이동해 SYSTEM·Administrators 전용 ACL을
-적용합니다. 전환 실패 시 원래 ACL과 예약 작업 실행 상태를 복구합니다. 서비스와 예약 작업이
-동시에 등록된 모호한 상태나 소유권이 불완전한 상태는 자동 변경하지 않습니다.
-
-Viewer는 처음 연결한 Agent의 공개 신원을 자동 고정합니다. 이후 신원이 달라지면 연결을
-중단하며, SHA-256 지문이나 페어링 토큰을 입력해 우회할 수 없습니다. 관리자가 Agent를
-정식 재설치했다는 사실을 별도로 확인한 경우에만 Viewer의 `Agent 신뢰 다시 설정`을 사용합니다.
-
-## 네트워크 제한
-
-### 인바운드
-
-설치기는 Windows Defender Firewall에 다음 제품 소유 규칙을 만듭니다.
+Setup은 Windows Defender Firewall에 제품 소유 규칙을 만듭니다.
 
 ```text
 Name:       SamsungSwitchWatchAgent-Https
 Direction:  Inbound
 Protocol:   TCP
 LocalPort:  18443
-Remote:     설치 시 입력한 Viewer 관리 CIDR
+Remote:     Setup에 입력한 Viewer 고정 IPv4/32
 Profiles:   Domain, Private
 ```
 
-Public 프로필은 허용하지 않습니다. 설치기는 활성 방화벽 서비스, 각 프로필의 기본 인바운드
-차단 정책과 TCP/18443에 겹치는 외부 Allow 규칙을 점검합니다. 제품 소유권을 확인할 수 없는
-동일 이름 규칙은 수정하거나 삭제하지 않습니다.
+Public 프로필은 허용하지 않습니다. Viewer IPv4는 CIDR 또는 대역이 아니라 정확한 IPv4 한 개로
+입력하며 Setup이 `/32` 규칙을 만듭니다. Viewer 주소가 DHCP로 바뀌면 연결이 거부되므로 고정
+주소 또는 조직에서 관리하는 예약 주소를 사용해야 합니다.
 
-### Agent의 Telnet 대상
+이 방화벽 규칙은 Viewer 사용자 인증을 대신하는 현재 POC의 핵심 경계입니다. Viewer PC 주소를
+넓은 대역으로 허용하거나 규칙을 수동 확장하지 마십시오.
 
-Agent는 요청의 대상이 다음 조건을 모두 만족할 때만 연결합니다.
+## 6. 스위치 대상 경계
+
+Setup은 Agent PC에서 작동 중인 직접 연결 네트워크 어댑터의 RFC1918 사설 IPv4 주소와 마스크를
+읽어 선택 후보를 만듭니다. 운영자는 스위치 관리에 사용할 망을 1~2개 선택합니다. CIDR을 직접
+입력하거나 임의 대역을 추가하는 UI는 없습니다.
+
+Agent는 매 요청에서 다음 조건을 모두 확인합니다.
 
 - canonical dotted IPv4
-- 설치 설정의 `AllowedTargetCidrs` 안에 포함
+- 선택된 관리망 안에 포함
 - TCP 포트 23
-- loopback, link-local, multicast와 기타 특수 범위가 아님
+- loopback, link-local, multicast 또는 기타 특수 범위가 아님
 
-이 검증은 Viewer UI 검증과 별도로 Agent에서 매 요청 수행합니다. 이는 OS 아웃바운드
-방화벽 규칙이 아니라 Agent 실행기의 필수 대상 allowlist입니다.
+Viewer UI 검증과 별개로 Agent가 다시 검증하므로 변조된 API 요청도 같은 정책을 통과해야 합니다.
+이는 Agent 실행기의 필수 대상 allowlist이며, Windows 아웃바운드 방화벽 규칙은 아닙니다.
 
-## 명령 정책
+직접 연결된 RFC1918 관리망을 찾지 못하면 설치를 계속하기 전에 PC의 네트워크 구성과 어댑터
+상태를 확인해야 합니다. 보안정책을 우회하기 위해 넓은 가상 어댑터나 임시 라우팅을 추가하지
+마십시오.
 
-Agent는 Viewer가 보낸 문자열을 그대로 신뢰하지 않습니다. 정규화 후 다음 조건을 모두
-만족하는 한 줄 `show` 명령만 실행합니다.
+## 7. 명령 정책
 
-- `show` 단어로 시작
+Viewer와 Agent는 다음 조건을 모두 만족하는 한 줄 `show` 명령만 실행합니다.
+
+- 정규화 후 `show` 단어로 시작
 - 128자 이하
 - CR/LF와 제어문자 없음
-- `;`, `&`, `|` 및 여러 명령 연결 없음
-- configure, interface, shutdown, reload, erase, write, copy 등 설정 문맥으로 전환하지 않음
+- `;`, `&`, `|` 같은 명령 연결 문법 없음
+- configure, interface, shutdown, reload, erase, write, copy 같은 설정 흐름으로 전환하지 않음
 
-`show running-config`는 읽기 명령으로 허용하지만 매우 민감한 결과를 만들 수 있습니다.
-명령 문자열과 원문 출력은 Agent/Viewer DB, 파일 로그, 감사 이력과 내보내기에 저장하지
-않습니다. 출력은 요청 Viewer 프로세스의 메모리에 최대 64KiB만 유지됩니다.
+Viewer가 검증했더라도 Agent가 같은 정책을 다시 검증합니다. 자유 형식 명령 입력은 허용되지만
+위 범위 밖 명령은 `QUERY_COMMAND_BLOCKED`로 거부합니다.
 
-## 로그 및 진단
+`show running-config`는 읽기 명령이라 정책상 허용되지만 민감도가 높습니다. 명령 문자열과 원문
+출력은 Agent 로그·DB·진단 또는 Viewer 영구 저장소에 기록하지 않으며, 결과는 요청한 Viewer
+메모리에서 최대 64 KiB만 유지합니다.
 
-허용되는 진단 정보:
+## 8. HTTPS 신원과 TOFU
 
+Agent는 최초 정상 시작 때 ECDSA P-256 자체 서명 신원을 생성합니다. Viewer는 첫 연결에서 TLS
+공개 키와 `/api/v4/identity`의 공개 신원을 자동으로 대조한 뒤 해당 Agent 주소에 TOFU 방식으로
+고정합니다.
+
+- 사용자가 SHA-256 지문을 입력하지 않습니다.
+- 페어링 토큰을 만들거나 입력하지 않습니다.
+- 저장된 신원과 달라지면 연결을 차단합니다.
+- 토큰 또는 지문 입력으로 신원 불일치를 우회할 수 없습니다.
+
+TOFU는 첫 연결 상대를 공인 CA나 AD로 인증하지 않습니다. 첫 연결의 안전성은 정확한 Viewer
+`/32` 방화벽, 격리된 관리망, Agent PC 주소 확인과 운영자 통제에 의존합니다.
+
+## 9. 세션, 부하와 가용성
+
+- 장비 한 대에 동시 Telnet 세션 한 개
+- Agent 전체 동시 실행 기본 최대 두 개
+- 요청 IP별 분당 기본 최대 60회
+- 요청 본문 최대 32 KiB
+- 요청당 명령 최대 8개
+- 반환 출력 최대 64 KiB
+- Telnet 세션 최대 240초
+- 원격 종료 시 완료된 명령을 제외한 남은 명령만 최대 한 번 재시도
+- 인증·enable 실패, 명령 시간 초과와 사용자 취소는 자동 재시도하지 않음
+
+Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으로 장비를 조회하지 않습니다. 이
+감시 공백은 정상 동작이지만, 24시간 무중단 감시가 필요한 환경에는 현재 구조가 맞지 않습니다.
+
+## 10. 로그와 진단
+
+진단에 허용하는 정보:
+
+- 제품 버전과 오류 코드
 - 요청 ID
-- 단계와 소요 시간
-- 성공·실패와 sanitized 오류 코드
+- 단계별 성공·실패와 소요 시간
+- 서비스, HTTPS listener, 방화벽과 readiness 상태
 - 출력 바이트 수와 잘림 여부
-- 서비스, HTTPS listener와 CIDR 설정 유효성
 
-금지되는 진단 정보:
+진단에 기록하지 않는 정보:
 
-- 실제 장비 IP와 호스트명
-- 계정 ID, 로그인 PW, enable PW
+- 장비 IP와 호스트명
+- 계정 ID, 로그인 PW와 enable PW
 - 실행한 명령 문자열
 - Telnet 원문과 `show running-config`
-- 장비 MAC, 시리얼과 고객 식별 정보
+- 장비 MAC, 시리얼과 고객 식별정보
 
 대표 오류 코드는 `TARGET_NOT_ALLOWED`, `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
 `QUERY_COMMAND_BLOCKED`, `QUERY_RATE_LIMITED`, `COMMAND_TIMEOUT`,
-`OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`입니다. 정상 응답이 64KiB에서 잘린 경우에는
-오류로 바꾸지 않고 명령별 `truncated` 값을 표시합니다.
+`OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`, `AGENT_CONNECTION_REFUSED`,
+`AGENT_VERSION_MISMATCH`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
 
-## 가용성과 세션
+## 11. 알려진 POC 한계와 배포 금지 조건
 
-- Agent는 무창 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정 Windows 서비스로 실행합니다.
-- 일반 사용자가 닫을 창이나 트레이 종료 메뉴가 없습니다.
-- 서비스 실패 시 5초, 15초, 60초 재시작 정책을 적용합니다.
-- 장비마다 동시 세션 1개, 전체 최대 2개로 제한합니다.
-- 요청 IP 기준 분당 최대 60회로 제한합니다.
-- 요청 본문은 최대 32KiB이며 초과 시 바인딩 전에 거부합니다.
-- 요청마다 새 Telnet 세션을 사용하고 각 세션을 최대 240초 뒤 강제 정리합니다.
-- 명령 실행 중 원격 종료가 발생하면 완료된 명령은 반복하지 않고 남은 명령만 새 세션에서
-  1회 재시도합니다.
-- 인증·enable 실패, 명령 타임아웃과 사용자 취소는 자동 재시도하지 않습니다.
+- Agent와 스위치 사이 Telnet은 암호화되지 않아 ID, 비밀번호와 명령 결과가 평문으로 노출될 수
+  있습니다.
+- Agent API에는 Windows/AD 로그인이나 별도 애플리케이션 인증 토큰이 없습니다.
+- 자체 서명 신원의 첫 연결은 TOFU이며 중앙 인증기관 검증이 아닙니다.
+- Viewer 고정 IPv4 `/32` 방화벽이 훼손되면 API 접근 경계가 약화됩니다.
+- 코드 서명 없는 `-poc` 실행 파일은 사내 보안 제품에 의해 차단될 수 있습니다.
+- 실제 세 모델과 펌웨어별 프롬프트·페이징 처리는 현장 읽기 전용 검증이 필요합니다.
 
-Viewer가 종료되면 감시도 중단되며 Agent는 독립적으로 장비를 조회하지 않습니다. 이 공백은
-보안상 예상된 동작이지만 운영 가용성 요구와 별도로 평가해야 합니다.
+다음 조건에서는 배포하지 마십시오.
 
-## 알려진 POC 한계
-
-- Telnet 구간은 암호화되지 않습니다.
-- Agent API에는 Windows/AD 로그인이나 별도 애플리케이션 토큰이 없습니다.
-- 자체 서명 Agent 신원의 첫 연결은 관리 CIDR과 운영자 판단을 신뢰합니다.
-- 세 모델의 실제 펌웨어별 프롬프트와 페이징 처리는 현장 검증이 필요합니다.
-- 코드 서명 인증서가 없는 `-poc` 패키지는 Windows 게시자 신뢰를 제공하지 않습니다.
-
-이 한계를 수용할 수 없는 환경에는 배포하지 마십시오.
+- Agent 또는 Telnet 구간이 일반 사용자망·공용망·인터넷을 통과함
+- Viewer 고정 IPv4 한 개로 방화벽을 제한할 수 없음
+- Telnet 평문 위험을 조직이 수용하지 않음
+- 애플리케이션 사용자 인증이 필수인 환경
+- 24시간 Viewer 비의존 감시가 필수인 환경

@@ -17,11 +17,12 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.9.23-poc
+.\scripts\build-release.ps1 -Version 0.10.0-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
 Both release ZIPs include `SamsungSwitchWatch_User_Manual_KO.pdf`; the editable DOCX stays repository-only.
+Regenerate the manual from `tools/build-user-manual.py` before a release whenever the operator flow changes.
 
 ## Runtime ownership
 
@@ -58,8 +59,10 @@ Both release ZIPs include `SamsungSwitchWatch_User_Manual_KO.pdf`; the editable 
 - Figma file `Samsung Switch Watch` is the UI source of truth.
 - Keep operator screens compact, keyboard-accessible and readable at 1280x720 or higher.
 - Do not commit generated `bin`, `obj`, `artifacts`, `release`, database, certificate or secret files.
-- `Install-or-Update-Agent.cmd` is the only public Agent installation entrypoint. Legacy
-  scheduled-task scripts stay source-only for ownership-aware migration and must not enter public ZIPs.
+- `SamsungSwitchWatch.Agent.Setup.exe` is the only public Agent installation entrypoint. All
+  PowerShell/CMD deployment scripts stay source-only for development and legacy recovery.
+- The Viewer release is portable: extract the ZIP and run `SamsungSwitchWatch.Viewer.exe`.
+  Do not add public install scripts, auto-start registration or an administrator requirement.
 - Preserve Agent ProgramData identity and CIDR configuration across transactional updates.
 - Copy packages into protected staging and rehash them before swapping. If service quiescence,
   rollback dependencies or legacy moves are incomplete, block later file mutation and preserve

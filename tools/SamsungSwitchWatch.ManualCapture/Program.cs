@@ -5,11 +5,14 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using SamsungSwitchWatch.Agent.Setup.Deployment;
+using SamsungSwitchWatch.Agent.Setup.Infrastructure;
 using SamsungSwitchWatch.Viewer;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
 using SamsungSwitchWatch.Viewer.Views;
+using AgentSetupWindow = SamsungSwitchWatch.Agent.Setup.MainWindow;
 
 namespace SamsungSwitchWatch.ManualCapture;
 
@@ -33,6 +36,7 @@ internal static class Program
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(scratchDirectory);
 
+        App.SuppressRuntimeStartupForManualCapture = true;
         var app = new App();
         app.InitializeComponent();
         var uiContext = new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher);
@@ -69,6 +73,60 @@ internal static class Program
             DrainDispatcher();
             viewModel.SelectedDevice = viewModel.Devices.First(item =>
                 item.Id == profiles["critical"].Id);
+
+            var setupFileSystem = new PhysicalSetupFileSystem();
+            var setupPaths = new DeploymentPaths(
+                scratchDirectory,
+                Path.Combine(scratchDirectory, "Agent"),
+                Path.Combine(scratchDirectory, "Data"),
+                Path.Combine(scratchDirectory, "Operations"));
+            var setupPackage = new AgentPackageValidator(setupFileSystem);
+            var setupServices = new WindowsServiceManager();
+            var setupFirewall = new WindowsFirewallManager();
+            var setupHealth = new HttpsAgentHealthProbe();
+            var setupAdministrator = new WindowsAdministratorChecker();
+            var setupDiagnostics = new SetupDiagnosticsService(
+                setupPackage,
+                setupFileSystem,
+                setupServices,
+                setupFirewall,
+                setupHealth,
+                setupAdministrator,
+                setupPaths);
+            var setupDeployment = new AgentDeploymentOrchestrator(
+                setupPackage,
+                setupFileSystem,
+                setupServices,
+                setupFirewall,
+                setupHealth,
+                setupAdministrator,
+                new WindowsMachineDeploymentLock(),
+                setupPaths);
+            using (var setupLifetime = new WindowLifetime(
+                       new AgentSetupWindow(
+                           new ManualNetworkDiscovery(),
+                           setupDiagnostics,
+                           setupDeployment,
+                           diagnosticsOnly: false)
+                       {
+                           Width = 760,
+                           Height = 700,
+                           ShowInTaskbar = false,
+                           WindowStartupLocation = WindowStartupLocation.Manual,
+                           Left = 48,
+                           Top = 48
+                       }))
+            {
+                ShowAndLayout(setupLifetime.Window);
+                var viewerIpInput = FindVisualChildren<TextBox>(setupLifetime.Window)
+                    .First();
+                viewerIpInput.Text = "10.20.30.25";
+                RefreshLayout(setupLifetime.Window);
+                Capture(
+                    setupLifetime.Window,
+                    Path.Combine(outputDirectory, "00-agent-setup.png"),
+                    "고정 Viewer IPv4를 입력하고 자동 검색된 직접 연결 관리망을 선택하는 Agent Setup 화면");
+            }
 
             using var dashboardLifetime = new WindowLifetime(
                 new MainWindow(viewModel)
@@ -137,7 +195,7 @@ internal static class Program
 
             viewModel.SelectedDevice = viewModel.Devices.First(item =>
                 item.Id == profiles["normal"].Id);
-            viewModel.ReadOnlyQueryCommand = "show running-config";
+            viewModel.ReadOnlyQueryCommand = "show port status";
             detailsTabs.SelectedIndex = 3;
             RefreshLayout(dashboard);
             if (viewModel.ExecuteReadOnlyQueryCommand.CanExecute(null))
@@ -152,7 +210,7 @@ internal static class Program
             Capture(
                 dashboard,
                 Path.Combine(outputDirectory, "04-command-output.png"),
-                "장비 명령 탭에서 show running-config를 실행하고 익명화된 데모 결과를 확인하는 화면");
+                "장비 명령 탭에서 show port status를 실행하고 익명화된 데모 결과를 확인하는 화면");
 
             using (var miniLifetime = new WindowLifetime(
                        new MiniWindow(viewModel, true)
@@ -223,7 +281,7 @@ internal static class Program
             Console.WriteLine($"Created {generated.Length} sanitized WPF screenshots in {outputDirectory}");
             foreach (var item in generated) Console.WriteLine($"  {item}");
 
-            return generated.Length >= 6 ? 0 : 2;
+            return generated.Length >= 7 ? 0 : 2;
         }
         finally
         {
@@ -239,6 +297,19 @@ internal static class Program
                 // A failed cleanup must not hide a screenshot/build failure.
             }
         }
+    }
+
+    private sealed class ManualNetworkDiscovery : INetworkDiscovery
+    {
+        public IReadOnlyList<NetworkCandidate> DiscoverPrivateIpv4Networks() =>
+        [
+            new(
+                "manual-ethernet:10.50.0.10",
+                "Ethernet",
+                "10.50.0.10",
+                "10.50.0.0/24",
+                "Sanitized management network")
+        ];
     }
 
     private static Dictionary<string, ManagedDeviceProfile> SeedManagedDevices(

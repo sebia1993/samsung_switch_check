@@ -26,6 +26,9 @@ public sealed class StatelessTelnetApiTests
         Assert.True(liveResponse.IsSuccessStatusCode);
         Assert.Equal(HttpStatusCode.NotFound, oldStatus.StatusCode);
         Assert.Equal(4, identity.RootElement.GetProperty("apiVersion").GetInt32());
+        Assert.Matches(
+            @"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
+            identity.RootElement.GetProperty("productVersion").GetString()!);
         Assert.Equal("https", identity.RootElement.GetProperty("protocol").GetString());
         Assert.Matches(
             "^[0-9A-F]{64}$",

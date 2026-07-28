@@ -65,7 +65,6 @@ function New-TestManifest {
 }
 
 $installerPath = Join-Path $PSScriptRoot 'install-agent.ps1'
-$launcherPath = Join-Path $PSScriptRoot 'Configure-Agent-Allowed-IPs.cmd'
 $buildPath = Join-Path $PSScriptRoot 'build-release.ps1'
 $packageContractPath = Join-Path $PSScriptRoot 'test-package-contract.ps1'
 $tokens = $null
@@ -214,9 +213,8 @@ finally {
     }
 }
 
-Write-SswStep 'Agent allowed IP launcher and package contract'
+Write-SswStep 'Agent native Setup package contract'
 $installerText = Get-Content -LiteralPath $installerPath -Raw -Encoding UTF8
-$launcherText = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
 $buildText = Get-Content -LiteralPath $buildPath -Raw -Encoding UTF8
 $packageContractText = Get-Content -LiteralPath $packageContractPath -Raw -Encoding UTF8
 foreach ($required in @(
@@ -251,27 +249,21 @@ Assert-AddressTest -Condition (
     $transactionIndex -gt $addressResolutionIndex
 ) -Message 'Reconfiguration identity and address checks must finish before the shared transaction begins.'
 foreach ($required in @(
-    'install-agent.ps1',
-    '-ReconfigureAddresses',
-    "-Verb RunAs",
-    'SSW_INSTALLER_PATH',
-    'SSW_POWERSHELL_PATH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe',
-    'Start-Process -FilePath $env:SSW_POWERSHELL_PATH')) {
-    Assert-AddressTest -Condition $launcherText.Contains($required) `
-        -Message "Allowed IP launcher contract is missing: $required"
+    'src\SamsungSwitchWatch.Agent.Setup\SamsungSwitchWatch.Agent.Setup.csproj',
+    "'SamsungSwitchWatch.Agent.Setup.exe'",
+    "Write-PackageManifest -Directory `$agentOut -PackageKind 'Agent' -ExecutableName 'SamsungSwitchWatch.Agent.Setup.exe'")) {
+    Assert-AddressTest -Condition $buildText.Contains($required) `
+        -Message "Native Agent Setup build contract is missing: $required"
 }
-Assert-AddressTest -Condition (-not ($launcherText -match '(?im)^\s*powershell\.exe(?:\s|$)')) `
-    -Message 'Allowed IP launcher must not resolve Windows PowerShell through the current directory or PATH.'
-Assert-AddressTest -Condition (-not $launcherText.Contains('-ExecutionPolicy Bypass')) `
-    -Message 'Allowed IP launcher must respect the Windows PowerShell execution policy.'
-Assert-AddressTest -Condition (-not $launcherText.Contains('Unblock-File')) `
-    -Message 'Allowed IP launcher must not unblock downloaded files.'
-Assert-AddressTest -Condition $launcherText.Contains(
-    '& $env:SSW_INSTALLER_PATH -ReconfigureAddresses') `
-    -Message 'Allowed IP launcher must invoke the packaged installer in reconfiguration mode.'
-Assert-AddressTest -Condition $buildText.Contains("'Configure-Agent-Allowed-IPs.cmd'") `
-    -Message 'Release build does not package the allowed IP launcher.'
-Assert-AddressTest -Condition $packageContractText.Contains("'Configure-Agent-Allowed-IPs.cmd'") `
-    -Message 'Release package contract does not require the allowed IP launcher.'
+foreach ($required in @(
+    "Exe = 'SamsungSwitchWatch.Agent.Setup.exe'",
+    "'SamsungSwitchWatch.Agent.Setup.exe'",
+    "`.Extension -in @('.ps1', '.cmd', '.bat')",
+    'Configure-Agent-Allowed-IPs\.cmd|install-(?:agent|viewer)\.ps1')) {
+    Assert-AddressTest -Condition $packageContractText.Contains($required) `
+        -Message "Native Agent Setup package contract is missing: $required"
+}
+Assert-AddressTest -Condition (-not $buildText.Contains("'Configure-Agent-Allowed-IPs.cmd'")) `
+    -Message 'Release build must not package the legacy allowed IP launcher.'
 
 Write-SswStep 'Agent plain IPv4 input contract passed'

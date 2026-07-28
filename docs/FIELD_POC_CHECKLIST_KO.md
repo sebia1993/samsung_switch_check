@@ -1,76 +1,133 @@
-# Samsung Switch Watch v0.9 현장 POC 체크리스트
+# Samsung Switch Watch v0.10 현장 POC 체크리스트
 
 실제 IP, ID, 비밀번호, 호스트명, MAC, 시리얼과 원문 출력은 이 문서에 기록하지 않습니다.
-결과는 `통과`, `실패`, `미검증`과 sanitized 오류 코드만 남깁니다.
+결과는 `통과`, `실패`, `미검증`과 정제된 오류 코드만 기록합니다.
 
-## 1. Agent 설치와 무창 실행
+## 1. 반입 파일과 버전
 
-- [ ] Agent ZIP과 Viewer ZIP의 Release 검증 완료
-- [ ] Viewer CMD 실행 후 UAC 승인과 `C:\Program Files\SamsungSwitchWatch\Viewer` 설치 확인
-- [ ] UAC를 다른 관리자 계정으로 승인해도 원래 사용자 시작 메뉴·자동 시작만 반영됨
-- [ ] Viewer 업데이트 뒤 `%LOCALAPPDATA%\SamsungSwitchWatch`의 장비·계정·감시 자료 보존
-- [ ] Program Files 설치본 무결성·자체점검 실패 시 기존 Viewer 또는 설치 전 상태로 rollback
-- [ ] `Install-or-Update-Agent.cmd`에서 UAC 승인
-- [ ] Viewer PC IPv4와 스위치 관리 IPv4를 CIDR 계산 없이 입력
-- [ ] 입력한 각 IPv4가 내부 설정과 방화벽에서 정확한 `/32`로 적용됨
-- [ ] `SamsungSwitchWatchAgent` 서비스가 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정,
-      자동 시작으로 등록됨
-- [ ] 서비스 실행 중 사용자 바탕 화면·작업 표시줄·트레이에 Agent 창이 없음
-- [ ] Agent EXE 직접 더블클릭 시 별도 프로세스가 남지 않음
-- [ ] RDP 연결 종료 후 서비스 계속 실행
-- [ ] 다른 Windows 사용자 로그인 후에도 닫을 Agent 창이 없음
-- [ ] PC 재부팅 후 사용자 로그인 전 서비스 자동 시작
-- [ ] 강제 프로세스 종료 후 5초/15초/60초 복구 정책 확인
+- [ ] 동일 GitHub Release에서 Agent ZIP과 Viewer ZIP을 받음
+- [ ] Agent와 Viewer 파일명이 같은 `0.10.x-poc` 버전을 표시함
+- [ ] 두 ZIP의 SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교함
+- [ ] Agent ZIP에 `SamsungSwitchWatch.Agent.Setup.exe`와 Agent 런타임 파일이 있음
+- [ ] Viewer ZIP에 `SamsungSwitchWatch.Viewer.exe`와 Viewer 런타임 파일이 있음
+- [ ] 공개 ZIP에 `.ps1`, `.cmd`, 소스코드, 테스트 fixture와 불필요한 개발 파일이 없음
+- [ ] 조직의 백신·EDR·SmartScreen 반입 검사를 완료함
 
-## 2. ProgramData와 HTTPS 신원
+Agent와 Viewer 버전은 달라도 되는 구성이 아닙니다. 반드시 같은 Release 조합을 사용합니다.
 
-관리자 PC에서 민감한 파일 이름이나 내용을 수집하지 않고 ACL만 확인합니다.
+## 2. Agent Setup 사전 조건
 
-- [ ] `%ProgramData%\SamsungSwitchWatch`의 상속이 차단됨
-- [ ] SYSTEM, Administrators, Agent 서비스 SID만 허용됨
-- [ ] 루트와 모든 기존 하위 항목의 owner가 로컬 Administrators로 정규화됨
-- [ ] `install-receipt.json`은 서비스 SID 권한 없이 SYSTEM·Administrators만 접근 가능
-- [ ] 일반 Users 및 로그인 사용자가 데이터 폴더를 읽을 수 없음
-- [ ] Viewer 최초 연결에서 지문·토큰 입력 없이 자동 연결됨
-- [ ] Viewer 재실행 후 같은 Agent를 계속 신뢰함
-- [ ] 다른 테스트 신원으로 바뀌면 Viewer가 연결을 차단함
-- [ ] 관리자가 확인한 재설치에서만 `Agent 신뢰 다시 설정` 동작
+- [ ] Agent PC가 스위치 관리망에 직접 연결되어 있음
+- [ ] Agent PC에서 대상 스위치 TCP/23 연결 정책이 허용됨
+- [ ] Viewer PC가 고정 IPv4 또는 조직에서 관리하는 예약 IPv4를 사용함
+- [ ] Viewer PC에서 Agent PC의 HTTPS/TCP 18443에 접근할 경로가 있음
+- [ ] Agent PC에서 설치 시 사용할 관리자 계정 또는 UAC 승인 수단이 있음
+- [ ] 실제 설정 변경 없이 읽기 전용 `show` 명령만 시험하기로 승인받음
 
-## 3. 네트워크 경계
+## 3. Agent 설치와 무창 실행
 
-- [ ] 등록한 Viewer PC IPv4에서 Agent HTTPS/18443 연결 성공
-- [ ] 허용 범위 밖 테스트 PC에서 HTTPS/18443 차단
-- [ ] Public 방화벽 프로필에서 제품 규칙이 적용되지 않음
-- [ ] 등록한 스위치 관리 IPv4의 TCP/23 요청 허용
-- [ ] 등록하지 않은 테스트 주소가 `TARGET_NOT_ALLOWED`로 거부됨
-- [ ] 요청의 포트 23 이외 값이 거부됨
-- [ ] DNS 이름, IPv6, loopback과 link-local 대상이 거부됨
-- [ ] 같은 버전 Agent ZIP의 `Configure-Agent-Allowed-IPs.cmd`로 허용 IP 목록 변경 성공
-- [ ] 다른 버전 Agent ZIP의 허용 IP 설정 도구는 변경 전에 거부됨
-- [ ] 허용 IP 설정 도구에서 빈 입력 시 기존 목록이 보존됨
-- [ ] 기존과 같은 허용 IP를 다시 적용해도 서비스·listener·방화벽·프로필·live·ready 감사
-- [ ] Public-only 프로필은 자동 허용하지 않고 지원되지 않는 상태로 명확히 표시
+- [ ] Agent ZIP을 로컬 폴더에 완전히 압축 해제함
+- [ ] `SamsungSwitchWatch.Agent.Setup.exe` 실행 시 UAC를 한 번 승인함
+- [ ] Setup에 Viewer PC의 고정 IPv4 한 개만 입력함
+- [ ] CIDR, 서브넷 주소 또는 Viewer 대역을 직접 입력하지 않음
+- [ ] Setup이 직접 연결 RFC1918 사설 IPv4 관리망을 표시함
+- [ ] 표시된 후보에서 실제 스위치 관리망 1~2개만 선택함
+- [ ] 공인망, 일반 사용자망 또는 관리와 무관한 어댑터를 선택하지 않음
+- [ ] `검사` 결과에서 입력, 패키지와 설치 경로가 통과함
+- [ ] 설치 또는 업데이트 결과가 `완료`임
+- [ ] `SamsungSwitchWatchAgent` 서비스가 자동 시작으로 등록됨
+- [ ] 서비스가 `NT SERVICE\SamsungSwitchWatchAgent` 가상 계정으로 실행됨
+- [ ] 사용자 바탕 화면·작업 표시줄·트레이에 Agent 창이 없음
+- [ ] RDP를 종료해도 Agent 서비스가 계속 실행됨
+- [ ] 다른 일반 사용자가 로그인해도 Agent 창이 나타나지 않음
+- [ ] 일반 사용자가 서비스를 중지하거나 구성을 바꿀 수 없음
+- [ ] 로컬 관리자는 Windows 정책에 따라 서비스를 관리할 수 있음을 이해함
+- [ ] PC 재부팅 후 사용자 로그인 전 Agent 서비스가 자동 시작됨
+- [ ] 강제 서비스 종료 후 5초·15초·60초 복구 정책을 확인함
 
-## 4. Viewer 장비와 계정
+## 4. Agent 네트워크 경계
 
-각 모델에서 한 대씩 아래 항목을 반복합니다.
+- [ ] `SamsungSwitchWatchAgent-Https` 인바운드 규칙이 TCP/18443에 적용됨
+- [ ] 원격 주소가 입력한 Viewer IPv4의 정확한 `/32`임
+- [ ] Domain·Private 프로필에만 규칙이 적용됨
+- [ ] Public 프로필에는 제품 규칙이 적용되지 않음
+- [ ] 등록한 Viewer PC에서 Agent HTTPS/18443 연결이 성공함
+- [ ] 다른 시험 PC에서 Agent HTTPS/18443 연결이 차단됨
+- [ ] 선택한 스위치 관리망의 IPv4와 TCP/23 요청은 허용됨
+- [ ] 선택하지 않은 시험 주소는 `TARGET_NOT_ALLOWED`로 거부됨
+- [ ] DNS 이름, IPv6, loopback, link-local과 포트 23 이외 값은 거부됨
 
-| 모델 | 등록 | 로그인 | enable | 결과 |
+Viewer 주소가 바뀌면 Setup을 다시 실행하여 새 고정 IPv4를 입력하고 방화벽을 갱신합니다. 방화벽
+규칙을 넓은 CIDR로 수동 확장하지 않습니다.
+
+## 5. ProgramData와 Agent 신원
+
+민감한 파일 이름이나 내용을 수집하지 않고 ACL과 동작만 확인합니다.
+
+- [ ] `%ProgramData%\SamsungSwitchWatch`가 일반 사용자에게 직접 열리지 않음
+- [ ] SYSTEM과 Administrators가 FullControl을 가짐
+- [ ] Agent 서비스 SID가 필요한 데이터 Modify 권한을 가짐
+- [ ] Viewer 최초 연결에서 지문 또는 페어링 토큰 입력 화면이 나타나지 않음
+- [ ] 최초 HTTPS 연결과 Agent identity 확인 후 자동 TOFU가 완료됨
+- [ ] Viewer 재실행 후 같은 Agent에 계속 연결됨
+- [ ] Agent 신원이 임의로 바뀐 시험에서는 Viewer가 연결을 차단함
+- [ ] 신원 불일치를 지문이나 토큰 입력으로 우회할 수 없음
+
+TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전에 Viewer 주소, Agent 주소와 `/32`
+방화벽이 정확한지 확인합니다.
+
+## 6. Viewer 포터블 실행
+
+- [ ] 0.9 설치형 Viewer를 사용했다면 트레이 메뉴에서 기존 프로그램을 완전히 종료함
+- [ ] `shell:startup`에서 기존 `Samsung Switch Watch` 자동 시작 바로 가기를 제거함
+- [ ] `shell:programs`에서 같은 이름의 기존 시작 메뉴 바로 가기를 제거함
+- [ ] 이전 Viewer가 실행 중일 때 새 Viewer가 동시 실행되지 않고 전환 안내를 표시함
+- [ ] 창이 바로 보이지 않으면 트레이에서 대시보드를 열고 실행 경로가 새 v0.10 폴더인지 확인함
+- [ ] Viewer ZIP을 사용할 로컬 폴더에 완전히 압축 해제함
+- [ ] `SamsungSwitchWatch.Viewer.exe`를 더블클릭해 실행함
+- [ ] Viewer 실행에 UAC가 나타나지 않음
+- [ ] Viewer가 PowerShell 또는 CMD를 실행하지 않음
+- [ ] Viewer가 `Program Files`에 자신을 설치하지 않음
+- [ ] Viewer가 시작 메뉴·바탕 화면·자동 시작을 임의 등록하지 않음
+- [ ] 같은 폴더에서 재실행 가능함
+- [ ] Viewer 설정과 자격 증명은 현재 Windows 사용자 범위로 보존됨
+- [ ] 다른 Windows 사용자로 Viewer 데이터를 복사해도 비밀번호가 복호화되지 않음
+
+## 7. Viewer → Agent 연결 진단
+
+- [ ] Viewer에서 실제 Agent PC의 IPv4만 입력함
+- [ ] 스위치 IP나 Viewer 자신의 IP를 Agent 주소로 입력하지 않음
+- [ ] 입력 형식 단계가 통과함
+- [ ] DNS·IPv4 단계가 통과함
+- [ ] TCP/18443 단계가 통과함
+- [ ] HTTPS·Agent 신원 단계가 통과함
+- [ ] Agent·Viewer 버전 단계가 통과함
+- [ ] 연결 성공 후 과거 `AGENT_CONNECTION_REFUSED` 경고가 화면에서 제거됨
+- [ ] 버전을 다르게 한 시험은 `AGENT_VERSION_MISMATCH`로 중단됨
+- [ ] 연결 거부 시 Setup의 `검사`로 서비스·listener·방화벽 상태를 구분할 수 있음
+
+## 8. Viewer 장비와 자격 증명
+
+각 모델에서 아래 항목을 반복합니다.
+
+| 모델 | 장비 등록 | 로그인 | enable | 결과 |
 |---|---|---|---|---|
 | IES4224GP | 미검증 | 미검증 | 미검증 | |
 | IES4028XP | 미검증 | 미검증 | 미검증 | |
 | IES4226XP | 미검증 | 미검증 | 미검증 | |
 
-- [ ] Viewer에서 장비명, 모델, IPv4, ID, 로그인 PW 입력
-- [ ] enable PW 없는 장비 저장·접속 시험
-- [ ] enable PW가 필요한 장비의 `> → enable → #` 확인
-- [ ] 편집 화면과 API 응답에 기존 PW가 노출되지 않음
-- [ ] Viewer 종료 후 Agent PC에 장비·계정 자료가 남지 않음
-- [ ] 다른 Windows 사용자로 Viewer 자료 복사 시 DPAPI 복호화 불가
+- [ ] Viewer에서 장비명, 모델, IPv4, ID와 로그인 PW를 입력함
+- [ ] 필요한 장비에만 enable PW를 입력함
+- [ ] enable PW가 없는 장비의 접속 시험이 성공함
+- [ ] enable PW가 필요한 장비에서 `>` → `enable` → `#`를 확인함
+- [ ] 잘못된 ID 또는 PW가 `AUTH_FAILED`로 표시됨
+- [ ] 잘못된 enable PW가 `ENABLE_FAILED`로 표시됨
+- [ ] 편집 화면과 API 오류에 기존 비밀번호가 노출되지 않음
+- [ ] Agent PC에 장비·계정 정보가 영구 저장되지 않음
 
-## 5. 명령과 출력
+## 9. 명령과 원문 출력
 
-각 모델에서 지원 여부를 기록합니다.
+각 모델과 실제 펌웨어에서 지원 여부를 기록합니다.
 
 | 명령 | IES4224GP | IES4028XP | IES4226XP |
 |---|---|---|---|
@@ -78,84 +135,78 @@
 | `show sylog tail num 100` | 미검증 | 미검증 | 미검증 |
 | `show syslog tail num 100` | 미검증 | 미검증 | 미검증 |
 
-- [ ] 지원 명령 출력이 Viewer에 표시됨
-- [ ] 미지원 명령이 장비 Down이 아닌 `명령 미지원`으로 표시됨
-- [ ] 한 줄 `show running-config` 실행 가능
-- [ ] 줄바꿈, `;`, `&`, `|`, configure, shutdown, reload 요청 차단
-- [ ] 64KiB 초과 합성 출력에 잘림 표시
+- [ ] 지원 명령의 원문이 Viewer에 표시됨
+- [ ] 미지원 명령은 장비 Down이 아니라 명령 미지원으로 구분됨
+- [ ] 한 줄 `show running-config`가 정책상 실행 가능함
+- [ ] 줄바꿈, `;`, `&`, `|`, configure, shutdown, reload 요청이 차단됨
+- [ ] 128자를 넘는 명령이 차단됨
+- [ ] 64 KiB를 넘는 출력에 잘림 상태가 표시됨
 - [ ] 수동 명령과 원문 출력이 Agent 로그·DB·진단에 없음
 - [ ] Viewer 재실행 후 이전 수동 원문이 복원되지 않음
 
-`show running-config` 원문은 체크리스트, 캡처, 메일과 이슈에 첨부하지 않습니다.
+`show running-config` 원문은 이 체크리스트, 화면 캡처, 메일 또는 이슈에 첨부하지 않습니다.
 
-## 6. 세션 유지 시간과 정리
+## 10. 세션 수명과 정리
 
-- [ ] `exec-timeout 5 0` 장비에서 접속 시험 성공
-- [ ] 명령 완료 후 Telnet 세션 즉시 종료
-- [ ] 명령 단계 원격 종료 시 남은 명령만 새 세션으로 1회 재시도
-- [ ] 재연결 뒤 이미 완료된 명령이 반복 실행되지 않음
-- [ ] 수동 결과에 실제 세션 수와 재연결 횟수 표시
-- [ ] 인증 또는 enable 실패는 자동 재시도하지 않음
-- [ ] 명령 타임아웃은 자동 재시도하지 않음
-- [ ] 인증 실패 뒤 세션 잔존 없음
-- [ ] 명령 타임아웃 뒤 세션 잔존 없음
-- [ ] Viewer 취소 뒤 세션 잔존 없음
-- [ ] 같은 장비 동시 실행이 직렬화됨
-- [ ] 전체 동시 장비 실행이 최대 2개로 제한됨
-- [ ] 각 세션 최대 240초 경계 확인
+- [ ] `exec-timeout 5 0` 장비에서 접속 시험이 성공함
+- [ ] 명령 완료 후 Telnet 세션이 즉시 종료됨
+- [ ] 명령 중 원격 종료 시 완료된 명령은 반복하지 않음
+- [ ] 원격 종료 시 남은 명령만 새 세션에서 최대 한 번 재시도함
+- [ ] 인증 또는 enable 실패를 자동 재시도하지 않음
+- [ ] 명령 시간 초과를 자동 재시도하지 않음
+- [ ] Viewer 취소 후 세션이 남지 않음
+- [ ] 장비 한 대에서 중복 실행이 직렬화됨
+- [ ] Agent 전체 동시 실행이 기본 최대 두 건임
+- [ ] 한 세션이 240초를 넘지 않음
+- [ ] 실패한 한 장비가 다른 장비 작업을 중단시키지 않음
 
-## 7. Viewer 주기 감시와 공백
+## 11. 주기 감시와 변경 감지
 
-- [ ] Viewer 실행 중 설정한 주기로 감시 요청
-- [ ] Viewer 종료 시 Agent가 독립적으로 장비를 조회하지 않음
-- [ ] Viewer 종료 시간에 불필요한 Telnet 세션 없음
-- [ ] Viewer 재실행 후 `감시 공백` 표시
-- [ ] 공백 이후 기존 로그 100개를 모두 신규 이벤트로 오인하지 않음
-- [ ] 모델별 후보 syslog 명령 대체 동작
-- [ ] 동일 상태 지속 시 팝업 반복 없음
-- [ ] `Down → Up` 복구 이벤트 표시
+- [ ] Viewer 실행 중 설정한 주기로 감시 요청이 발생함
+- [ ] Viewer 종료 후 Agent가 독립적으로 스위치를 조회하지 않음
+- [ ] Viewer 종료 시 불필요한 Telnet 세션이 남지 않음
+- [ ] Viewer 재실행 시 감시 공백이 표시됨
+- [ ] 공백 후 기존 로그 100개를 모두 신규 이벤트로 오인하지 않음
+- [ ] 포트 `Up → Down` 변경이 장애로 표시됨
+- [ ] 포트 `Down → Up` 변경이 복구로 표시됨
+- [ ] 같은 상태의 반복 점검이 중복 이벤트를 만들지 않음
+- [ ] 펌웨어별 syslog 명령 대체가 장비별로 동작함
 
-## 8. 업데이트와 rollback
+Viewer가 종료되면 감시도 중단되는 구조가 현장 운영 요구와 맞는지 별도로 승인합니다.
 
-- [ ] v0.7 또는 v0.8 설치에서 v0.9 설치기가 업데이트 모드 자동 감지
-- [ ] 기존 Viewer 방화벽 주소와 장비 주소를 최소 `/32` CIDR로 이관
-- [ ] v0.9 재업데이트 시 Viewer·스위치 허용 주소 재입력 없이 보존
-- [ ] 대상 CIDR은 설치 설정, Viewer 관리 CIDR은 정확한 제품 소유 방화벽 규칙에서 보존되고
-      install receipt를 CIDR 권한원으로 사용하지 않음
-- [ ] 업데이트 전후 Agent HTTPS 신원 동일
-- [ ] 업데이트 전후 ProgramData ACL 동일
-- [ ] 기존 `LocalService` 서비스는 중지 확인 뒤 1회만 전용 가상 계정으로 이관됨
-- [ ] 실행 중인 `LocalService` 소유 항목과 신규 설치에는 legacy owner 예외가 적용되지 않음
-- [ ] 정상 기존 설치를 같은 관리자 계정으로 업데이트할 때 owner·ACL 이관 성공
-- [ ] 비신뢰 root/child owner는 `AGENT_DIRECTORY_TRUST_INVALID`로 중단되고 내용·ACL이 변경되지 않음
-- [ ] junction·symlink가 포함된 install/data 트리는 외부 대상 변경 없이 거부됨
-- [ ] 설정 파일이 없는 설치 잔재도 root owner 검사 없이 재귀 삭제되지 않음
-- [ ] 사용자 지정 DataDirectory가 거부되고 정확히 `%ProgramData%\SamsungSwitchWatch`만 허용됨
-- [ ] 신규 설치에서 빈 `%ProgramData%\SamsungSwitchWatch` 선점 폴더도 채택하지 않고 중단됨
-- [ ] 보호 staging 복사본을 재해시한 뒤에만 기존 프로그램을 교체함
-- [ ] staging 파일 변조 fixture는 기존 프로그램 교체 전에 실패함
-- [ ] v0.7 자격 증명·SQLite 자료가 `legacy-v0.7-backup-*`으로 이동해 자동 삭제되지 않음
-- [ ] legacy 백업 폴더와 하위 항목은 SYSTEM, Administrators만 접근 가능하고 Agent 서비스 SID는 제외됨
-- [ ] 강제 readiness 실패 시 이전 프로그램 복구
-- [ ] 강제 readiness 실패 시 ProgramData와 방화벽 복구
-- [ ] rollback 후 기존 Agent가 이전 프로토콜로 다시 실행
-- [ ] rollback 중 서비스 중지·삭제 실패 시 후속 파일 삭제·복구가 차단됨
-- [ ] legacy program/data 부분 이동 시 원래 위치와 archive가 모두 보존되고 후속 data 복구가 차단됨
-- [ ] rollback 오류 시 transaction snapshot, program backup, archive와 journal이 자동 정리되지 않음
-- [ ] `-RemoveData`는 Administrators 전용 receipt만 허용하고 그 외에는
-      `AGENT_RECEIPT_TRUST_INVALID`로 중단됨
+## 12. 업데이트와 rollback
 
-## 9. 진단과 인수 기준
+- [ ] 기존 설치에서 v0.10 Setup이 업데이트를 수행함
+- [ ] 업데이트 후 Agent ID가 유지됨
+- [ ] 업데이트 후 HTTPS 신원이 유지되어 Viewer 재신뢰 입력이 없음
+- [ ] 기존 유효 실행 한도 설정이 보존됨
+- [ ] 현재 입력한 Viewer IPv4가 정확한 `/32` 방화벽 규칙으로 적용됨
+- [ ] 현재 선택한 관리망 1~2개가 대상 허용 목록으로 적용됨
+- [ ] 업데이트 후 Agent가 `/health/ready` 상태임
+- [ ] 강제 readiness 실패 시험에서 이전 프로그램과 서비스가 rollback됨
+- [ ] rollback 실패를 완료로 표시하지 않고 Setup 오류 코드로 표시함
+- [ ] 업데이트 후 Agent와 Viewer가 같은 Release 버전임
 
-- [ ] `diagnose-agent.ps1`에 ID, PW, 장비 IP, 명령과 원문 없음
-- [ ] 진단 JSON에 버전, 서비스 상태·시작 모드·종료 코드, TCP/18443 listener,
-      방화벽 enabled/profiles/exact, 활성 네트워크 범주, 허용 목록 개수, live/ready가 분리됨
-- [ ] Viewer 연결 진단에 IP·계정·명령 출력 없이 앱 버전·단계·안정 코드·복구 전환만 기록됨
-- [ ] 같은 연결 오류가 반복되어도 진단 로그가 매 주기마다 중복 증가하지 않음
-- [ ] `AGENT_CONNECTION_REFUSED` 뒤 연결 성공 시 오래된 오류 메시지가 화면에서 제거됨
-- [ ] 실패가 `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
-      `COMMAND_TIMEOUT`, `PROMPT_PARSE_FAILED` 등으로 구분됨
-- [ ] 세 모델별 실제 펌웨어 버전과 검증 날짜를 사내 기록에만 보관
-- [ ] POC 한계와 Viewer 비실행 감시 공백을 운영자가 이해함
+## 13. 진단과 민감정보
 
-모든 필수 항목이 통과하기 전에는 `현장 검증 완료` 또는 `운영 안정화 완료`로 표시하지 않습니다.
+- [ ] Agent Setup의 `검사`가 서비스·listener·방화벽·readiness 단계를 구분함
+- [ ] Viewer 연결 진단이 입력·DNS·TCP·HTTPS·버전 단계를 구분함
+- [ ] 진단에 제품 버전, 단계, 소요 시간과 오류 코드가 있음
+- [ ] 진단에 ID, PW, enable PW가 없음
+- [ ] 진단에 장비 IP, 호스트명, MAC과 시리얼이 없음
+- [ ] 진단에 명령 문자열과 원문 출력이 없음
+- [ ] `AGENT_CONNECTION_REFUSED`, `TCP_TIMEOUT`, `AUTH_FAILED`,
+      `COMMAND_TIMEOUT`, `PROMPT_PARSE_FAILED`가 서로 구분됨
+
+## 14. POC 한계 승인
+
+- [ ] Telnet 구간의 ID, 비밀번호와 결과가 평문이라는 위험을 승인함
+- [ ] Agent API에 Windows/AD 로그인과 애플리케이션 토큰이 없음을 승인함
+- [ ] Viewer `/32` 방화벽이 현재 API 접근 경계임을 승인함
+- [ ] TOFU 첫 연결이 중앙 인증기관 검증이 아님을 승인함
+- [ ] 코드 서명 없는 `-poc` 배포물의 EDR·SmartScreen 위험을 승인함
+- [ ] Viewer가 꺼지면 감시가 중단됨을 승인함
+- [ ] 실제 모델·펌웨어 검증은 읽기 전용 명령으로만 수행함
+
+모든 필수 항목이 통과하고 남은 `미검증`을 운영 책임자가 승인하기 전에는 `현장 검증 완료` 또는
+`운영 안정화 완료`로 표시하지 않습니다.

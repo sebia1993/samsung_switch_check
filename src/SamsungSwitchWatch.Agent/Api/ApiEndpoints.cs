@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Domain;
 using SamsungSwitchWatch.Agent.Execution;
@@ -10,6 +11,8 @@ namespace SamsungSwitchWatch.Agent.Api;
 
 public static class ApiEndpoints
 {
+    private static readonly string ProductVersion = ResolveProductVersion();
+
     public static void MapAgentEndpoints(this WebApplication app, AgentOptions options)
     {
         app.MapGet("/health/live", () => Results.Ok(new
@@ -30,6 +33,7 @@ public static class ApiEndpoints
         app.MapGet("/api/v4/identity", (AgentIdentity identity) => Results.Ok(new
         {
             apiVersion = 4,
+            productVersion = ProductVersion,
             agentId = options.AgentId,
             instanceId = identity.InstanceId,
             certificatePublicKeySha256 = identity.CertificatePublicKeySha256,
@@ -75,6 +79,20 @@ public static class ApiEndpoints
                 admission,
                 executor,
                 cancellationToken));
+    }
+
+    private static string ResolveProductVersion()
+    {
+        var value = typeof(ApiEndpoints).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return typeof(ApiEndpoints).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        }
+
+        var metadata = value.IndexOf('+');
+        return metadata >= 0 ? value[..metadata] : value;
     }
 
     private static async Task<IResult> ExecuteAsync(
