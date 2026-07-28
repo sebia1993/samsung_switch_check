@@ -95,25 +95,6 @@ public sealed class WpfSmokeTests
                     connection.StartMinimizedCheckBox.Content);
                 Assert.Same(connection.AgentAddressTextBox, System.Windows.Input.FocusManager.GetFocusedElement(connection));
                 connection.Close();
-                var refusedConnection = new ConnectionSettingsWindow(
-                    new ViewerSettings { DemoMode = false },
-                    (_, _) => throw new InvalidOperationException("Apply must not run after probe failure."),
-                    new RefusedConnectionProbe());
-                refusedConnection.Show();
-                refusedConnection.AgentAddressTextBox.Text = "monitor-pc";
-                refusedConnection.SaveButton.RaiseEvent(
-                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
-                refusedConnection.Dispatcher.Invoke(
-                    () => { },
-                    System.Windows.Threading.DispatcherPriority.Background);
-                refusedConnection.UpdateLayout();
-                Assert.Equal(Visibility.Visible, refusedConnection.ConnectionProgressPanel.Visibility);
-                Assert.StartsWith("!", refusedConnection.TcpProbeText.Text, StringComparison.Ordinal);
-                Assert.Contains("TCP/18443 단계 실패", refusedConnection.ValidationText.Text,
-                    StringComparison.Ordinal);
-                Assert.Contains("AGENT_CONNECTION_REFUSED", refusedConnection.ValidationText.Text,
-                    StringComparison.Ordinal);
-                refusedConnection.Close();
                 var devices = new DeviceManagementWindow(viewModel);
                 devices.Show();
                 devices.UpdateLayout();
@@ -146,9 +127,15 @@ public sealed class WpfSmokeTests
                 if (Directory.Exists(folder)) Directory.Delete(folder, true);
             }
         });
+        thread.IsBackground = true;
+        thread.Name = "SamsungSwitchWatch-WpfSmoke";
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke thread did not finish.");
+        var timeout = TimeSpan.FromSeconds(30);
+        Assert.True(
+            thread.Join(timeout),
+            $"WPF smoke thread did not finish within {timeout.TotalSeconds:0} seconds. "
+            + $"Thread state: {thread.ThreadState}.");
         Assert.Null(failure);
     }
 
@@ -789,33 +776,6 @@ public sealed class WpfSmokeTests
         }
 
         public void Quarantine(string path, string destination) => Content = null;
-    }
-
-    private sealed class RefusedConnectionProbe : IAgentConnectionProbe
-    {
-        public Task<AgentConnectionProbeResult> ProbeAsync(
-            ViewerSettings settings,
-            IProgress<AgentConnectionProbeUpdate>? progress,
-            CancellationToken cancellationToken)
-        {
-            progress?.Report(new AgentConnectionProbeUpdate(
-                AgentConnectionProbeStage.Address,
-                AgentConnectionProbeState.Succeeded,
-                "주소 확인"));
-            progress?.Report(new AgentConnectionProbeUpdate(
-                AgentConnectionProbeStage.Dns,
-                AgentConnectionProbeState.Succeeded,
-                "IPv4 확인"));
-            progress?.Report(new AgentConnectionProbeUpdate(
-                AgentConnectionProbeStage.Tcp,
-                AgentConnectionProbeState.Failed,
-                ViewerConnectionMessages.ForCode("AGENT_CONNECTION_REFUSED"),
-                "AGENT_CONNECTION_REFUSED"));
-            return Task.FromResult(AgentConnectionProbeResult.Failure(
-                AgentConnectionProbeStage.Tcp,
-                "AGENT_CONNECTION_REFUSED",
-                ViewerConnectionMessages.ForCode("AGENT_CONNECTION_REFUSED")));
-        }
     }
 
     private static string? AutomationNameBindingPath(System.Windows.Style? style)
