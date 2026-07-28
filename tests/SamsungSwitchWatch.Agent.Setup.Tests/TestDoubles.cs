@@ -12,6 +12,10 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public string? FreshDataDirectory { get; set; }
     public int DataCleanupFailuresRemaining { get; set; }
     public SetupException? PathValidationException { get; set; }
+    public string? AccessFailurePath { get; set; }
+    public DirectoryAccessKind? AccessFailureKind { get; set; }
+    public int AccessFailureOccurrence { get; set; } = 1;
+    private int MatchingAccessRequests { get; set; }
 
     public bool FileExists(string path) => _inner.FileExists(path);
     public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
@@ -28,8 +32,17 @@ internal sealed class TestFileSystem : ISetupFileSystem
         DeleteDirectoryCore(path, recursive);
     public void DeleteFile(string path) => File.Delete(path);
     public bool CanCreateUnder(string path) => true;
-    public void EnsureDirectoryAccess(string path, DirectoryAccessKind accessKind) =>
+    public void EnsureDirectoryAccess(string path, DirectoryAccessKind accessKind)
+    {
         AccessRequests.Add((path, accessKind));
+        if (AccessFailurePath is not null &&
+            PhysicalSetupFileSystem.SamePath(path, AccessFailurePath) &&
+            AccessFailureKind == accessKind &&
+            ++MatchingAccessRequests == AccessFailureOccurrence)
+        {
+            throw new IOException("simulated directory access failure");
+        }
+    }
     public void ValidateDeploymentPaths(
         DeploymentPaths paths,
         ServiceSnapshot service,
