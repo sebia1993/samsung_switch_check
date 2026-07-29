@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.4 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.5 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.4-poc"
+VERSION = "0.10.5-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -770,6 +770,16 @@ Viewer PC                 Agent PC                    Samsung Switch
         "함께 적용합니다.",
         "warning",
     )
+    add_callout(
+        doc,
+        "Windows의 /32 표시 차이는 자동 처리",
+        "Windows가 같은 Viewer 단일 호스트를 IP, IP/32 또는 "
+        "IP/255.255.255.255로 반환해도 Setup은 같은 주소인지 의미 기준으로 확인합니다. "
+        "다른 prefix, 주소 목록·범위, Any, LocalSubnet과 IPv6는 허용하지 않습니다. "
+        "Enabled·Inbound·Allow·TCP·18443·Domain/Private·Edge Traversal 비활성 조건도 "
+        "모두 그대로 확인합니다.",
+        "info",
+    )
     add_code_block(
         doc,
         """
@@ -813,6 +823,10 @@ Viewer PC IPv4 예     : 10.20.30.25
         doc,
         "설치 실패와 Viewer 연결 거부",
         "Agent Setup에 설치 실패가 표시되면 실패 단계와 Cause를 먼저 확인하세요. "
+        "SETUP_FIREWALL_FAILED는 적용 직후 최대 2초 동안 재확인해도 제품 방화벽 규칙이 "
+        "정확하지 않다는 뜻입니다. Setup은 실제 주소 대신 안전한 불일치 코드를 표시하고 "
+        "설치 전 상태로 복구합니다. 규칙을 Any, LocalSubnet 또는 넓은 대역으로 수동 확대하지 "
+        "마세요. "
         "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP, Viewer PC 주소 또는 "
         "localhost가 아니라 Agent를 설치한 PC 주소를 입력했는지 먼저 확인하세요. 그 다음 "
         "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
@@ -1146,7 +1160,7 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
-            ("SETUP_FIREWALL_FAILED", "Windows 방화벽 서비스 → 제품 규칙 이름 충돌 → 기본 인바운드·그룹 정책"),
+            ("SETUP_FIREWALL_FAILED", "안전한 불일치 코드 기록 → rollback 완료 확인 → 방화벽 서비스·Domain/Private·그룹 정책"),
             ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
             ("SETUP_ROLLBACK_FAILED", "재실행하지 말고 표시 단계와 보존된 백업을 Windows 관리자에게 전달"),
             ("SETUP_EXISTING_NETWORKS_NOT_LOADED", "기존 관리망을 자동 복원하지 못함. 승인된 관리망을 다시 선택하거나 IPv4/prefix로 직접 추가"),
@@ -1194,6 +1208,16 @@ Viewer PC IPv4 예     : 10.20.30.25
         "삭제·이동·이름 변경하지 말고 표시된 단계와 오류 코드를 사내 Windows 관리자에게 "
         "전달하세요.",
         "danger",
+    )
+    add_callout(
+        doc,
+        "방화벽 검증 실패 시",
+        "FIREWALL_REMOTE_ADDRESS_MISMATCH 같은 코드는 어떤 필드가 안전 기준과 달랐는지만 "
+        "알려 주며 실제 Viewer 주소나 규칙 원문은 포함하지 않습니다. Windows의 정상적인 "
+        "IP/32와 IP/255.255.255.255 표기 차이는 자동 처리됩니다. Setup이 rollback을 "
+        "완료한 뒤 같은 Release ZIP으로 검사를 다시 실행하고, 계속 실패하면 코드만 Windows "
+        "관리자에게 전달하세요. 규칙을 직접 넓혀 우회하지 마세요.",
+        "warning",
     )
     add_heading(doc, "현장 진단", 2, heading_num_id)
     add_body(

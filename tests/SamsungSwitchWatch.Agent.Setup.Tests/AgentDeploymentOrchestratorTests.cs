@@ -388,6 +388,35 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task Diagnostics_AcceptsWindowsDottedMaskReadbackAsExactViewerRule()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall = new FakeFirewallManager(
+            OwnedFirewall("192.168.1.20/255.255.255.255"));
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(
+            result.Steps,
+            step =>
+                step.Code == "FIREWALL_EXACT" &&
+                step.State == SetupStepState.Succeeded);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
     public async Task Diagnostics_GenericFirewallOverlapWarnsWithoutMutation()
     {
         using var folder = new TemporaryFolder();
@@ -440,6 +469,73 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.DoesNotContain(
             fixture.Firewall.Operations,
             operation => operation.Contains("Company TCP 18443", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DeployAsync_RetriesDelayedFirewallVisibilityAndAcceptsDottedMask()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = capture =>
+            capture < 3
+                ? OwnedFirewall("10.0.0.0/8")
+                : OwnedFirewall("10.1.1.20/255.255.255.255");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(3, fixture.Firewall.AppliedRuleCaptureCount);
+        Assert.True(fixture.Services.State.Running);
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirewallVerificationTimeoutRollsBackWithSanitizedMismatch()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.FirewallFailed, result.Code);
+        Assert.Contains(
+            FirewallRuleMismatchCodes.RemoteAddress,
+            result.Message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("10.1.1.20", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Any", result.Message, StringComparison.Ordinal);
+        Assert.Equal(11, fixture.Firewall.AppliedRuleCaptureCount);
+        Assert.Contains(
+            $"restore:{SetupConstants.FirewallRuleName}",
+            fixture.Firewall.Operations);
+        Assert.False(fixture.Firewall.State.Exists);
+        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+    }
+
+    [Fact]
+    public async Task DeployAsync_CancellationDuringFirewallRetryRollsBack()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
+        using var cancellation = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(250));
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.Contains(
+            $"restore:{SetupConstants.FirewallRuleName}",
+            fixture.Firewall.Operations);
+        Assert.False(fixture.Firewall.State.Exists);
     }
 
     [Fact]

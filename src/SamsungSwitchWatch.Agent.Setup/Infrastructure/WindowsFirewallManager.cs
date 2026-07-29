@@ -267,21 +267,7 @@ public sealed class WindowsFirewallManager : IFirewallManager
     public bool IsExactViewerRule(string ruleName, int port, string viewerIpv4)
     {
         var snapshot = Capture(ruleName);
-        return snapshot.Exists &&
-               snapshot.Enabled &&
-               snapshot.Direction == NetFwRuleDirectionIn &&
-               snapshot.Action == NetFwActionAllow &&
-               snapshot.Protocol == TcpProtocol &&
-               string.Equals(
-                   snapshot.LocalPorts,
-                   port.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                   StringComparison.Ordinal) &&
-               string.Equals(
-                   snapshot.RemoteAddresses,
-                   $"{viewerIpv4}/32",
-                   StringComparison.OrdinalIgnoreCase) &&
-               snapshot.Profiles == (NetFwProfileDomain | NetFwProfilePrivate) &&
-               !snapshot.EdgeTraversal;
+        return FirewallRuleVerifier.Evaluate(snapshot, port, viewerIpv4).IsExact;
     }
 
     public FirewallSecurityAssessment AssertSecurityGate(

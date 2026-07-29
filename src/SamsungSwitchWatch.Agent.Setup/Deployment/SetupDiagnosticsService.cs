@@ -84,11 +84,10 @@ public sealed class SetupDiagnosticsService(
                     : "신규 설치 대상입니다."));
 
             var firewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
-            var exactFirewall = firewall.Exists &&
-                                firewallManager.IsExactViewerRule(
-                                    SetupConstants.FirewallRuleName,
-                                    SetupConstants.HttpsPort,
-                                    request.ViewerIpv4);
+            var exactFirewall = FirewallRuleVerifier.Evaluate(
+                firewall,
+                SetupConstants.HttpsPort,
+                request.ViewerIpv4).IsExact;
             steps.Add(new SetupStepResult(
                 exactFirewall
                     ? "FIREWALL_EXACT"
