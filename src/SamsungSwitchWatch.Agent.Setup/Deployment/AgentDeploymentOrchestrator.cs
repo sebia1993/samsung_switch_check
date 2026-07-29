@@ -20,7 +20,7 @@ public sealed class AgentDeploymentOrchestrator(
         SetupRequest request,
         CancellationToken cancellationToken)
     {
-        var steps = new List<SetupStepResult>();
+        var steps = new SetupStepRecorder();
         var processGateEntered = false;
         IDisposable? machineLease = null;
         try
@@ -109,7 +109,7 @@ public sealed class AgentDeploymentOrchestrator(
     public async Task<SetupOperationResult> RecoverAsync(
         CancellationToken cancellationToken)
     {
-        var steps = new List<SetupStepResult>();
+        var steps = new SetupStepRecorder();
         var processGateEntered = false;
         IDisposable? machineLease = null;
         try
@@ -241,7 +241,7 @@ public sealed class AgentDeploymentOrchestrator(
 
     private async Task<SetupOperationResult> DeployCoreAsync(
         SetupRequest request,
-        List<SetupStepResult> steps,
+        SetupStepRecorder steps,
         CancellationToken cancellationToken)
     {
         string? stagingDirectory = null;
@@ -456,6 +456,8 @@ public sealed class AgentDeploymentOrchestrator(
                 cancellationToken);
             if (!firewallVerification.IsExact)
             {
+                steps.AddSafeDecisionCode(
+                    firewallVerification.MismatchCode);
                 throw new SetupException(
                     SetupErrorCodes.FirewallFailed,
                     "Viewer 전용 방화벽 규칙을 확인하지 못했습니다. " +
@@ -671,7 +673,7 @@ public sealed class AgentDeploymentOrchestrator(
         bool mutationStarted,
         string primaryFailureCode,
         string primaryFailureMessage,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         var failureCodes = new List<string>();
         var installExists = false;
@@ -1104,7 +1106,7 @@ public sealed class AgentDeploymentOrchestrator(
         string primaryMessage,
         RollbackOutcome rollback,
         string label,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         var finalCode = rollback.Succeeded
             ? primaryCode
@@ -1126,7 +1128,7 @@ public sealed class AgentDeploymentOrchestrator(
 
     private static void AddRollbackFailure(
         List<string> failureCodes,
-        List<SetupStepResult> steps,
+        SetupStepRecorder steps,
         string code,
         string label,
         string message)
@@ -1144,7 +1146,7 @@ public sealed class AgentDeploymentOrchestrator(
         string primaryFailureCode,
         string primaryFailureMessage,
         List<string> failureCodes,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         if (journal is null)
         {
@@ -1180,7 +1182,7 @@ public sealed class AgentDeploymentOrchestrator(
         string code,
         string label,
         string message,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         var codes = pending.RollbackFailureCodes
             .Distinct(StringComparer.Ordinal)
@@ -1237,7 +1239,7 @@ public sealed class AgentDeploymentOrchestrator(
 
     private void RecoverPendingTransaction(
         DeploymentJournalStore journalStore,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         var pending = journalStore.Read();
         ValidatePendingTransaction(pending);
@@ -1299,7 +1301,7 @@ public sealed class AgentDeploymentOrchestrator(
     private void RecoverCompletedRollback(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         var installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
         var backupExists = fileSystem.DirectoryExists(pending.BackupDirectory);
@@ -1376,7 +1378,7 @@ public sealed class AgentDeploymentOrchestrator(
     private void RecoverCommittedTransaction(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         if (!fileSystem.DirectoryExists(paths.InstallDirectory) ||
             !fileSystem.DirectoryExists(paths.DataDirectory))
@@ -1753,7 +1755,7 @@ public sealed class AgentDeploymentOrchestrator(
     private static DeploymentJournal UpgradePendingJournalForRecovery(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        List<SetupStepResult> steps)
+        SetupStepRecorder steps)
     {
         if (pending.FormatVersion == DeploymentJournalStore.CurrentFormatVersion)
         {

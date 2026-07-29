@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -28,6 +29,11 @@ internal sealed record AgentConnectionProbeUpdate(
     string Detail,
     string? ErrorCode = null);
 
+internal sealed record AgentConnectionProbeStageSnapshot(
+    AgentConnectionProbeStage Stage,
+    AgentConnectionProbeState State,
+    long DurationMs);
+
 internal sealed record AgentConnectionProbeResult(
     bool Succeeded,
     AgentIdentityDto? Identity,
@@ -35,14 +41,17 @@ internal sealed record AgentConnectionProbeResult(
     string? ErrorCode,
     string Detail)
 {
+    public IReadOnlyList<AgentConnectionProbeStageSnapshot> StageSnapshots { get; init; } = [];
+
     public static AgentConnectionProbeResult Success(AgentIdentityDto identity, string detail) =>
         new(true, identity, null, null, detail);
 
     public static AgentConnectionProbeResult Failure(
         AgentConnectionProbeStage stage,
         string errorCode,
-        string detail) =>
-        new(false, null, stage, errorCode, detail);
+        string detail,
+        AgentIdentityDto? identity = null) =>
+        new(false, identity, stage, errorCode, detail);
 }
 
 internal interface IAgentConnectionProbe
@@ -100,6 +109,20 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
     }
 
     public async Task<AgentConnectionProbeResult> ProbeAsync(
+        ViewerSettings settings,
+        IProgress<AgentConnectionProbeUpdate>? progress,
+        CancellationToken cancellationToken)
+    {
+        var timingProgress = new AgentConnectionProbeTimingProgress(progress);
+        var result = await ProbeCoreAsync(
+                settings,
+                timingProgress,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return result with { StageSnapshots = timingProgress.CreateSnapshot() };
+    }
+
+    private async Task<AgentConnectionProbeResult> ProbeCoreAsync(
         ViewerSettings settings,
         IProgress<AgentConnectionProbeUpdate>? progress,
         CancellationToken cancellationToken)
@@ -232,7 +255,8 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
                 return AgentConnectionProbeResult.Failure(
                     AgentConnectionProbeStage.Identity,
                     code,
-                    versionDetail);
+                    versionDetail,
+                    identity);
             }
 
             // The probe uses a sanitized snapshot so malformed settings cannot
@@ -317,6 +341,71 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
         string detail,
         string? errorCode = null) =>
         progress?.Report(new AgentConnectionProbeUpdate(stage, state, detail, errorCode));
+}
+
+internal sealed class AgentConnectionProbeTimingProgress(
+    IProgress<AgentConnectionProbeUpdate>? inner) : IProgress<AgentConnectionProbeUpdate>
+{
+    internal const long MaximumDurationMs = 300_000;
+
+    private readonly object _gate = new();
+    private readonly Dictionary<AgentConnectionProbeStage, long> _startedAt = [];
+    private readonly Dictionary<AgentConnectionProbeStage, AgentConnectionProbeStageSnapshot> _snapshots = [];
+
+    public void Report(AgentConnectionProbeUpdate value)
+    {
+        lock (_gate)
+        {
+            if (value.State == AgentConnectionProbeState.Running)
+            {
+                _startedAt[value.Stage] = Stopwatch.GetTimestamp();
+                _snapshots[value.Stage] = new AgentConnectionProbeStageSnapshot(
+                    value.Stage,
+                    value.State,
+                    0);
+            }
+            else
+            {
+                var durationMs = _startedAt.TryGetValue(value.Stage, out var startedAt)
+                    ? ClampDuration(Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds)
+                    : 0;
+                _snapshots[value.Stage] = new AgentConnectionProbeStageSnapshot(
+                    value.Stage,
+                    value.State,
+                    durationMs);
+            }
+        }
+
+        inner?.Report(value);
+    }
+
+    internal IReadOnlyList<AgentConnectionProbeStageSnapshot> CreateSnapshot()
+    {
+        lock (_gate)
+        {
+            return Enum.GetValues<AgentConnectionProbeStage>()
+                .Select(stage => _snapshots.TryGetValue(stage, out var snapshot)
+                    ? snapshot
+                    : new AgentConnectionProbeStageSnapshot(
+                        stage,
+                        AgentConnectionProbeState.Pending,
+                        0))
+                .ToArray();
+        }
+    }
+
+    private static long ClampDuration(double durationMs)
+    {
+        if (!double.IsFinite(durationMs) || durationMs <= 0)
+        {
+            return 0;
+        }
+
+        return Math.Clamp(
+            checked((long)Math.Ceiling(durationMs)),
+            0,
+            MaximumDurationMs);
+    }
 }
 
 internal sealed class SystemAgentNetworkProbe : IAgentNetworkProbe

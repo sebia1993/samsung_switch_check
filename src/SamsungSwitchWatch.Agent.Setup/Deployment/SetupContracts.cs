@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 
@@ -50,6 +51,7 @@ public static class SetupErrorCodes
     public const string AlreadyRunning = "SETUP_ALREADY_RUNNING";
     public const string Cancelled = "SETUP_CANCELLED";
     public const string Unexpected = "SETUP_UNEXPECTED";
+    public const string DiagnosticWriteFailed = "DIAGNOSTIC_WRITE_FAILED";
 }
 
 public sealed class SetupException(string code, string safeMessage, Exception? innerException = null)
@@ -119,6 +121,86 @@ public sealed record SetupStepResult(
     SetupStepState State,
     string Message);
 
+internal sealed record SetupStageDiagnostic(
+    string Code,
+    SetupStepState State,
+    long DurationMilliseconds,
+    long ElapsedMilliseconds);
+
+internal sealed record SetupOperationDiagnosticMetadata(
+    long DurationMilliseconds,
+    IReadOnlyList<SetupStageDiagnostic> Stages,
+    IReadOnlyList<string> SafeDecisionCodes);
+
+internal sealed class SetupStepRecorder : IReadOnlyList<SetupStepResult>
+{
+    private readonly List<SetupStepResult> _steps = [];
+    private readonly List<SetupStageDiagnostic> _diagnostics = [];
+    private readonly List<string> _safeDecisionCodes = [];
+    private readonly long _startedTimestamp = Stopwatch.GetTimestamp();
+    private long _previousTimestamp;
+
+    public SetupStepRecorder()
+    {
+        _previousTimestamp = _startedTimestamp;
+    }
+
+    public int Count => _steps.Count;
+    public SetupStepResult this[int index] => _steps[index];
+
+    public void Add(SetupStepResult step)
+    {
+        ArgumentNullException.ThrowIfNull(step);
+        var timestamp = Stopwatch.GetTimestamp();
+        _steps.Add(step);
+        _diagnostics.Add(new SetupStageDiagnostic(
+            step.Code,
+            step.State,
+            ElapsedMilliseconds(_previousTimestamp, timestamp),
+            ElapsedMilliseconds(_startedTimestamp, timestamp)));
+        _previousTimestamp = timestamp;
+    }
+
+    public void AddRange(IEnumerable<SetupStepResult> steps)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        foreach (var step in steps)
+        {
+            Add(step);
+        }
+    }
+
+    public void AddSafeDecisionCode(string? code)
+    {
+        if (!string.IsNullOrWhiteSpace(code) &&
+            !_safeDecisionCodes.Contains(code, StringComparer.Ordinal))
+        {
+            _safeDecisionCodes.Add(code);
+        }
+    }
+
+    public SetupOperationDiagnosticMetadata Snapshot()
+    {
+        var timestamp = Stopwatch.GetTimestamp();
+        return new SetupOperationDiagnosticMetadata(
+            ElapsedMilliseconds(_startedTimestamp, timestamp),
+            _diagnostics.ToArray(),
+            _safeDecisionCodes.ToArray());
+    }
+
+    public IEnumerator<SetupStepResult> GetEnumerator() => _steps.GetEnumerator();
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+        GetEnumerator();
+
+    private static long ElapsedMilliseconds(long start, long end) =>
+        Math.Max(
+            0,
+            (long)Math.Round(
+                Stopwatch.GetElapsedTime(start, end).TotalMilliseconds,
+                MidpointRounding.AwayFromZero));
+}
+
 public sealed record SetupOperationResult(
     bool Succeeded,
     string Code,
@@ -128,17 +210,26 @@ public sealed record SetupOperationResult(
     public string? PrimaryFailureCode { get; init; }
     public string? PrimaryFailureMessage { get; init; }
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+    internal SetupOperationDiagnosticMetadata? DiagnosticMetadata { get; init; }
 
     public static SetupOperationResult Failure(
         string code,
         string message,
         IReadOnlyList<SetupStepResult> steps) =>
-        new(false, code, message, steps);
+        new(false, code, message, steps)
+        {
+            DiagnosticMetadata =
+                (steps as SetupStepRecorder)?.Snapshot()
+        };
 
     public static SetupOperationResult Success(
         string message,
         IReadOnlyList<SetupStepResult> steps) =>
-        new(true, SetupErrorCodes.Ok, message, steps);
+        new(true, SetupErrorCodes.Ok, message, steps)
+        {
+            DiagnosticMetadata =
+                (steps as SetupStepRecorder)?.Snapshot()
+        };
 }
 
 public sealed record PendingRecoveryInspection(

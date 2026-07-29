@@ -28,7 +28,7 @@
 
         <Border Grid.Row="1" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
             <StackPanel>
-                <TextBlock Text="1. Viewer PC 고정 IPv4"
+                <TextBlock Text="1. 허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님"
                            FontSize="15"
                            FontWeight="SemiBold" />
                 <TextBlock Margin="0,4,0,10"
@@ -51,7 +51,7 @@
                             Padding="12,6"
                             MinHeight="36"
                             Click="UseThisPcAddressButton_Click"
-                            Content="이 PC 주소 넣기"
+                            Content="같은 PC 시험용 주소"
                             ToolTip="Agent와 Viewer를 이 PC에 함께 설치해 사전 테스트할 때 사용합니다." />
                 </Grid>
                 <ComboBox x:Name="ViewerAddressCandidatesComboBox"
@@ -274,6 +274,12 @@
                         Margin="0,8,0,0"
                         HorizontalAlignment="Right"
                         Orientation="Horizontal">
+                <Button x:Name="SaveFieldDiagnosticButton"
+                        Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,8,0"
+                        Click="SaveFieldDiagnosticButton_Click"
+                        Content="익명 진단 저장"
+                        Visibility="Collapsed" />
                 <Button x:Name="CopyDiagnosticsButton"
                         Style="{StaticResource SecondaryButton}"
                         Margin="0,0,8,0"

@@ -250,6 +250,8 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 - 출력 바이트 수와 잘림 여부
 - Agent Setup 실패 시 UTC 시각, 작업 종류, 최초 실패와 rollback 단계 코드, 작업 기록
   형식·단계, 필요한 자료의 존재 여부와 서비스 상태
+- 수동 저장한 `SSW_FIELD_DIAGNOSTIC/1`의 컴포넌트, Windows 빌드·아키텍처, 작업 결과,
+  실패 단계, 권장 조치 코드와 제한된 단계별 소요 시간
 
 진단에 기록하지 않는 정보:
 
@@ -260,6 +262,7 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 - 장비 MAC, 시리얼과 고객 식별정보
 - Agent Setup의 실제 IP/CIDR, PC·사용자명, 절대 경로, 트랜잭션 ID, 서비스 계정,
   방화벽 규칙 원문, 인증서와 설치 명령
+- Viewer에 입력한 Agent 주소와 DNS 이름, 연결 후보 주소, 예외 원문과 로컬 저장 경로
 
 Agent Setup의 `진단정보 복사`는 실패 화면에서만 표시하고 진단 파일을 만들지 않으며,
 위 허용 범위의 요약만 클립보드에 복사합니다. 대표 오류 코드는
@@ -269,6 +272,12 @@ Agent Setup의 `진단정보 복사`는 실패 화면에서만 표시하고 진�
 `OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`, `AGENT_CONNECTION_REFUSED`,
 `AGENT_VERSION_MISMATCH`, `LOCAL_PRIVATE_IPV4_NOT_FOUND`,
 `LOCAL_AGENT_PREFLIGHT_TIMEOUT`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
+
+Agent Setup 작업과 Viewer 연결 검사가 끝난 뒤에는 운영자가 명시적으로
+`익명 진단 저장`을 누른 경우에만 UTF-8 BOM 텍스트를 저장합니다. 자동 저장하거나 기존 로그를
+원문으로 복제하지 않습니다. 저장 전 formatter가 고정된 필드·값 목록만 허용하고, 저장 실패는
+`DIAGNOSTIC_WRITE_FAILED`로 표시합니다. Viewer 장비 명령 원문과 출력은 이 진단에 절대
+포함하지 않습니다.
 
 자동화·Mock 검증은 rollback 단계 순서, 오류 분리와 민감정보 제외 계약을 확인할 수 있지만,
 Windows SCM, 방화벽 COM, 실제 ACL, EDR 파일 잠금과 전원 중단 조합을 모두 증명하지는

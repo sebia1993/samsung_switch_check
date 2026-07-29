@@ -13,7 +13,7 @@ public sealed class SetupDiagnosticsService(
         SetupRequest request,
         CancellationToken cancellationToken)
     {
-        var steps = new List<SetupStepResult>();
+        var steps = new SetupStepRecorder();
         try
         {
             if (!administratorChecker.IsAdministrator())
@@ -85,10 +85,12 @@ public sealed class SetupDiagnosticsService(
                     : "신규 설치 대상입니다."));
 
             var firewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
-            var exactFirewall = FirewallRuleVerifier.Evaluate(
+            var firewallVerification = FirewallRuleVerifier.Evaluate(
                 firewall,
                 SetupConstants.HttpsPort,
-                request.ViewerIpv4).IsExact;
+                request.ViewerIpv4);
+            var exactFirewall = firewallVerification.IsExact;
+            steps.AddSafeDecisionCode(firewallVerification.MismatchCode);
             steps.Add(new SetupStepResult(
                 exactFirewall
                     ? "FIREWALL_EXACT"
@@ -176,7 +178,7 @@ public sealed class SetupDiagnosticsService(
         new(code, label, SetupStepState.Succeeded, message);
 
     internal static void AddFirewallWarnings(
-        List<SetupStepResult> steps,
+        SetupStepRecorder steps,
         FirewallSecurityAssessment assessment)
     {
         steps.AddRange(assessment.Warnings.Select(warning =>

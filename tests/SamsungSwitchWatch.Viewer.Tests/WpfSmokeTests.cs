@@ -93,8 +93,13 @@ public sealed class WpfSmokeTests
                 Assert.Equal("monitor-pc", connection.AgentAddressTextBox.Text);
                 Assert.Equal("Agent 주소만 입력하세요", connection.TransportWarningText.Text);
                 Assert.Equal(System.Windows.Visibility.Collapsed, connection.ConnectionProgressPanel.Visibility);
-                Assert.Equal("이 PC에서 사전 테스트", connection.LocalPreflightButton.Content);
+                Assert.Equal(
+                    "Agent와 Viewer가 같은 PC일 때 테스트",
+                    connection.LocalPreflightButton.Content);
                 Assert.Equal(System.Windows.Visibility.Collapsed, connection.LocalPreflightResultPanel.Visibility);
+                Assert.Equal(
+                    System.Windows.Visibility.Collapsed,
+                    connection.DiagnosticSaveButton.Visibility);
                 Assert.Equal(0, localPreflight.CallCount);
                 Assert.True(connection.LocalPreflightButton.IsVisible);
                 Assert.True(connection.SaveButton.IsVisible);
@@ -111,7 +116,7 @@ public sealed class WpfSmokeTests
                 legacyLoopbackConnection.Show();
                 legacyLoopbackConnection.UpdateLayout();
                 Assert.Contains(
-                    "이 PC에서 사전 테스트",
+                    "Agent와 Viewer가 같은 PC일 때 테스트",
                     legacyLoopbackConnection.ValidationText.Text,
                     StringComparison.Ordinal);
                 legacyLoopbackConnection.AgentAddressTextBox.Text = "10.10.10.20";
@@ -139,6 +144,9 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     identityMismatchConnection.RetrustButton.Visibility);
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    identityMismatchConnection.DiagnosticSaveButton.Visibility);
 
                 identityMismatchConnection.DemoModeCheckBox.IsChecked = true;
                 identityMismatchConnection.UpdateLayout();
@@ -151,6 +159,122 @@ public sealed class WpfSmokeTests
                     identityMismatchConnection.ConnectionProgressPanel.Visibility);
                 Assert.Empty(identityMismatchConnection.ValidationText.Text);
                 identityMismatchConnection.Close();
+                var appliedCount = 0;
+                var successfulConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings
+                    {
+                        DemoMode = false,
+                        AgentUri = "https://monitor-pc:18443"
+                    },
+                    (_, _) =>
+                    {
+                        appliedCount++;
+                        return Task.CompletedTask;
+                    },
+                    new SuccessfulAgentConnectionProbe(),
+                    new CountingLocalAgentPreflight());
+                successfulConnection.Show();
+                successfulConnection.SaveButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                successfulConnection.UpdateLayout();
+
+                Assert.True(successfulConnection.IsVisible);
+                Assert.Equal(1, appliedCount);
+                Assert.NotNull(successfulConnection.Result);
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    successfulConnection.DiagnosticSaveButton.Visibility);
+                Assert.True(successfulConnection.DiagnosticSaveButton.IsEnabled);
+                Assert.False(successfulConnection.SaveButton.IsEnabled);
+                Assert.Equal("저장 완료", successfulConnection.SaveButton.Content);
+                Assert.Equal("닫기", successfulConnection.CancelButton.Content);
+                successfulConnection.Close();
+                var samePcConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings
+                    {
+                        DemoMode = false,
+                        AgentUri = "https://monitor-pc:18443"
+                    },
+                    (_, _) => Task.CompletedTask,
+                    new NeverCalledAgentConnectionProbe(),
+                    new SuccessfulLocalAgentPreflight());
+                samePcConnection.Show();
+                samePcConnection.LocalPreflightButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                samePcConnection.UpdateLayout();
+
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    samePcConnection.DiagnosticSaveButton.Visibility);
+                Assert.True(samePcConnection.DiagnosticSaveButton.IsEnabled);
+                Assert.True(samePcConnection.SaveButton.IsEnabled);
+                samePcConnection.Close();
+                var tofuApplyFailureConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings
+                    {
+                        DemoMode = false,
+                        AgentUri = "https://monitor-pc:18443"
+                    },
+                    (_, _) => Task.FromException(new AgentClientException(
+                        "AGENT_IDENTITY_CHANGED",
+                        AgentConnectionState.Stale)),
+                    new SuccessfulAgentConnectionProbe(),
+                    new CountingLocalAgentPreflight());
+                tofuApplyFailureConnection.Show();
+                tofuApplyFailureConnection.SaveButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                tofuApplyFailureConnection.UpdateLayout();
+
+                var tofuDiagnostic = Assert.IsType<ViewerFieldDiagnosticSnapshot>(
+                    tofuApplyFailureConnection.FieldDiagnosticSnapshot);
+                Assert.Equal("FAILED", tofuDiagnostic.Result);
+                Assert.Equal("HTTPS", tofuDiagnostic.FailedStage);
+                Assert.Equal("AGENT_IDENTITY_CHANGED", tofuDiagnostic.ErrorCode);
+                Assert.Equal(
+                    [11L, 12L, 13L, 14L, 15L],
+                    tofuDiagnostic.Stages.Select(item => item.DurationMs));
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    tofuApplyFailureConnection.DiagnosticSaveButton.Visibility);
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    tofuApplyFailureConnection.RetrustButton.Visibility);
+                Assert.True(tofuApplyFailureConnection.SaveButton.IsEnabled);
+                tofuApplyFailureConnection.Close();
+                var settingsSaveFailureConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings
+                    {
+                        DemoMode = false,
+                        AgentUri = "https://monitor-pc:18443"
+                    },
+                    (_, _) => Task.FromException(new AgentClientException(
+                        "VIEWER_SETTINGS_WRITE_FAILED",
+                        AgentConnectionState.Stale)),
+                    new NeverCalledAgentConnectionProbe(),
+                    new SuccessfulLocalAgentPreflight());
+                settingsSaveFailureConnection.Show();
+                settingsSaveFailureConnection.LocalPreflightButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                settingsSaveFailureConnection.SaveButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                settingsSaveFailureConnection.UpdateLayout();
+
+                var settingsDiagnostic = Assert.IsType<ViewerFieldDiagnosticSnapshot>(
+                    settingsSaveFailureConnection.FieldDiagnosticSnapshot);
+                Assert.Equal("FAILED", settingsDiagnostic.Result);
+                Assert.Equal("SAME_PC", settingsDiagnostic.Mode);
+                Assert.Equal("SETTINGS", settingsDiagnostic.FailedStage);
+                Assert.Equal("VIEWER_SETTINGS_WRITE_FAILED", settingsDiagnostic.ErrorCode);
+                Assert.Equal("CHECK_VIEWER_STORAGE", settingsDiagnostic.RecommendedActionCode);
+                Assert.Equal(
+                    [11L, 12L, 13L, 14L, 15L],
+                    settingsDiagnostic.Stages.Select(item => item.DurationMs));
+                Assert.Contains(
+                    "VIEWER_SETTINGS_WRITE_FAILED",
+                    settingsSaveFailureConnection.ValidationText.Text,
+                    StringComparison.Ordinal);
+                Assert.True(settingsSaveFailureConnection.SaveButton.IsEnabled);
+                settingsSaveFailureConnection.Close();
                 var devices = new DeviceManagementWindow(viewModel);
                 devices.Show();
                 devices.UpdateLayout();
@@ -879,4 +1003,63 @@ public sealed class WpfSmokeTests
                 ViewerConnectionMessages.ForCode("AGENT_IDENTITY_CHANGED")));
         }
     }
+
+    private sealed class SuccessfulAgentConnectionProbe : IAgentConnectionProbe
+    {
+        public Task<AgentConnectionProbeResult> ProbeAsync(
+            ViewerSettings settings,
+            IProgress<AgentConnectionProbeUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(SuccessfulProbeResult());
+        }
+    }
+
+    private sealed class SuccessfulLocalAgentPreflight : ILocalAgentPreflight
+    {
+        public Task<LocalAgentPreflightResult> RunAsync(
+            ViewerSettings baseSettings,
+            IProgress<LocalAgentPreflightUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = ViewerSettingsSanitizer.Copy(baseSettings);
+            candidate.AgentUri = "https://192.168.0.20:18443";
+            return Task.FromResult(new LocalAgentPreflightResult(
+                true,
+                candidate,
+                SuccessfulProbeResult(),
+                1));
+        }
+    }
+
+    private static AgentConnectionProbeResult SuccessfulProbeResult() =>
+        AgentConnectionProbeResult.Success(
+                Identity(),
+                "Agent 연결 확인 완료")
+            with
+        {
+            StageSnapshots =
+                [
+                    new(AgentConnectionProbeStage.Address, AgentConnectionProbeState.Succeeded, 11),
+                    new(AgentConnectionProbeStage.Dns, AgentConnectionProbeState.Succeeded, 12),
+                    new(AgentConnectionProbeStage.Tcp, AgentConnectionProbeState.Succeeded, 13),
+                    new(AgentConnectionProbeStage.Https, AgentConnectionProbeState.Succeeded, 14),
+                    new(AgentConnectionProbeStage.Identity, AgentConnectionProbeState.Succeeded, 15)
+                ]
+        };
+
+    private static AgentIdentityDto Identity() =>
+        new(
+            4,
+            "agent-test",
+            "instance-test",
+            new string('A', 64),
+            "https",
+            8,
+            65_536)
+        {
+            ProductVersion = AgentProductVersionPolicy.CurrentViewerVersion
+        };
 }

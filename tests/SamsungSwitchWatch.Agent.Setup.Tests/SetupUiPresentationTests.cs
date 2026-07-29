@@ -292,4 +292,295 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("FailedDirectoryExists=unknown", text);
         Assert.Contains("DataDirectoryExists=unknown", text);
     }
+
+    [Fact]
+    public void FieldDiagnostic_FormatsAllowlistedSetupStateAndStageTimings()
+    {
+        var steps = new SetupStepRecorder();
+        steps.Add(new SetupStepResult(
+            "PACKAGE_VALID",
+            "package",
+            SetupStepState.Succeeded,
+            @"10.20.30.40 C:\ProgramData DOMAIN\operator"));
+        steps.Add(new SetupStepResult(
+            "SERVICE_CONFIGURED",
+            "service",
+            SetupStepState.Succeeded,
+            "secret-password"));
+        steps.AddSafeDecisionCode(
+            FirewallRuleMismatchCodes.RemoteAddress);
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.FirewallFailed,
+            "firewall",
+            SetupStepState.Failed,
+            "192.168.40.20/32"));
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.FirewallFailed,
+            "raw exception text",
+            steps) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            PrimaryFailureMessage = "device output"
+        };
+        var recovery = new PendingRecoveryInspection(
+            true,
+            true,
+            SetupErrorCodes.RecoveryRequired,
+            @"C:\secret")
+        {
+            ServiceState = "stopped"
+        };
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.8-poc",
+                new DateTimeOffset(
+                    2026,
+                    7,
+                    29,
+                    1,
+                    2,
+                    3,
+                    TimeSpan.Zero),
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.FromMilliseconds(321),
+                result,
+                recovery));
+
+        Assert.StartsWith("SSW_FIELD_DIAGNOSTIC/1\r\n", text);
+        Assert.Contains("Component=AGENT_SETUP", text);
+        Assert.Contains("ProductVersion=0.10.8-poc", text);
+        Assert.Contains("GeneratedUtc=20260729T010203000Z", text);
+        Assert.Contains("WindowsBuild=WIN_10_0_26100_0", text);
+        Assert.Contains("Architecture=X64", text);
+        Assert.Contains("Operation=INSTALL", text);
+        Assert.Contains("Result=FAILURE", text);
+        Assert.Contains("FailedStage=FIREWALL", text);
+        Assert.Contains(
+            $"ErrorCode={SetupErrorCodes.FirewallFailed}",
+            text);
+        Assert.Contains(
+            "RecommendedActionCode=CHECK_FIREWALL_POLICY",
+            text);
+        Assert.Contains("OperationDurationMs=321", text);
+        Assert.Contains("PackageValidation=PASS", text);
+        Assert.Contains("RecoveryJournal=PENDING_RECOVERABLE", text);
+        Assert.Contains("Service=CONFIGURED", text);
+        Assert.Contains(
+            FirewallRuleMismatchCodes.RemoteAddress,
+            text);
+        Assert.Contains("LocalTcp18443=NOT_RUN", text);
+        Assert.Contains("Readiness=NOT_RUN", text);
+        Assert.Contains("StageCount=3", text);
+        Assert.Contains("Stage.01.Code=PACKAGE_VALID", text);
+        Assert.Contains("Stage.01.Status=SUCCESS", text);
+        Assert.Matches(@"Stage\.01\.DurationMs=\d+", text);
+        Assert.Matches(@"Stage\.03\.ElapsedMs=\d+", text);
+        Assert.DoesNotContain("10.20.30.40", text);
+        Assert.DoesNotContain("192.168.40.20", text);
+        Assert.DoesNotContain(@"C:\", text);
+        Assert.DoesNotContain("DOMAIN", text);
+        Assert.DoesNotContain("operator", text);
+        Assert.DoesNotContain("secret-password", text);
+        Assert.DoesNotContain("raw exception", text);
+        Assert.DoesNotContain("device output", text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_SuccessIncludesReadinessWithoutSensitiveValues()
+    {
+        var steps = new SetupStepRecorder();
+        steps.Add(new SetupStepResult(
+            "PACKAGE_VALID",
+            "package",
+            SetupStepState.Succeeded,
+            "safe"));
+        steps.Add(new SetupStepResult(
+            "AGENT_READY",
+            "ready",
+            SetupStepState.Succeeded,
+            "safe"));
+        var result = SetupOperationResult.Success("done", steps);
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.8-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.19045.0",
+                "x64",
+                "preflight",
+                TimeSpan.Zero,
+                result,
+                PendingRecoveryInspection.None));
+
+        Assert.Contains("Operation=PREFLIGHT", text);
+        Assert.Contains("Result=SUCCESS", text);
+        Assert.Contains("FailedStage=NONE", text);
+        Assert.Contains("ErrorCode=OK", text);
+        Assert.Contains("RecommendedActionCode=NONE", text);
+        Assert.Contains("PackageValidation=PASS", text);
+        Assert.Contains("RecoveryJournal=NONE", text);
+        Assert.Contains("Service=RUNNING_READY", text);
+        Assert.Contains("LocalTcp18443=PASS", text);
+        Assert.Contains("Readiness=PASS", text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_ReplacesUntrustedTokensInsteadOfExportingThem()
+    {
+        const string sensitive = "10.20.30.40";
+        var result = new SetupOperationResult(
+            false,
+            sensitive,
+            @"C:\secret",
+            [
+                new SetupStepResult(
+                    sensitive,
+                    "label",
+                    SetupStepState.Failed,
+                    "password")
+            ]);
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                @"C:\secret",
+                DateTimeOffset.UnixEpoch,
+                @"C:\Windows",
+                @"DOMAIN\operator",
+                sensitive,
+                TimeSpan.FromMilliseconds(-1),
+                result,
+                PendingRecoveryInspection.None));
+
+        Assert.Contains("ProductVersion=UNAVAILABLE", text);
+        Assert.Contains("WindowsBuild=UNAVAILABLE", text);
+        Assert.Contains("Architecture=UNAVAILABLE", text);
+        Assert.Contains("Operation=UNAVAILABLE", text);
+        Assert.Contains("FailedStage=UNKNOWN", text);
+        Assert.Contains("ErrorCode=UNAVAILABLE", text);
+        Assert.Contains("OperationDurationMs=unknown", text);
+        Assert.Contains("Stage.01.Code=UNAVAILABLE", text);
+        Assert.DoesNotContain(sensitive, text);
+        Assert.DoesNotContain(@"C:\", text);
+        Assert.DoesNotContain("DOMAIN", text);
+        Assert.DoesNotContain("operator", text);
+        Assert.DoesNotContain("password", text);
+    }
+
+    [Fact]
+    public void FieldDiagnosticWriter_AtomicallyOverwritesUtf8BomTextAndCleansTemp()
+    {
+        using var folder = new TemporaryFolder();
+        var path = folder.Combine("diagnostic.txt");
+        const string original =
+            "SSW_FIELD_DIAGNOSTIC/1\r\nComponent=AGENT_SETUP";
+        const string replacement =
+            "SSW_FIELD_DIAGNOSTIC/1\r\nComponent=AGENT_SETUP\r\nResult=SUCCESS";
+
+        SetupFieldDiagnosticWriter.Write(path, original);
+        SetupFieldDiagnosticWriter.Write(path, replacement);
+
+        var bytes = File.ReadAllBytes(path);
+        Assert.True(bytes.Length > 3);
+        Assert.Equal(0xEF, bytes[0]);
+        Assert.Equal(0xBB, bytes[1]);
+        Assert.Equal(0xBF, bytes[2]);
+        Assert.Equal(replacement, File.ReadAllText(path));
+        Assert.Empty(Directory.EnumerateFiles(
+            folder.Path,
+            "*.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public void FieldDiagnosticWriter_FailedEncodingPreservesExistingFileAndCleansTemp()
+    {
+        using var folder = new TemporaryFolder();
+        var path = folder.Combine("diagnostic.txt");
+        const string original =
+            "SSW_FIELD_DIAGNOSTIC/1\r\nComponent=AGENT_SETUP";
+
+        SetupFieldDiagnosticWriter.Write(path, original);
+
+        Assert.Throws<System.Text.EncoderFallbackException>(
+            () => SetupFieldDiagnosticWriter.Write(
+                path,
+                "SSW_FIELD_DIAGNOSTIC/1\uD800"));
+        Assert.Equal(original, File.ReadAllText(path));
+        Assert.Empty(Directory.EnumerateFiles(
+            folder.Path,
+            "*.tmp",
+            SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public void FieldDiagnosticWriter_ReportsWriteFailuresToCaller()
+    {
+        using var folder = new TemporaryFolder();
+        var path = folder.Combine("missing", "diagnostic.txt");
+
+        Assert.Throws<DirectoryNotFoundException>(
+            () => SetupFieldDiagnosticWriter.Write(
+                path,
+                "SSW_FIELD_DIAGNOSTIC/1"));
+        Assert.Equal(
+            "DIAGNOSTIC_WRITE_FAILED",
+            SetupErrorCodes.DiagnosticWriteFailed);
+    }
+
+    [Fact]
+    public void FieldDiagnosticSaveCoordinator_ConvertsDialogFailureToStableCode()
+    {
+        var writeCalled = false;
+
+        var result = SetupFieldDiagnosticSaveCoordinator.Save(
+            selectPath: () => throw new InvalidOperationException(
+                "simulated shell dialog failure"),
+            createContents: () => "contents",
+            write: (_, _) => writeCalled = true);
+
+        Assert.Equal(SetupFieldDiagnosticSaveState.Failed, result.State);
+        Assert.Equal(
+            SetupErrorCodes.DiagnosticWriteFailed,
+            result.ErrorCode);
+        Assert.False(writeCalled);
+    }
+
+    [Fact]
+    public void FieldDiagnosticSaveCoordinator_ConvertsWriterFailureToStableCode()
+    {
+        var result = SetupFieldDiagnosticSaveCoordinator.Save(
+            selectPath: () => "diagnostic.txt",
+            createContents: () => "contents",
+            write: (_, _) => throw new UnauthorizedAccessException(
+                "simulated EDR denial"));
+
+        Assert.Equal(SetupFieldDiagnosticSaveState.Failed, result.State);
+        Assert.Equal(
+            SetupErrorCodes.DiagnosticWriteFailed,
+            result.ErrorCode);
+    }
+
+    [Fact]
+    public void FieldDiagnosticSaveCoordinator_CancelDoesNotCreateOrWrite()
+    {
+        var contentCalled = false;
+        var writeCalled = false;
+
+        var result = SetupFieldDiagnosticSaveCoordinator.Save(
+            selectPath: () => null,
+            createContents: () =>
+            {
+                contentCalled = true;
+                return "contents";
+            },
+            write: (_, _) => writeCalled = true);
+
+        Assert.Equal(SetupFieldDiagnosticSaveState.Cancelled, result.State);
+        Assert.Equal(SetupErrorCodes.Ok, result.ErrorCode);
+        Assert.False(contentCalled);
+        Assert.False(writeCalled);
+    }
 }

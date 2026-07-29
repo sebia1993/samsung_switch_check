@@ -29,7 +29,7 @@ Agent와 Viewer 버전은 달라도 되는 구성이 아닙니다. 반드시 같
 - [ ] Agent ZIP을 로컬 폴더에 완전히 압축 해제함
 - [ ] `SamsungSwitchWatch.Agent.Setup.exe` 실행 시 UAC를 한 번 승인함
 - [ ] Setup에 Viewer PC의 고정 IPv4 한 개만 입력함
-- [ ] 동일 PC 사전 테스트에서는 `이 PC 주소 넣기`가 실제 RFC1918 사설 IPv4만 제안함
+- [ ] 같은 PC 시험에서는 `같은 PC 시험용 주소`가 실제 RFC1918 사설 IPv4만 제안함
 - [ ] 후보가 여러 개이면 운영자가 사용할 인터페이스 주소를 직접 선택함
 - [ ] 후보가 없을 때 주소를 추측하거나 loopback으로 계속하지 않고 안내가 표시됨
 - [ ] Viewer 주소 입력란에는 CIDR, 서브넷 주소 또는 Viewer 대역을 입력하지 않음
@@ -105,6 +105,7 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 - [ ] 같은 폴더에서 재실행 가능함
 - [ ] Viewer 설정과 자격 증명은 현재 Windows 사용자 범위로 보존됨
 - [ ] 다른 Windows 사용자로 Viewer 데이터를 복사해도 비밀번호가 복호화되지 않음
+- [ ] 인터넷과 Python/.NET 설치 없이 `익명 진단 저장` TXT를 생성하고 메모장에서 한글을 읽을 수 있음
 
 ## 7. Viewer → Agent 연결 진단
 
@@ -121,10 +122,14 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 - [ ] 연결 거부 시 Setup의 `검사`로 서비스·listener·방화벽 상태를 구분할 수 있음
 - [ ] `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Agent Setup에 현재 Viewer 고정 IPv4를 다시
       입력하라는 안내가 표시됨
+- [ ] 연결 성공과 실패 후 `익명 진단 저장`을 사용할 수 있고 파일이 자동 생성되지는 않음
+- [ ] 진단 첫 줄이 `SSW_FIELD_DIAGNOSTIC/1`이고 IP/CIDR·PC/사용자명·계정·경로·예외
+      원문·명령/출력이 없음
 
 ### 동일 PC 사전 테스트
 
-- [ ] Agent와 Viewer를 같은 PC에 설치한 경우에만 `이 PC에서 사전 테스트`를 직접 누름
+- [ ] Agent와 Viewer를 같은 PC에 설치한 경우에만
+      `Agent와 Viewer가 같은 PC일 때 테스트`를 직접 누름
 - [ ] Viewer를 열거나 연결 창을 여는 것만으로 사전 테스트가 자동 실행되지 않음
 - [ ] 활성 loopback·tunnel 이외 RFC1918 IPv4만 후보가 됨
 - [ ] 후보가 최대 6개, 후보당 최대 7초, 전체 최대 30초로 제한됨

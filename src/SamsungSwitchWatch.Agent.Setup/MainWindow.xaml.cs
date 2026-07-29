@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -23,7 +25,10 @@ public partial class MainWindow : Window
     private PendingRecoveryInspection _recoveryInspection =
         PendingRecoveryInspection.None;
     private SetupOperationResult? _lastFailedOperation;
+    private SetupOperationResult? _lastCompletedOperation;
     private string _lastOperationName = "none";
+    private string _lastCompletedOperationName = "none";
+    private TimeSpan _lastCompletedOperationDuration;
     private bool _suppressNetworkSelectionEvent;
     private bool _initialNetworksApplied;
     private bool _isBusy;
@@ -622,6 +627,7 @@ public partial class MainWindow : Window
         string runningText,
         Func<CancellationToken, Task<SetupOperationResult>> operation)
     {
+        var stopwatch = Stopwatch.StartNew();
         SetBusy(true);
         _results.Clear();
         DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
@@ -658,6 +664,10 @@ public partial class MainWindow : Window
                 ShowDiagnosticsAction();
             }
 
+            CaptureCompletedOperation(
+                operationName,
+                result,
+                stopwatch.Elapsed);
             return result;
         }
         catch
@@ -666,6 +676,13 @@ public partial class MainWindow : Window
                 SetupErrorCodes.Unexpected,
                 "작업 실패",
                 "화면에서 작업 결과를 처리하지 못했습니다.");
+            if (_lastFailedOperation is { } failure)
+            {
+                CaptureCompletedOperation(
+                    operationName,
+                    failure,
+                    stopwatch.Elapsed);
+            }
             return _lastFailedOperation;
         }
         finally
@@ -715,6 +732,8 @@ public partial class MainWindow : Window
         AddManualNetworkButton.IsEnabled = !busy;
         CheckButton.IsEnabled = !busy;
         CopyDiagnosticsButton.IsEnabled = !busy;
+        SaveFieldDiagnosticButton.IsEnabled =
+            !busy && _lastCompletedOperation is not null;
         UpdateActionAvailability();
     }
 
@@ -772,6 +791,78 @@ public partial class MainWindow : Window
             DiagnosticsCopyFeedbackText.Foreground = Brushes.Firebrick;
             DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
         }
+    }
+
+    private void CaptureCompletedOperation(
+        string operationName,
+        SetupOperationResult result,
+        TimeSpan duration)
+    {
+        _lastCompletedOperation = result;
+        _lastCompletedOperationName = operationName;
+        _lastCompletedOperationDuration = duration;
+        SaveFieldDiagnosticButton.Visibility = Visibility.Visible;
+        SaveFieldDiagnosticButton.IsEnabled = !_isBusy;
+    }
+
+    private void SaveFieldDiagnosticButton_Click(
+        object sender,
+        RoutedEventArgs e)
+    {
+        if (_lastCompletedOperation is not { } completedOperation)
+        {
+            return;
+        }
+
+        var generatedUtc = DateTimeOffset.UtcNow;
+        var saveResult = SetupFieldDiagnosticSaveCoordinator.Save(
+            selectPath: () =>
+            {
+                var dialog = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "익명 현장 진단 저장",
+                    FileName =
+                        $"SSW-AgentSetup-Diagnostic-{generatedUtc:yyyyMMdd-HHmmss}.txt",
+                    DefaultExt = ".txt",
+                    AddExtension = true,
+                    OverwritePrompt = true,
+                    Filter = "텍스트 파일 (*.txt)|*.txt"
+                };
+                return dialog.ShowDialog(this) == true
+                    ? dialog.FileName
+                    : null;
+            },
+            createContents: () => SetupFieldDiagnosticFormatter.Format(
+                new SetupFieldDiagnosticContext(
+                    ProductVersion(),
+                    generatedUtc,
+                    Environment.OSVersion.Version.ToString(),
+                    RuntimeInformation.OSArchitecture.ToString(),
+                    _lastCompletedOperationName,
+                    _lastCompletedOperationDuration,
+                    completedOperation,
+                    _recoveryInspection)),
+            write: SetupFieldDiagnosticWriter.Write);
+
+        if (saveResult.State == SetupFieldDiagnosticSaveState.Cancelled)
+        {
+            return;
+        }
+
+        if (saveResult.State == SetupFieldDiagnosticSaveState.Succeeded)
+        {
+            DiagnosticsCopyFeedbackText.Text =
+                "IP·계정·경로·원문을 제외한 익명 진단 TXT를 저장했습니다.";
+            DiagnosticsCopyFeedbackText.Foreground = Brushes.SeaGreen;
+            DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        DiagnosticsCopyFeedbackText.Text =
+            $"저장 실패 · {saveResult.ErrorCode}\n" +
+            "쓰기 가능한 다른 폴더를 선택한 뒤 다시 시도하세요.";
+        DiagnosticsCopyFeedbackText.Foreground = Brushes.Firebrick;
+        DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
     }
 
     private static string ProductVersion()

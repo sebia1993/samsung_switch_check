@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.7 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.8 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.7-poc"
+VERSION = "0.10.8-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -679,9 +679,9 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
-            "원격 Viewer의 고정 IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 동일 PC 사전 테스트라면 '이 PC 주소 넣기'로 실제 사설 IPv4를 사용합니다.",
+            "Agent PC 주소가 아닌 원격 Viewer의 고정 IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 같은 PC 시험이라면 '같은 PC 시험용 주소'로 실제 사설 IPv4를 사용합니다.",
             "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
-            "Viewer가 열리면 Agent PC 주소를 입력합니다. 같은 PC에서 먼저 확인할 때만 '이 PC에서 사전 테스트'를 직접 누릅니다.",
+            "Viewer가 열리면 Agent PC 주소를 입력합니다. 같은 PC에서 먼저 확인할 때만 'Agent와 Viewer가 같은 PC일 때 테스트'를 직접 누릅니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
@@ -748,7 +748,7 @@ Viewer PC                 Agent PC                    Samsung Switch
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
             "SamsungSwitchWatch.Agent.Setup.exe를 실행하고 UAC 관리자 승인을 합니다.",
-            "원격 Viewer PC의 고정 IPv4를 입력합니다. 동일 PC 사전 테스트라면 '이 PC 주소 넣기'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
+            "'허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님'에 원격 Viewer 주소를 입력합니다. 같은 PC 시험이라면 '같은 PC 시험용 주소'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
             "자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
             "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
             "Setup이 중단된 이전 설치 기록을 발견하면 설치/업데이트가 잠깁니다. '이전 상태 복구'를 먼저 누르고 복구 완료를 확인합니다.",
@@ -835,6 +835,16 @@ Viewer PC IPv4 예     : 10.20.30.25
     )
     add_callout(
         doc,
+        "성공·실패 후 익명 진단 저장",
+        "검사, 설치 또는 복구가 끝나면 '익명 진단 저장'으로 SSW_FIELD_DIAGNOSTIC/1 UTF-8 BOM "
+        "TXT를 수동 저장할 수 있습니다. 자동 저장하지 않으며 제품·Windows 버전, 안전한 단계·"
+        "결과·오류·조치 코드와 제한된 소요 시간만 포함합니다. 실제 IP/CIDR, PC·사용자명, 계정, "
+        "인증서 정보, 절대 경로, 방화벽·예외 원문, 명령과 장비 출력은 포함하지 않습니다. "
+        "저장 실패는 DIAGNOSTIC_WRITE_FAILED로 표시됩니다.",
+        "info",
+    )
+    add_callout(
+        doc,
         "네트워크 정책 변경",
         "Viewer PC 주소나 스위치 관리망이 바뀌면 같은 Release의 Agent Setup을 다시 열어 "
         "고정 Viewer IPv4와 자동 검색 또는 직접 추가 관리망을 검토합니다. 직접 입력은 "
@@ -909,8 +919,8 @@ Viewer PC IPv4 예     : 10.20.30.25
         images_dir / "02-agent-connection.png",
         width=2.9,
         title="Agent 연결 창",
-        alt_text="이 PC에서 사전 테스트 결과와 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
-        caption="그림 2. 동일 PC Agent/API 사전 테스트와 원격 연결 설정",
+        alt_text="같은 PC 테스트 결과, 익명 진단 저장과 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
+        caption="그림 2. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
     )
     add_bullets(
         doc,
@@ -927,12 +937,23 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_callout(
         doc,
         "동일 PC에서 먼저 확인",
-        "Agent와 Viewer를 같은 PC에 설치했다면 Viewer의 '이 PC에서 사전 테스트'를 직접 누릅니다. "
+        "Agent와 Viewer를 같은 PC에 설치했다면 Viewer의 'Agent와 Viewer가 같은 PC일 때 테스트'를 "
+        "직접 누릅니다. "
         "이 기능은 자동으로 실행되지 않으며 사설 IPv4 후보를 최대 6개, 후보당 7초, 전체 30초 "
         "안에서 확인합니다. 성공은 Agent 서비스, TCP/18443, HTTPS, Agent API와 같은 버전만 "
         "뜻합니다. 스위치 자격 증명과 명령은 사용하지 않으며, 장비는 저장 후 '장비 관리 → 접속 시험'에서 "
         "별도로 확인합니다. 실제 원격 배치 전에는 Agent Setup에 원격 Viewer 고정 IPv4를 다시 "
         "적용하고 원격 Viewer PC에서 연결 진단을 반복하세요.",
+        "info",
+    )
+    add_callout(
+        doc,
+        "Agent 연결 익명 진단",
+        "일반 연결과 같은 PC 테스트가 성공 또는 실패로 끝나면 '익명 진단 저장'을 사용할 수 "
+        "있습니다. 주소·DNS·TCP/18443·HTTPS·Identity 단계 상태와 제한된 소요 시간, 후보 수와 "
+        "확인된 Agent/API 버전만 기록하며 입력 주소, DNS 이름, PC·사용자명, 계정, 경로, 예외 "
+        "원문과 장비 명령·출력은 제외합니다. 연결 성공 뒤 창은 저장 결과를 보여 주며, 필요하면 "
+        "진단을 저장한 다음 닫습니다.",
         "info",
     )
     add_heading(
@@ -1296,7 +1317,7 @@ Viewer PC IPv4 예     : 10.20.30.25
             ),
             (
                 "동일 PC 시험",
-                "이 PC에서 사전 테스트는 Agent/API까지만 확인합니다. 스위치와 원격 Viewer 경로는 별도 확인합니다.",
+            "Agent와 Viewer가 같은 PC일 때 테스트는 Agent/API까지만 확인합니다. 스위치와 원격 Viewer 경로는 별도 확인합니다.",
             ),
         ],
         [1900, 7460],
@@ -1307,7 +1328,7 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_callout(
         doc,
         "공유 전 확인",
-        "진단 JSON에는 원문이 없어야 합니다. 실제 회사 IP, 계정명, 비밀번호, 장비 출력이 보이면 공유하지 마세요.",
+        "익명 진단 TXT에는 원문이 없어야 합니다. 실제 회사 IP, 계정명, 비밀번호, 장비 출력이 보이면 공유하지 마세요.",
         "warning",
     )
     add_heading(

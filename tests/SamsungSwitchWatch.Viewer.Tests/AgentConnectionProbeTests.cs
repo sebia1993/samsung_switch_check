@@ -27,6 +27,16 @@ public sealed class AgentConnectionProbeTests
 
         Assert.True(result.Succeeded);
         Assert.NotNull(result.Identity);
+        Assert.Equal(
+            Enum.GetValues<AgentConnectionProbeStage>(),
+            result.StageSnapshots.Select(item => item.Stage));
+        Assert.All(
+            result.StageSnapshots,
+            item =>
+            {
+                Assert.Equal(AgentConnectionProbeState.Succeeded, item.State);
+                Assert.InRange(item.DurationMs, 0, AgentConnectionProbeTimingProgress.MaximumDurationMs);
+            });
         Assert.True(settings.TryGetAgentTrustPin(out var pin));
         Assert.Equal(new string('A', 64), pin);
         Assert.Equal(
@@ -64,6 +74,17 @@ public sealed class AgentConnectionProbeTests
         Assert.Equal("AGENT_DNS_FAILED", result.ErrorCode);
         Assert.Equal(0, network.ConnectCalls);
         Assert.Equal(0, identity.Calls);
+        Assert.Equal(
+            AgentConnectionProbeState.Failed,
+            Assert.Single(
+                result.StageSnapshots,
+                item => item.Stage == AgentConnectionProbeStage.Dns).State);
+        Assert.All(
+            result.StageSnapshots.Where(item =>
+                item.Stage is AgentConnectionProbeStage.Tcp
+                    or AgentConnectionProbeStage.Https
+                    or AgentConnectionProbeStage.Identity),
+            item => Assert.Equal(AgentConnectionProbeState.Pending, item.State));
     }
 
     [Fact]
@@ -178,6 +199,9 @@ public sealed class AgentConnectionProbeTests
         Assert.False(result.Succeeded);
         Assert.Equal(AgentConnectionProbeStage.Identity, result.FailedStage);
         Assert.Equal("AGENT_VERSION_MISMATCH", result.ErrorCode);
+        Assert.NotNull(result.Identity);
+        Assert.Equal("0.9.23-poc", result.Identity.ProductVersion);
+        Assert.Equal(4, result.Identity.ApiVersion);
         Assert.Contains("0.9.23-poc", result.Detail, StringComparison.Ordinal);
         Assert.Contains("0.10.0-poc", result.Detail, StringComparison.Ordinal);
     }
