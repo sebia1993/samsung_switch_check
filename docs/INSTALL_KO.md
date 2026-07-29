@@ -2,21 +2,21 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.5-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.6-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.5-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.5-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.6-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.6-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.5-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.6-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
-Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.5-poc` Agent ZIP의 Setup을
+Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.6-poc` Agent ZIP의 Setup을
 다시 실행하십시오.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
@@ -59,7 +59,8 @@ Viewer에는 고정 주소를 사용하고, Agent PC에서 해당 관리망까�
 1. Agent ZIP을 Agent PC의 로컬 임시 폴더에 압축 해제합니다.
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행합니다.
 3. Windows UAC에서 관리자 권한을 승인합니다.
-4. Viewer PC의 고정 IPv4를 입력합니다.
+4. 원격 Viewer PC의 고정 IPv4를 입력합니다. Agent와 Viewer를 같은 PC에서 먼저 시험할
+   때만 `이 PC 주소 넣기`를 눌러 표시된 실제 사설 IPv4를 사용합니다.
 5. 자동 검색된 목록에서 스위치 관리망을 선택합니다. 목록에 없으면 승인된 관리망을
    `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`를 눌러 입력값과 현재 서비스·포트·방화벽 상태를 확인합니다.
@@ -189,8 +190,27 @@ Viewer 데이터는 `%LOCALAPPDATA%\SamsungSwitchWatch`에 저장됩니다.
 2. Agent를 설치한 PC의 IPv4 또는 사내 DNS 이름을 입력합니다.
 3. `연결` 또는 `진단`을 실행합니다.
 
-스위치 IP, Viewer PC 주소 또는 `localhost`를 입력하지 마십시오. Agent와 Viewer가 서로 다른
-PC이면 실제 Agent PC 주소를 사용합니다. 포트와 경로는 HTTPS/18443으로 자동 정규화됩니다.
+스위치 IP나 Viewer PC 주소를 입력하지 마십시오. Agent와 Viewer가 같은 PC여도 `localhost`,
+`localhost.` 또는 `127.x.x.x`를 사용하지 않고 Agent PC의 실제 사설 IPv4를 사용합니다.
+포트와 경로는 HTTPS/18443으로 자동 정규화됩니다.
+
+### 동일 PC에서 먼저 확인하는 경우
+
+Agent와 Viewer를 한 PC에 함께 설치해 반입 전에 확인할 수 있습니다.
+
+1. Agent Setup에서 `이 PC 주소 넣기`를 눌러 실제 RFC1918 사설 IPv4를 선택합니다.
+2. 검사와 설치/업데이트를 완료합니다.
+3. Viewer의 `Agent 연결`에서 `이 PC에서 사전 테스트`를 직접 누릅니다.
+4. 성공하면 찾은 Agent 주소를 저장합니다.
+
+이 테스트는 자동으로 시작되지 않습니다. 사설 IPv4 후보를 최대 6개, 후보당 최대 7초,
+전체 최대 30초 동안만 확인하며 Agent 서비스, TCP/18443, HTTPS, Agent API와 동일 버전만
+검증합니다. 스위치 자격 증명을 읽거나 명령을 실행하지 않습니다. 스위치 연결은 저장 후
+`장비 관리 → 접속 시험`에서 별도로 확인합니다.
+
+동일 PC 사전 테스트 성공은 원격 Viewer PC에서 Agent PC까지의 라우팅과 `/32` 방화벽을
+증명하지 않습니다. 실제 원격 배치 전에 Agent Setup을 다시 실행하여 실제 원격 Viewer의
+고정 IPv4를 입력하고 설치/업데이트한 뒤, 원격 Viewer에서 연결 진단을 다시 실행하십시오.
 
 연결 진단은 다음 순서로 진행됩니다.
 
@@ -314,14 +334,16 @@ RFC1918 관리망을 `IPv4/prefix`로 직접 추가한 뒤 `검사`를 실행하
 ## 9. 사내 첫 적용 순서
 
 1. Agent PC에서 Setup의 검사와 설치를 완료합니다.
-2. Viewer PC 한 대에서 Agent 연결만 확인합니다.
-3. 영향이 적은 스위치 한 대를 등록합니다.
-4. 접속 시험을 실행합니다.
-5. 부하가 작은 읽기 전용 명령 한 개를 실행합니다.
-6. 결과 수신 뒤 Telnet 세션이 종료되는지 확인합니다.
-7. 짧은 주기로 반복하지 말고 한 대의 주기 감시를 확인합니다.
-8. 소수 장비로 확대하고 오류·세션·장비 부하를 확인합니다.
-9. 검증이 끝난 뒤 전체 대상에 단계적으로 적용합니다.
+2. 필요하면 동일 PC 사전 테스트로 Agent 서비스와 API까지만 확인합니다.
+3. Agent Setup에 실제 원격 Viewer 고정 IPv4를 다시 적용합니다.
+4. 원격 Viewer PC 한 대에서 Agent 연결만 확인합니다.
+5. 영향이 적은 스위치 한 대를 등록합니다.
+6. 접속 시험을 실행합니다.
+7. 부하가 작은 읽기 전용 명령 한 개를 실행합니다.
+8. 결과 수신 뒤 Telnet 세션이 종료되는지 확인합니다.
+9. 짧은 주기로 반복하지 말고 한 대의 주기 감시를 확인합니다.
+10. 소수 장비로 확대하고 오류·세션·장비 부하를 확인합니다.
+11. 검증이 끝난 뒤 전체 대상에 단계적으로 적용합니다.
 
 운영 장비에 설정 변경 명령을 실행하거나 첫 실행부터 모든 장비에 동시에 접속하지 마십시오.
 

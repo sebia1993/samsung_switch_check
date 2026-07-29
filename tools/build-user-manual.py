@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.5 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.6 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.5-poc"
+VERSION = "0.10.6-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -679,9 +679,9 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
-            "고정 Viewer IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 사설 관리망을 직접 추가해 합계 1~2개로 설치합니다.",
+            "원격 Viewer의 고정 IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 동일 PC 사전 테스트라면 '이 PC 주소 넣기'로 실제 사설 IPv4를 사용합니다.",
             "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
-            "Viewer가 열리면 Agent를 설치한 원격 PC의 주소만 입력합니다. HTTPS/18443은 자동입니다.",
+            "Viewer가 열리면 Agent PC 주소를 입력합니다. 같은 PC에서 먼저 확인할 때만 '이 PC에서 사전 테스트'를 직접 누릅니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
@@ -748,7 +748,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
             "SamsungSwitchWatch.Agent.Setup.exe를 실행하고 UAC 관리자 승인을 합니다.",
-            "고정 Viewer PC IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
+            "원격 Viewer PC의 고정 IPv4를 입력합니다. 동일 PC 사전 테스트라면 '이 PC 주소 넣기'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
+            "자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
             "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
             "검사를 실행한 뒤 설치/업데이트를 누르고 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
@@ -758,8 +759,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         images_dir / "00-agent-setup.png",
         width=4.5,
         title="Agent Setup 화면",
-        alt_text="고정 Viewer IPv4, 자동 검색 관리망, 정규화된 직접 추가 관리망을 확인하는 Agent Setup 화면",
-        caption="그림 1. Agent 서비스 설치와 자동·직접 추가 관리망 범위 확인",
+        alt_text="이 PC 주소 넣기, 고정 Viewer IPv4, 자동 검색 관리망과 정규화된 직접 추가 관리망을 확인하는 Agent Setup 화면",
+        caption="그림 1. 동일 PC 주소 도우미와 Agent 서비스 설치 범위 확인",
     )
     add_callout(
         doc,
@@ -827,8 +828,9 @@ Viewer PC IPv4 예     : 10.20.30.25
         "정확하지 않다는 뜻입니다. Setup은 실제 주소 대신 안전한 불일치 코드를 표시하고 "
         "설치 전 상태로 복구합니다. 규칙을 Any, LocalSubnet 또는 넓은 대역으로 수동 확대하지 "
         "마세요. "
-        "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP, Viewer PC 주소 또는 "
-        "localhost가 아니라 Agent를 설치한 PC 주소를 입력했는지 먼저 확인하세요. 그 다음 "
+        "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP나 localhost가 아니라 "
+        "Agent를 설치한 PC의 실제 주소를 입력했는지 먼저 확인하세요. 동일 PC 사전 테스트도 "
+        "localhost 대신 이 PC의 실제 RFC1918 사설 IPv4를 사용합니다. 그 다음 "
         "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
         "AGENT_CLIENT_NOT_ALLOWED이면 현재 Viewer PC의 고정 IPv4를 Agent Setup에 다시 "
         "입력하고 설치/업데이트합니다. "
@@ -883,20 +885,33 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_image(
         doc,
         images_dir / "02-agent-connection.png",
-        width=2.4,
+        width=2.9,
         title="Agent 연결 창",
-        alt_text="Agent 주소만 입력하고 HTTPS 포트 18443을 자동 사용하는 연결 설정 창",
-        caption="그림 2. Agent 주소만 입력하는 연결 설정",
+        alt_text="이 PC에서 사전 테스트 결과와 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
+        caption="그림 2. 동일 PC Agent/API 사전 테스트와 원격 연결 설정",
     )
     add_bullets(
         doc,
         [
-            "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다. 스위치 IP, Viewer PC 주소와 "
-            "localhost는 두 프로그램이 같은 PC가 아닌 한 입력하지 않습니다.",
+            "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다. 스위치 IP나 Viewer PC 주소를 "
+            "입력하지 않습니다.",
+            "Agent와 Viewer가 같은 PC여도 localhost, localhost. 또는 127.x.x.x를 사용하지 않고 실제 "
+            "RFC1918 사설 IPv4를 사용합니다.",
             "https://, 포트, 인증서 지문과 페어링 토큰은 입력하지 않습니다. 정상 Agent 교체나 재설치가 "
             "확실할 때만 '이 Agent로 다시 연결'을 사용합니다.",
         ],
         bullet_num_id,
+    )
+    add_callout(
+        doc,
+        "동일 PC에서 먼저 확인",
+        "Agent와 Viewer를 같은 PC에 설치했다면 Viewer의 '이 PC에서 사전 테스트'를 직접 누릅니다. "
+        "이 기능은 자동으로 실행되지 않으며 사설 IPv4 후보를 최대 6개, 후보당 7초, 전체 30초 "
+        "안에서 확인합니다. 성공은 Agent 서비스, TCP/18443, HTTPS, Agent API와 같은 버전만 "
+        "뜻합니다. 스위치 자격 증명과 명령은 사용하지 않으며, 장비는 저장 후 '장비 관리 → 접속 시험'에서 "
+        "별도로 확인합니다. 실제 원격 배치 전에는 Agent Setup에 원격 Viewer 고정 IPv4를 다시 "
+        "적용하고 원격 Viewer PC에서 연결 진단을 반복하세요.",
+        "info",
     )
     add_heading(doc, "장비와 계정 등록", 1, heading_num_id)
     add_image(
@@ -1232,7 +1247,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         [
             (
                 "Viewer",
-                "Agent 연결에 실제 Agent PC 주소를 입력합니다. 원격 구성에서는 localhost나 스위치 IP를 사용하지 않습니다.",
+                "Agent 연결에 실제 Agent PC 주소를 입력합니다. 동일 PC와 원격 구성 모두 localhost나 스위치 IP를 사용하지 않습니다.",
             ),
             (
                 "Agent PC",
@@ -1241,6 +1256,10 @@ Viewer PC IPv4 예     : 10.20.30.25
             (
                 "Viewer PC",
                 "연결 설정의 주소 → DNS/IPv4 → TCP/18443 → HTTPS → Agent API/버전 단계 중 처음 실패한 항목을 확인합니다.",
+            ),
+            (
+                "동일 PC 시험",
+                "이 PC에서 사전 테스트는 Agent/API까지만 확인합니다. 스위치와 원격 Viewer 경로는 별도 확인합니다.",
             ),
         ],
         [1900, 7460],
@@ -1295,7 +1314,8 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_bullets(
         doc,
         [
-            "Agent 서비스가 창 없이 Running이고 Viewer가 주소만으로 HTTPS 연결되는지 확인",
+            "Agent 서비스가 창 없이 Running이고 Viewer가 실제 사설 IPv4로 HTTPS 연결되는지 확인",
+            "동일 PC 사전 테스트 성공 뒤 원격 Viewer 고정 IPv4를 Setup에 다시 적용하고 원격 PC에서 재검증",
             "계정은 Viewer에만 저장되고 접속 시험 실패 장비의 주기 감시는 꺼지는지 확인",
             "show port status와 syslog 명령이 모델별로 동작하는지 확인",
             "민감 출력 비저장·Viewer 재실행·장애/복구·중복 억제는 모의 검증 후 사내 장비로 확인",

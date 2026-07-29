@@ -5,8 +5,10 @@
 - Current Viewer dashboard: node `33:205`
 - Current device-management dialog: node `37:4`
 - Current device-command dashboard: node `37:333`
-- Current automatic HTTPS Agent connection dialog: node `36:2`
-- Current Agent Setup manual management-network screen: node `46:72`
+- Current HTTPS Agent connection and same-PC preflight dialog: node `52:123`
+- Current Agent Setup same-PC address helper screen: node `54:363`
+- Previous HTTPS Agent connection dialog: node `36:2`
+- Previous Agent Setup manual management-network screen: node `46:72`
 - Agent Setup manual CIDR states: normalized `48:72`, invalid `48:85`, maximum `48:98`
 - Agent Setup firewall verification failure state: node `49:72`
 - Mini window: 400x260 offline/recovery frame, node `14:127`
@@ -53,17 +55,28 @@ accepts one `show` command, shows common commands such as `show port status` and
 `show sylog tail num 100`, displays the returned output, and clearly states
 that the raw output is not saved.
 
-Node `36:2` replaces the historical fingerprint, pairing-token, `SSW1:`
-pairing, and Bearer-token flows. The current dialog contains only the Agent
-address and fixed HTTPS port `18443`; access control belongs to the management
-network and Windows Firewall rules.
+Node `36:2` established the removal of the historical fingerprint,
+pairing-token, `SSW1:` pairing, and Bearer-token flows. Node `52:123` preserves
+that simplified Agent address and fixed HTTPS port `18443`; access control
+belongs to the management network and Windows Firewall rules.
 
-Node `46:72` is the current source of truth for Agent Setup. Automatic RFC1918
-management-network discovery remains the default, while an approved routed
-network that is absent from the list may be added as `IPv4/prefix`. A host
-address is normalized to its canonical network address, public or
-RFC1918-crossing ranges are rejected, and automatic plus manual selections are
-limited to two unique networks.
+Node `52:123` is the current v10 connection source of truth. The operator must
+explicitly press `이 PC에서 사전 테스트`; the Viewer never starts this check
+automatically. It searches only real private IPv4 addresses on the current PC,
+not `localhost` or `127/8`, and separately reports these three scopes:
+
+1. Agent service, TCP/18443, HTTPS, API, and version are reachable.
+2. Switch access has not yet been tested and remains under
+   `장비 관리 → 접속 시험`.
+3. A same-PC success does not prove the route or firewall from the actual
+   remote Viewer PC.
+
+Node `46:72` remains the source of truth for the Agent Setup
+management-network portion. Automatic RFC1918 management-network discovery
+remains the default, while an approved routed network that is absent from the
+list may be added as `IPv4/prefix`. A host address is normalized to its
+canonical network address, public or RFC1918-crossing ranges are rejected, and
+automatic plus manual selections are limited to two unique networks.
 
 The companion state frames show the required feedback: `48:72` for successful
 normalization, `48:85` for invalid or non-private input, and `48:98` when a
@@ -71,6 +84,15 @@ third unique network is attempted. Existing one or two canonical
 `AllowedTargetCidrs` are restored into the same list. If that target list cannot
 be restored safely, Setup shows `SETUP_EXISTING_NETWORKS_NOT_LOADED`, preloads
 no network, and asks the operator to select or add the approved networks again.
+
+Node `54:363` supersedes node `46:72` for the initial Viewer-address step while
+preserving that management-network behavior. `이 PC 주소 넣기` fills a single
+detected private IPv4 immediately or lets the operator select among multiple
+private IPv4 candidates. If no suitable address exists, Setup shows actionable
+feedback instead of inventing a loopback address. Before remote deployment, the
+operator must run Setup again with the actual Viewer PC fixed IPv4 so the Agent
+API and product-owned Windows Firewall rule return to the intended exact `/32`
+scope.
 
 The v8 screen preserves the v7 firewall behavior: another program's inbound
 TCP/18443 Allow rule is shown as a warning and is never changed or removed.

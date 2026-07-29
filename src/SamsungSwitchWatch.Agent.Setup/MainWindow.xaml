@@ -34,11 +34,45 @@
                 <TextBlock Margin="0,4,0,10"
                            Foreground="{StaticResource MutedTextBrush}"
                            Text="이 주소의 Viewer만 Agent 원격 업무 API를 사용할 수 있습니다." />
-                <TextBox x:Name="ViewerIpTextBox"
-                         Height="36"
-                         Padding="10,6"
-                         VerticalContentAlignment="Center"
-                         ToolTip="예: 10.20.30.41" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="ViewerIpTextBox"
+                             Height="36"
+                             Padding="10,6"
+                             VerticalContentAlignment="Center"
+                             ToolTip="예: 10.20.30.41" />
+                    <Button Grid.Column="1"
+                            x:Name="UseThisPcAddressButton"
+                            Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0"
+                            Padding="12,6"
+                            MinHeight="36"
+                            Click="UseThisPcAddressButton_Click"
+                            Content="이 PC 주소 넣기"
+                            ToolTip="Agent와 Viewer를 이 PC에 함께 설치해 사전 테스트할 때 사용합니다." />
+                </Grid>
+                <ComboBox x:Name="ViewerAddressCandidatesComboBox"
+                          Margin="0,8,0,0"
+                          Height="34"
+                          Padding="8,4"
+                          DisplayMemberPath="DisplayText"
+                          SelectionChanged="ViewerAddressCandidatesComboBox_SelectionChanged"
+                          Visibility="Collapsed"
+                          ToolTip="이 PC에서 사용할 사설 IPv4 주소를 선택하세요." />
+                <TextBlock x:Name="ViewerAddressFeedbackText"
+                           Margin="4,6,4,0"
+                           FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           Visibility="Collapsed"
+                           TextWrapping="Wrap" />
+                <TextBlock Margin="4,5,4,0"
+                           FontSize="11"
+                           Foreground="#B45309"
+                           TextWrapping="Wrap"
+                           Text="동일 PC 사전 테스트용입니다. 원격 배치 전 실제 Viewer PC의 고정 IPv4로 바꾸세요." />
             </StackPanel>
         </Border>
 

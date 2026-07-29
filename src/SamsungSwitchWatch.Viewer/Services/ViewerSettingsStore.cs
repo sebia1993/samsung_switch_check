@@ -125,6 +125,9 @@ public sealed class ViewerSettings
 public static class ViewerSettingsSanitizer
 {
     public const int DefaultAgentPort = 18443;
+    public const string LoopbackAgentAddressReason =
+        "localhost 또는 127.0.0.1은 Viewer 연결에 사용할 수 없습니다. "
+        + "'이 PC에서 사전 테스트'를 눌러 이 PC의 실제 사설 IPv4를 찾으세요.";
 
     public static ViewerSettings Sanitize(ViewerSettings? input)
     {
@@ -177,6 +180,11 @@ public static class ViewerSettingsSanitizer
             reason = "Agent를 설치한 PC의 IPv4 주소 또는 DNS 이름만 입력해 주세요.";
             return false;
         }
+        if (IsLoopbackHost(address))
+        {
+            reason = LoopbackAgentAddressReason;
+            return false;
+        }
 
         try
         {
@@ -218,10 +226,18 @@ public static class ViewerSettingsSanitizer
             reason = "Agent 주소를 확인해 주세요.";
             return false;
         }
+        if (IsLoopbackHost(uri.Host))
+        {
+            reason = LoopbackAgentAddressReason;
+            return false;
+        }
 
         reason = string.Empty;
         return true;
     }
+
+    public static bool IsLoopbackAgentUri(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && IsLoopbackHost(uri.Host);
 
     public static string NormalizeAgentUri(string? value)
     {
@@ -261,6 +277,16 @@ public static class ViewerSettingsSanitizer
         }
 
         return Uri.CheckHostName(value) == UriHostNameType.Dns;
+    }
+
+    private static bool IsLoopbackHost(string value)
+    {
+        if (value.TrimEnd('.').Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(value, out var address) && IPAddress.IsLoopback(address);
     }
 
     private static double NormalizeCoordinate(double value) =>

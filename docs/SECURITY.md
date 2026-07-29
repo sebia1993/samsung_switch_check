@@ -127,8 +127,19 @@ Agent는 운영 설정의 `AllowedViewerIpv4`와 실제 TCP 연결의 원격 주
 `403 / AGENT_CLIENT_NOT_ALLOWED`로 거부합니다. `X-Forwarded-For` 같은 전달 헤더는 신뢰하지
 않습니다. 로컬 상태 점검은 `/health/live`와 `/health/ready`에만 허용합니다.
 
+Agent와 Viewer가 같은 PC에 있어도 제품 API에는 `localhost`, `localhost.` 또는
+`127.0.0.0/8`을 허용하지 않습니다. 동일 PC 사전 테스트는 현재 PC의 실제 RFC1918 사설 IPv4를
+사용하며 제품 방화벽 `/32`와 `AllowedViewerIpv4` 검증을 그대로 통과해야 합니다. Setup의 로컬
+설치 확인을 위한 loopback 허용 범위는 `/health/live`와 `/health/ready`에만 유지됩니다.
+
 따라서 제품 소유 `/32` 규칙과 Agent 내부 검증이 함께 접근 경계를 구성합니다. Viewer PC
 주소를 넓은 대역으로 허용하거나 규칙을 수동 확장하지 마십시오.
+
+동일 PC 사전 테스트는 운영자가 Viewer에서 명시적으로 시작할 때만 동작하고, 활성 상태인
+loopback·tunnel 이외 RFC1918 IPv4 후보를 최대 6개로 제한합니다. 후보당 최대 7초, 전체 최대
+30초로 Agent 연결의 주소·TCP/18443·HTTPS·Agent API·버전만 확인합니다. 장비 자격 증명을
+복호화하거나 스위치 접속·명령 실행을 하지 않으므로 이 테스트의 성공을 스위치 검증 또는 원격
+Viewer 방화벽·라우팅 검증으로 해석하면 안 됩니다.
 
 다른 프로그램이 만든 TCP/18443 인바운드 허용 규칙은 Setup이 소유하지 않으므로 삭제,
 비활성화 또는 변경하지 않습니다. 해당 규칙을 발견하면
@@ -238,7 +249,8 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
 `QUERY_COMMAND_BLOCKED`, `QUERY_RATE_LIMITED`, `COMMAND_TIMEOUT`,
 `OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`, `AGENT_CONNECTION_REFUSED`,
-`AGENT_VERSION_MISMATCH`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
+`AGENT_VERSION_MISMATCH`, `LOCAL_PRIVATE_IPV4_NOT_FOUND`,
+`LOCAL_AGENT_PREFLIGHT_TIMEOUT`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
 
 ## 11. 알려진 POC 한계와 배포 금지 조건
 

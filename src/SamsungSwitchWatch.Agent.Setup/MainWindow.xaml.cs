@@ -66,6 +66,79 @@ public partial class MainWindow : Window
     private void RefreshNetworksButton_Click(object sender, RoutedEventArgs e) =>
         RefreshNetworks();
 
+    private void UseThisPcAddressButton_Click(object sender, RoutedEventArgs e)
+    {
+        IReadOnlyList<NetworkCandidate> candidates;
+        try
+        {
+            candidates = _networkDiscovery.DiscoverPrivateIpv4Networks();
+        }
+        catch
+        {
+            HideViewerAddressChoices();
+            ShowViewerAddressFeedback(
+                "이 PC의 네트워크 정보를 읽지 못했습니다. 활성 어댑터를 확인한 뒤 Viewer PC의 고정 사설 IPv4를 직접 입력하세요.",
+                Brushes.Firebrick);
+            return;
+        }
+
+        var suggestion = ViewerAddressSuggestion.Create(candidates);
+        switch (suggestion.Kind)
+        {
+            case ViewerAddressSuggestionKind.None:
+                HideViewerAddressChoices();
+                ShowViewerAddressFeedback(
+                    "사용할 수 있는 사설 IPv4를 찾지 못했습니다. 유선 또는 무선 어댑터 연결을 확인한 뒤 Viewer PC의 고정 사설 IPv4를 직접 입력하세요.",
+                    Brushes.Firebrick);
+                break;
+            case ViewerAddressSuggestionKind.Single:
+                HideViewerAddressChoices();
+                ApplyThisPcViewerAddress(suggestion.Choices[0]);
+                break;
+            case ViewerAddressSuggestionKind.Multiple:
+                ViewerAddressCandidatesComboBox.ItemsSource = suggestion.Choices;
+                ViewerAddressCandidatesComboBox.SelectedIndex = -1;
+                ViewerAddressCandidatesComboBox.Visibility = Visibility.Visible;
+                ShowViewerAddressFeedback(
+                    "사설 IPv4가 여러 개입니다. Viewer 연결에 사용할 어댑터 주소를 아래에서 선택하세요.",
+                    Brushes.DarkGoldenrod);
+                ViewerAddressCandidatesComboBox.Focus();
+                break;
+        }
+    }
+
+    private void ViewerAddressCandidatesComboBox_SelectionChanged(
+        object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (ViewerAddressCandidatesComboBox.SelectedItem is ViewerAddressChoice choice)
+        {
+            ApplyThisPcViewerAddress(choice);
+        }
+    }
+
+    private void ApplyThisPcViewerAddress(ViewerAddressChoice choice)
+    {
+        ViewerIpTextBox.Text = choice.Address;
+        ShowViewerAddressFeedback(
+            $"이 PC 주소 {choice.Address}를 입력했습니다. 동일 PC 사전 테스트 후 원격 배치 전 실제 Viewer PC의 고정 IPv4로 바꾸세요.",
+            Brushes.DarkGoldenrod);
+    }
+
+    private void HideViewerAddressChoices()
+    {
+        ViewerAddressCandidatesComboBox.SelectedIndex = -1;
+        ViewerAddressCandidatesComboBox.ItemsSource = null;
+        ViewerAddressCandidatesComboBox.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowViewerAddressFeedback(string message, Brush brush)
+    {
+        ViewerAddressFeedbackText.Text = message;
+        ViewerAddressFeedbackText.Foreground = brush;
+        ViewerAddressFeedbackText.Visibility = Visibility.Visible;
+    }
+
     private void RefreshNetworks()
     {
         var applyingInitialNetworks = !_initialNetworksApplied;
@@ -455,6 +528,8 @@ public partial class MainWindow : Window
     private void SetBusy(bool busy)
     {
         ViewerIpTextBox.IsEnabled = !busy;
+        UseThisPcAddressButton.IsEnabled = !busy;
+        ViewerAddressCandidatesComboBox.IsEnabled = !busy;
         RefreshNetworksButton.IsEnabled = !busy;
         NetworkItemsControl.IsEnabled = !busy;
         ManualCidrTextBox.IsEnabled = !busy;
