@@ -38,7 +38,8 @@ Agent는 요청마다 새 Telnet 세션을 만들고 성공, 실패 또는 취�
 1. Agent ZIP을 로컬 폴더에 완전히 압축 해제합니다.
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행합니다.
 3. Windows UAC를 한 번 승인합니다.
-4. Viewer PC의 고정 IPv4 한 개를 입력합니다.
+4. 원격 Viewer PC의 고정 IPv4 한 개를 입력합니다. 동일 PC 사전 테스트에서는
+   `이 PC 주소 넣기`로 Agent PC의 실제 RFC1918 사설 IPv4를 선택합니다.
 5. Setup이 찾은 RFC1918 사설 IPv4 관리망을 선택하고, 목록에 없는 승인 관리망은
    `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`로 사전 점검한 뒤 설치 또는 업데이트합니다.
@@ -76,6 +77,11 @@ Domain/Private·Edge Traversal 비활성 조건은 정확히 비교합니다.
 데스크톱 세션과 분리된 서비스이므로 Agent 창이나 트레이 아이콘이 표시되지 않습니다. 로컬
 관리자는 Windows 정책상 서비스를 제어할 수 있습니다.
 
+`이 PC 주소 넣기`는 현재 PC에서 활성 상태인 loopback·tunnel 이외 RFC1918 IPv4를 찾습니다.
+후보가 하나면 바로 입력하고 여러 개이면 운영자가 정확한 주소를 선택하며, 후보가 없거나 검색이
+실패하면 설치를 추측으로 계속하지 않고 안내를 표시합니다. 이 도우미는 방화벽 범위를 넓히지
+않고 선택된 주소 한 개만 기존 `/32` 경계에 적용합니다.
+
 Setup이 다른 프로그램 소유의 TCP/18443 인바운드 허용 규칙을 발견해도 이를 변경하지
 않습니다. 사전 점검에 `FIREWALL_OVERLAP_PROTECTED` 경고를 남기고 설치를 계속하며, Agent의
 Viewer IPv4 검증을 추가 경계로 사용합니다. 방화벽 비활성화, 기본 인바운드 허용, Public
@@ -87,7 +93,8 @@ Viewer ZIP은 설치 프로그램이 없는 포터블 배포물입니다.
 
 1. Viewer ZIP을 항상 사용할 로컬 폴더에 완전히 압축 해제합니다.
 2. `SamsungSwitchWatch.Viewer.exe`를 실행합니다.
-3. Agent PC의 IPv4를 입력하고 연결을 확인합니다.
+3. Agent PC의 IPv4를 입력하고 연결을 확인합니다. 동일 PC 사전 검증은 운영자가
+   `이 PC에서 사전 테스트`를 눌렀을 때만 실행합니다.
 
 Viewer에는 UAC, PowerShell, CMD, 자동 시작 등록과 `Program Files` 설치 단계가 없습니다. 공개
 ZIP에는 PowerShell·CMD 설치 스크립트를 넣지 않으며, 저장소의 유지보수용 스크립트는 source-only
@@ -110,6 +117,17 @@ Viewer는 연결할 때 다음 단계를 순서대로 확인합니다.
 인증서 SHA-256 지문이나 페어링 토큰을 사용자가 입력하는 화면은 없습니다. 단계별 실패는
 `AGENT_CONNECTION_REFUSED`, `AGENT_VERSION_MISMATCH`와 같은 안정적인 오류 코드와 사용자용
 설명으로 표시합니다.
+
+동일 PC 사전 테스트는 `localhost`나 loopback을 우회 경로로 열지 않습니다. Viewer는 활성
+loopback·tunnel 이외 RFC1918 IPv4를 최대 6개로 제한하고, 후보당 7초·전체 30초 안에서 위의
+동일한 5단계 연결 검사를 수행합니다. 첫 성공 후보만 저장 대상으로 제안하며 스위치 자격
+증명이나 Telnet 명령은 전송하지 않습니다. 성공은 Agent 서비스·TCP/18443·HTTPS·Agent API·
+제품 버전만 증명하고, 스위치 접속과 원격 Viewer 경로는 각각 미확인으로 표시합니다.
+
+실제 원격 배치 전에는 Setup의 `AllowedViewerIpv4`와 제품 방화벽 `/32`를 원격 Viewer의 고정
+IPv4로 다시 적용하고, 그 원격 Viewer에서 동일한 연결 진단을 수행해야 합니다. `localhost`,
+`localhost.`와 `127.0.0.0/8`은 기존 설정 마이그레이션 안내를 위해 감지할 수는 있지만 새 연결과
+실제 연결 시도에는 허용하지 않습니다.
 
 ### 장비 접속 시험
 
@@ -200,6 +218,7 @@ Setup이 만드는 대표 운영 설정은 다음과 같습니다. 운영자는 
 `AllowedViewerIpv4`는 Agent API가 실제 TCP 연결의 원격 IPv4와 비교하는 단일 주소입니다.
 운영 모드에서는 RFC1918 사설 IPv4가 반드시 필요합니다. 일치하지 않는 요청은
 `AGENT_CLIENT_NOT_ALLOWED`로 거부되며 전달 헤더는 주소 판정에 사용하지 않습니다.
+동일 PC 사전 테스트도 이 규칙의 예외가 아니며 실제 사설 IPv4가 정확히 일치해야 합니다.
 
 `AllowedTargetCidrs`는 요청마다 Agent가 적용하는 SSRF/Telnet 대상 허용 목록입니다. Setup은
 직접 입력한 `IPv4/prefix`를 canonical 네트워크 주소로 정규화하고, 전체 네트워크가 RFC1918
@@ -329,4 +348,6 @@ Scheduler, 이벤트 DB와 SignalR 수집 흐름은 v0.10 구조에 포함되지
 - 공인망 또는 승인받지 않은 CIDR 허용
 - 관리망을 세 개 이상 허용
 - 지문 또는 페어링 토큰 수동 입력
+- `localhost` 또는 loopback을 이용한 Agent API 연결
+- 자동 실행되는 동일 PC 사전 테스트나 사전 테스트 중 스위치 조회
 - 공개 ZIP에서 PowerShell·CMD 스크립트 실행

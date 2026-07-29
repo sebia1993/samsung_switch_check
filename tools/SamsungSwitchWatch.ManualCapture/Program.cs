@@ -109,8 +109,8 @@ internal static class Program
                            setupDeployment,
                            diagnosticsOnly: false)
                        {
-                           Width = 760,
-                           Height = 700,
+                            Width = 760,
+                            Height = 820,
                            ShowInTaskbar = false,
                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 48,
@@ -118,9 +118,10 @@ internal static class Program
                        }))
             {
                 ShowAndLayout(setupLifetime.Window);
-                var viewerIpInput = (TextBox)setupLifetime.Window.FindName(
-                    "ViewerIpTextBox");
-                viewerIpInput.Text = "10.20.30.25";
+                var useThisPcAddress = (Button)setupLifetime.Window.FindName(
+                    "UseThisPcAddressButton");
+                useThisPcAddress.RaiseEvent(
+                    new RoutedEventArgs(Button.ClickEvent));
                 var manualCidrInput = (TextBox)setupLifetime.Window.FindName(
                     "ManualCidrTextBox");
                 manualCidrInput.Text = "172.20.40.25/24";
@@ -165,7 +166,7 @@ internal static class Program
                 Capture(
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
-                    "자동 검색 관리망과 정규화된 직접 추가 관리망, 외부 TCP 18443 규칙 보존 경고를 함께 보여 주는 Agent Setup 화면");
+                    "이 PC 주소 넣기로 선택한 실제 사설 IPv4, 자동 검색 관리망과 정규화된 직접 추가 관리망을 보여 주는 Agent Setup 화면");
             }
 
             using var dashboardLifetime = new WindowLifetime(
@@ -194,21 +195,35 @@ internal static class Program
             var connectionSettings = ViewerSettingsSanitizer.Copy(settings);
             connectionSettings.DemoMode = false;
             using (var connectionLifetime = new WindowLifetime(
-                       new ConnectionSettingsWindow(connectionSettings, (_, _) => Task.CompletedTask)
+                       new ConnectionSettingsWindow(
+                           connectionSettings,
+                           (_, _) => Task.CompletedTask,
+                           new NeverCalledAgentConnectionProbe(),
+                           new ManualLocalAgentPreflight())
                        {
-                           Width = 620,
-                           Height = 500,
-                           ShowInTaskbar = false,
-                           WindowStartupLocation = WindowStartupLocation.Manual,
+                            Width = 620,
+                            Height = 850,
+                            ShowInTaskbar = false,
+                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 80,
                            Top = 80
                        }))
             {
                 ShowAndLayout(connectionLifetime.Window);
+                var localPreflightButton = (Button)connectionLifetime.Window.FindName(
+                    "LocalPreflightButton");
+                var localPreflightResult = (Border)connectionLifetime.Window.FindName(
+                    "LocalPreflightResultPanel");
+                localPreflightButton.RaiseEvent(
+                    new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(
+                    () => localPreflightResult.Visibility == Visibility.Visible,
+                    TimeSpan.FromSeconds(3));
+                RefreshLayout(connectionLifetime.Window);
                 Capture(
                     connectionLifetime.Window,
                     Path.Combine(outputDirectory, "02-agent-connection.png"),
-                    "Agent 주소만 입력하고 HTTPS 18443을 자동 사용하는 연결 설정 창");
+                    "이 PC의 실제 사설 IPv4로 Agent 서비스, HTTPS 18443, API와 버전을 확인하고 스위치와 원격 경로는 미확인으로 구분하는 연결 설정 창");
             }
 
             using (var deviceLifetime = new WindowLifetime(
@@ -350,6 +365,71 @@ internal static class Program
                 "10.50.0.0/24",
                 "Sanitized management network")
         ];
+    }
+
+    private sealed class NeverCalledAgentConnectionProbe : IAgentConnectionProbe
+    {
+        public Task<AgentConnectionProbeResult> ProbeAsync(
+            ViewerSettings settings,
+            IProgress<AgentConnectionProbeUpdate>? progress,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException(
+                "The deterministic manual capture must use the local preflight fixture.");
+    }
+
+    private sealed class ManualLocalAgentPreflight : ILocalAgentPreflight
+    {
+        public Task<LocalAgentPreflightResult> RunAsync(
+            ViewerSettings baseSettings,
+            IProgress<LocalAgentPreflightUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            const string address = "10.50.0.10";
+            var candidate = ViewerSettingsSanitizer.Copy(baseSettings);
+            candidate.DemoMode = false;
+            candidate.AgentUri = $"https://{address}:18443";
+
+            progress?.Report(new LocalAgentPreflightUpdate(address, 1, 1, null));
+            foreach (var (stage, detail) in new[]
+                     {
+                         (AgentConnectionProbeStage.Address, "HTTPS 포트 18443을 사용합니다."),
+                         (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
+                         (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
+                         (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
+                         (AgentConnectionProbeStage.Identity, "Agent 0.10.6-poc · API v4 확인")
+                     })
+            {
+                progress?.Report(new LocalAgentPreflightUpdate(
+                    address,
+                    1,
+                    1,
+                    new AgentConnectionProbeUpdate(
+                        stage,
+                        AgentConnectionProbeState.Succeeded,
+                        detail)));
+            }
+
+            var identity = new AgentIdentityDto(
+                4,
+                "manual-agent",
+                "manual-instance",
+                new string('A', 64),
+                "https",
+                8,
+                65_536)
+            {
+                ProductVersion = "0.10.6-poc"
+            };
+            var probeResult = AgentConnectionProbeResult.Success(
+                identity,
+                "Agent 0.10.6-poc · API v4 확인");
+            return Task.FromResult(new LocalAgentPreflightResult(
+                true,
+                candidate,
+                probeResult,
+                1));
+        }
     }
 
     private static Dictionary<string, ManagedDeviceProfile> SeedManagedDevices(

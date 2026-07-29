@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v9-firewall-readback-diagnostics-figma-synced",
+  "runId": "ssw-20260729-v10-same-pc-preflight-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -37,10 +37,12 @@
     "manualCidrInvalidV8": "48:85",
     "manualCidrMaximumV8": "48:98",
     "agentSetupFirewallVerificationFailedV9": "49:72",
+    "httpsConnectionSamePcPreflightV10": "52:123",
+    "agentSetupSamePcHelperV10": "54:363",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v9-firewall-readback-diagnostics",
+    "version": "v10-same-pc-preflight",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -79,6 +81,17 @@
       "/health/ready"
     ],
     "additionalAutoFixButton": false
+  },
+  "samePcPreflightFlow": {
+    "automaticExecution": false,
+    "viewerAction": "이 PC에서 사전 테스트",
+    "agentSetupAction": "이 PC 주소 넣기",
+    "loopbackAccepted": false,
+    "privateIpv4Required": true,
+    "agentApiVerified": true,
+    "switchAccessVerified": false,
+    "remoteViewerPathVerified": false,
+    "remoteDeploymentRequiresViewerIpv4Reapply": true
   },
   "operatorFlow": {
     "deviceInputOrder": [

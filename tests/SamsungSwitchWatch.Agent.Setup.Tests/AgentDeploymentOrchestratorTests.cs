@@ -523,12 +523,17 @@ public sealed class AgentDeploymentOrchestratorTests
         using var folder = new TemporaryFolder();
         var fixture = CreateFreshFixture(folder);
         fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
-        using var cancellation = new CancellationTokenSource(
-            TimeSpan.FromMilliseconds(250));
+        using var cancellation = new CancellationTokenSource();
 
-        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+        var deployment = fixture.CreateOrchestrator(ready: true).DeployAsync(
             new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
             cancellation.Token);
+        Assert.True(
+            fixture.Firewall.AppliedRuleCaptured.Wait(TimeSpan.FromSeconds(5)),
+            "Firewall verification retry did not start before the test deadline.");
+        cancellation.Cancel();
+
+        var result = await deployment.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.Cancelled, result.Code);

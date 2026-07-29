@@ -29,6 +29,9 @@ Agent와 Viewer 버전은 달라도 되는 구성이 아닙니다. 반드시 같
 - [ ] Agent ZIP을 로컬 폴더에 완전히 압축 해제함
 - [ ] `SamsungSwitchWatch.Agent.Setup.exe` 실행 시 UAC를 한 번 승인함
 - [ ] Setup에 Viewer PC의 고정 IPv4 한 개만 입력함
+- [ ] 동일 PC 사전 테스트에서는 `이 PC 주소 넣기`가 실제 RFC1918 사설 IPv4만 제안함
+- [ ] 후보가 여러 개이면 운영자가 사용할 인터페이스 주소를 직접 선택함
+- [ ] 후보가 없을 때 주소를 추측하거나 loopback으로 계속하지 않고 안내가 표시됨
 - [ ] Viewer 주소 입력란에는 CIDR, 서브넷 주소 또는 Viewer 대역을 입력하지 않음
 - [ ] Setup이 직접 연결 RFC1918 사설 IPv4 관리망을 표시함
 - [ ] 표시된 후보를 우선 사용하고, 목록에 없는 승인 관리망만 `IPv4/prefix`로 직접 추가함
@@ -106,7 +109,8 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 ## 7. Viewer → Agent 연결 진단
 
 - [ ] Viewer에서 실제 Agent PC의 IPv4만 입력함
-- [ ] 스위치 IP나 Viewer 자신의 IP를 Agent 주소로 입력하지 않음
+- [ ] 원격 구성에서는 스위치 IP나 Viewer 자신의 IP를 Agent 주소로 입력하지 않음
+- [ ] 동일 PC 구성에서도 `localhost`, `localhost.`와 `127.x.x.x`가 거부됨
 - [ ] 입력 형식 단계가 통과함
 - [ ] DNS·IPv4 단계가 통과함
 - [ ] TCP/18443 단계가 통과함
@@ -117,6 +121,21 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 - [ ] 연결 거부 시 Setup의 `검사`로 서비스·listener·방화벽 상태를 구분할 수 있음
 - [ ] `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Agent Setup에 현재 Viewer 고정 IPv4를 다시
       입력하라는 안내가 표시됨
+
+### 동일 PC 사전 테스트
+
+- [ ] Agent와 Viewer를 같은 PC에 설치한 경우에만 `이 PC에서 사전 테스트`를 직접 누름
+- [ ] Viewer를 열거나 연결 창을 여는 것만으로 사전 테스트가 자동 실행되지 않음
+- [ ] 활성 loopback·tunnel 이외 RFC1918 IPv4만 후보가 됨
+- [ ] 후보가 최대 6개, 후보당 최대 7초, 전체 최대 30초로 제한됨
+- [ ] 성공 결과에 Agent/API는 정상, 스위치와 원격 Viewer 경로는 미확인으로 표시됨
+- [ ] 사전 테스트 중 장비 자격 증명 복호화, Telnet 접속 또는 show 명령 실행이 없음
+- [ ] 저장 후 `장비 관리 → 접속 시험`에서 스위치를 별도로 검증함
+- [ ] 실제 원격 배치 전 Agent Setup에 원격 Viewer 고정 IPv4를 다시 적용함
+- [ ] 원격 Viewer PC에서 Agent 연결 진단을 다시 수행함
+
+동일 PC 성공은 Agent 서비스, TCP/18443, HTTPS, API와 버전까지만 증명합니다. 원격 PC 사이의
+방화벽·라우팅이나 스위치 접속을 증명하지 않습니다.
 
 ## 8. Viewer 장비와 자격 증명
 

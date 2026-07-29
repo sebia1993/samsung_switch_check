@@ -82,19 +82,75 @@ public sealed class WpfSmokeTests
                 Assert.Equal("AccessibilityName", AutomationNameBindingPath(window.SelectedDeviceChangesList.ItemContainerStyle));
                 Assert.Equal("Label", AutomationNameBindingPath(window.SelectedDeviceMetricsList.ItemContainerStyle));
                 Assert.Equal("Label", AutomationNameBindingPath(window.EventFilterComboBox.ItemContainerStyle));
+                var localPreflight = new CountingLocalAgentPreflight();
                 var connection = new ConnectionSettingsWindow(
                     new ViewerSettings { DemoMode = false, AgentUri = "https://monitor-pc:18443" },
-                    (_, _) => Task.CompletedTask);
+                    (_, _) => Task.CompletedTask,
+                    new NeverCalledAgentConnectionProbe(),
+                    localPreflight);
                 connection.Show();
                 connection.UpdateLayout();
                 Assert.Equal("monitor-pc", connection.AgentAddressTextBox.Text);
                 Assert.Equal("Agent 주소만 입력하세요", connection.TransportWarningText.Text);
                 Assert.Equal(System.Windows.Visibility.Collapsed, connection.ConnectionProgressPanel.Visibility);
+                Assert.Equal("이 PC에서 사전 테스트", connection.LocalPreflightButton.Content);
+                Assert.Equal(System.Windows.Visibility.Collapsed, connection.LocalPreflightResultPanel.Visibility);
+                Assert.Equal(0, localPreflight.CallCount);
+                Assert.True(connection.LocalPreflightButton.IsVisible);
+                Assert.True(connection.SaveButton.IsVisible);
                 Assert.Contains("TCP/18443", connection.TcpProbeText.Text, StringComparison.Ordinal);
                 Assert.Equal("Viewer 실행 시 트레이로 최소화",
                     connection.StartMinimizedCheckBox.Content);
                 Assert.Same(connection.AgentAddressTextBox, System.Windows.Input.FocusManager.GetFocusedElement(connection));
                 connection.Close();
+                var legacyLoopbackConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings { DemoMode = false, AgentUri = "https://localhost:18443" },
+                    (_, _) => Task.CompletedTask,
+                    new NeverCalledAgentConnectionProbe(),
+                    new CountingLocalAgentPreflight());
+                legacyLoopbackConnection.Show();
+                legacyLoopbackConnection.UpdateLayout();
+                Assert.Contains(
+                    "이 PC에서 사전 테스트",
+                    legacyLoopbackConnection.ValidationText.Text,
+                    StringComparison.Ordinal);
+                legacyLoopbackConnection.AgentAddressTextBox.Text = "10.10.10.20";
+                Assert.Empty(legacyLoopbackConnection.ValidationText.Text);
+                Assert.Equal(
+                    System.Windows.Visibility.Collapsed,
+                    legacyLoopbackConnection.ConnectionProgressPanel.Visibility);
+                Assert.Equal(
+                    System.Windows.Visibility.Collapsed,
+                    legacyLoopbackConnection.LocalPreflightResultPanel.Visibility);
+                legacyLoopbackConnection.Close();
+                var identityMismatchConnection = new ConnectionSettingsWindow(
+                    new ViewerSettings
+                    {
+                        DemoMode = false,
+                        AgentUri = "https://monitor-pc:18443"
+                    },
+                    (_, _) => Task.CompletedTask,
+                    new IdentityMismatchAgentConnectionProbe(),
+                    new CountingLocalAgentPreflight());
+                identityMismatchConnection.Show();
+                identityMismatchConnection.SaveButton.RaiseEvent(
+                    new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+                identityMismatchConnection.UpdateLayout();
+                Assert.Equal(
+                    System.Windows.Visibility.Visible,
+                    identityMismatchConnection.RetrustButton.Visibility);
+
+                identityMismatchConnection.DemoModeCheckBox.IsChecked = true;
+                identityMismatchConnection.UpdateLayout();
+
+                Assert.Equal(
+                    System.Windows.Visibility.Collapsed,
+                    identityMismatchConnection.RetrustButton.Visibility);
+                Assert.Equal(
+                    System.Windows.Visibility.Collapsed,
+                    identityMismatchConnection.ConnectionProgressPanel.Visibility);
+                Assert.Empty(identityMismatchConnection.ValidationText.Text);
+                identityMismatchConnection.Close();
                 var devices = new DeviceManagementWindow(viewModel);
                 devices.Show();
                 devices.UpdateLayout();
@@ -784,5 +840,43 @@ public sealed class WpfSmokeTests
         var setter = Assert.Single(style.Setters.OfType<System.Windows.Setter>(),
             item => item.Property == AutomationProperties.NameProperty);
         return Assert.IsType<System.Windows.Data.Binding>(setter.Value).Path.Path;
+    }
+
+    private sealed class CountingLocalAgentPreflight : ILocalAgentPreflight
+    {
+        public int CallCount { get; private set; }
+
+        public Task<LocalAgentPreflightResult> RunAsync(
+            ViewerSettings baseSettings,
+            IProgress<LocalAgentPreflightUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            CallCount++;
+            throw new InvalidOperationException("The smoke test must not start local preflight automatically.");
+        }
+    }
+
+    private sealed class NeverCalledAgentConnectionProbe : IAgentConnectionProbe
+    {
+        public Task<AgentConnectionProbeResult> ProbeAsync(
+            ViewerSettings settings,
+            IProgress<AgentConnectionProbeUpdate>? progress,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The smoke test must not probe automatically.");
+    }
+
+    private sealed class IdentityMismatchAgentConnectionProbe : IAgentConnectionProbe
+    {
+        public Task<AgentConnectionProbeResult> ProbeAsync(
+            ViewerSettings settings,
+            IProgress<AgentConnectionProbeUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(AgentConnectionProbeResult.Failure(
+                AgentConnectionProbeStage.Https,
+                "AGENT_IDENTITY_CHANGED",
+                ViewerConnectionMessages.ForCode("AGENT_IDENTITY_CHANGED")));
+        }
     }
 }

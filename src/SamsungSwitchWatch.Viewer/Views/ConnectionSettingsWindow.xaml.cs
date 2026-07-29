@@ -11,13 +11,18 @@ public partial class ConnectionSettingsWindow : Window
     private readonly ViewerSettings _original;
     private readonly Func<ViewerSettings, CancellationToken, Task> _applySettingsAsync;
     private readonly IAgentConnectionProbe _connectionProbe;
+    private readonly ILocalAgentPreflight _localAgentPreflight;
     private readonly CancellationTokenSource _lifetime = new();
     private ViewerSettings? _identityMismatchCandidate;
+    private ViewerSettings? _localPreflightCandidate;
+    private bool _settingDiscoveredAddress;
+    private bool _addressTextInitialized;
+    private bool _localPreflightRunning;
 
     public ConnectionSettingsWindow(
         ViewerSettings settings,
         Func<ViewerSettings, CancellationToken, Task> applySettingsAsync)
-        : this(settings, applySettingsAsync, new AgentConnectionProbe())
+        : this(settings, applySettingsAsync, new AgentConnectionProbe(), null)
     {
     }
 
@@ -25,15 +30,33 @@ public partial class ConnectionSettingsWindow : Window
         ViewerSettings settings,
         Func<ViewerSettings, CancellationToken, Task> applySettingsAsync,
         IAgentConnectionProbe connectionProbe)
+        : this(settings, applySettingsAsync, connectionProbe, null)
+    {
+    }
+
+    internal ConnectionSettingsWindow(
+        ViewerSettings settings,
+        Func<ViewerSettings, CancellationToken, Task> applySettingsAsync,
+        IAgentConnectionProbe connectionProbe,
+        ILocalAgentPreflight? localAgentPreflight)
     {
         InitializeComponent();
         _original = ViewerSettingsSanitizer.Copy(settings);
         _applySettingsAsync = applySettingsAsync;
         _connectionProbe = connectionProbe ?? throw new ArgumentNullException(nameof(connectionProbe));
+        _localAgentPreflight = localAgentPreflight
+                               ?? new LocalAgentPreflight(
+                                   new SystemLocalIpv4Discovery(),
+                                   _connectionProbe);
         DemoModeCheckBox.IsChecked = settings.DemoMode;
         ViewerSettingsSanitizer.SplitAgentUri(settings.AgentUri, out var address, out var port);
         AgentAddressTextBox.Text = address;
+        _addressTextInitialized = true;
         StartMinimizedCheckBox.IsChecked = settings.StartMinimizedToTray;
+        if (ViewerSettingsSanitizer.IsLoopbackAgentUri(settings.AgentUri))
+        {
+            ValidationText.Text = ViewerSettingsSanitizer.LoopbackAgentAddressReason;
+        }
         Loaded += (_, _) =>
         {
             FitToWorkingArea();
@@ -57,8 +80,10 @@ public partial class ConnectionSettingsWindow : Window
         UpdateLiveControls();
         if (DemoModeCheckBox.IsChecked == true)
         {
+            ResetProbeSteps();
             ConnectionProgressPanel.Visibility = Visibility.Collapsed;
-            ValidationText.Text = string.Empty;
+            LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
+            _localPreflightCandidate = null;
         }
     }
 
@@ -66,14 +91,17 @@ public partial class ConnectionSettingsWindow : Window
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
+        ValidationText.Foreground = MediaBrushes.Firebrick;
         ValidationText.Text = string.Empty;
-        var candidate = ViewerSettingsSanitizer.Copy(_original);
-        candidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
 
         if (DemoModeCheckBox.IsChecked == true)
         {
-            candidate.DemoMode = true;
-            await ApplyAndCloseAsync(ViewerSettingsSanitizer.Sanitize(candidate), probeConnection: false);
+            var demoCandidate = ViewerSettingsSanitizer.Copy(_original);
+            demoCandidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
+            demoCandidate.DemoMode = true;
+            await ApplyAndCloseAsync(
+                ViewerSettingsSanitizer.Sanitize(demoCandidate),
+                probeConnection: false);
             return;
         }
 
@@ -87,6 +115,15 @@ public partial class ConnectionSettingsWindow : Window
             return;
         }
 
+        var usePreflightCandidate =
+            _localPreflightCandidate is not null
+            && string.Equals(
+                ViewerSettingsSanitizer.NormalizeAgentUri(_localPreflightCandidate.AgentUri),
+                agentUri,
+                StringComparison.OrdinalIgnoreCase);
+        var candidate = ViewerSettingsSanitizer.Copy(
+            usePreflightCandidate ? _localPreflightCandidate! : _original);
+        candidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
         candidate.DemoMode = false;
         candidate.AgentUri = agentUri;
         var clean = ViewerSettingsSanitizer.Sanitize(candidate);
@@ -96,7 +133,127 @@ public partial class ConnectionSettingsWindow : Window
             return;
         }
 
-        await ApplyAndCloseAsync(clean, probeConnection: true);
+        if (usePreflightCandidate)
+        {
+            ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
+            ValidationText.Text = "사전 테스트를 통과한 Agent 연결을 저장하고 있습니다.";
+        }
+        await ApplyAndCloseAsync(clean, probeConnection: !usePreflightCandidate);
+    }
+
+    private async void LocalPreflight_Click(object sender, RoutedEventArgs e)
+    {
+        ValidationText.Foreground = MediaBrushes.Firebrick;
+        ValidationText.Text = string.Empty;
+        LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
+        _localPreflightCandidate = null;
+        ResetProbeSteps();
+        ConnectionProgressPanel.Visibility = Visibility.Visible;
+        ConnectionProgressTitleText.Text = "이 PC의 사설 IPv4를 확인하고 있습니다.";
+        _localPreflightRunning = true;
+        SetBusy(true);
+        try
+        {
+            var candidate = ViewerSettingsSanitizer.Copy(_original);
+            candidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
+            candidate.DemoMode = false;
+            var progress = new Progress<LocalAgentPreflightUpdate>(UpdateLocalPreflight);
+            var result = await _localAgentPreflight.RunAsync(
+                candidate,
+                progress,
+                _lifetime.Token);
+            if (!result.Succeeded || result.SuccessfulSettings is null)
+            {
+                ValidationText.Foreground = MediaBrushes.Firebrick;
+                var attempted = result.CandidateCount == 0
+                    ? string.Empty
+                    : $"사설 IPv4 {result.CandidateCount}개 확인 · ";
+                ValidationText.Text =
+                    $"{attempted}{ProbeStageTitle(result.ProbeResult.FailedStage)} 단계 실패 · "
+                    + $"{result.ProbeResult.Detail} ({result.ProbeResult.ErrorCode})";
+                return;
+            }
+
+            _localPreflightCandidate = ViewerSettingsSanitizer.Copy(result.SuccessfulSettings);
+            ViewerSettingsSanitizer.SplitAgentUri(
+                _localPreflightCandidate.AgentUri,
+                out var address,
+                out _);
+            _settingDiscoveredAddress = true;
+            try
+            {
+                AgentAddressTextBox.Text = address;
+            }
+            finally
+            {
+                _settingDiscoveredAddress = false;
+            }
+
+            LocalAgentApiStatusText.Text =
+                $"✓ Agent 실행 및 API 연결: 정상 ({address})";
+            LocalPreflightResultPanel.Visibility = Visibility.Visible;
+            ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
+            ValidationText.Text =
+                "동일 PC 사전 테스트를 통과했습니다. '연결 확인 및 저장'을 눌러 적용하세요.";
+        }
+        catch (OperationCanceledException)
+        {
+            // Closing the dialog cancels the bounded local preflight.
+        }
+        catch
+        {
+            ValidationText.Foreground = MediaBrushes.Firebrick;
+            ValidationText.Text =
+                "이 PC 사전 테스트를 완료하지 못했습니다. 네트워크 어댑터와 Agent 서비스를 확인해 주세요. "
+                + "(LOCAL_AGENT_PREFLIGHT_FAILED)";
+        }
+        finally
+        {
+            _localPreflightRunning = false;
+            if (IsVisible) SetBusy(false);
+        }
+    }
+
+    private void AgentAddress_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (_settingDiscoveredAddress || !_addressTextInitialized)
+        {
+            return;
+        }
+
+        _localPreflightCandidate = null;
+        _identityMismatchCandidate = null;
+        RetrustButton.Visibility = Visibility.Collapsed;
+        ConnectionProgressPanel.Visibility = Visibility.Collapsed;
+        LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
+        ValidationText.Text = string.Empty;
+    }
+
+    private void UpdateLocalPreflight(LocalAgentPreflightUpdate update)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            if (!Dispatcher.HasShutdownStarted && !_lifetime.IsCancellationRequested)
+            {
+                _ = Dispatcher.BeginInvoke(() => UpdateLocalPreflight(update));
+            }
+            return;
+        }
+        if (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (update.ProbeUpdate is null)
+        {
+            ResetProbeSteps();
+            ConnectionProgressPanel.Visibility = Visibility.Visible;
+            ConnectionProgressTitleText.Text =
+                $"이 PC 주소 {update.CandidateNumber}/{update.CandidateCount} · {update.CandidateAddress}";
+            return;
+        }
+
+        UpdateProbeStep(update.ProbeUpdate);
     }
 
     private async Task ApplyAndCloseAsync(ViewerSettings settings, bool probeConnection)
@@ -161,7 +318,10 @@ public partial class ConnectionSettingsWindow : Window
         DemoModeCheckBox.IsEnabled = !busy;
         StartMinimizedCheckBox.IsEnabled = !busy;
         RetrustButton.IsEnabled = !busy;
+        LocalPreflightButton.IsEnabled = !busy;
         SaveButton.Content = busy ? "연결 확인 중…" : "연결 확인 및 저장";
+        LocalPreflightButton.Content =
+            busy && _localPreflightRunning ? "이 PC 확인 중…" : "이 PC에서 사전 테스트";
     }
 
     private async void Retrust_Click(object sender, RoutedEventArgs e)
@@ -202,6 +362,7 @@ public partial class ConnectionSettingsWindow : Window
     {
         RetrustButton.Visibility = Visibility.Collapsed;
         _identityMismatchCandidate = null;
+        ConnectionProgressTitleText.Text = "연결 확인 단계";
         SetProbeText(AddressProbeText, "○", "1. 주소 형식", string.Empty, MediaBrushes.SlateGray);
         SetProbeText(DnsProbeText, "○", "2. DNS 또는 IPv4", string.Empty, MediaBrushes.SlateGray);
         SetProbeText(TcpProbeText, "○", "3. TCP/18443", string.Empty, MediaBrushes.SlateGray);
