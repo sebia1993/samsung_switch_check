@@ -10,6 +10,7 @@ public static class AgentErrorCodes
     public const string ConfigurationInvalid = "CONFIG_INVALID";
     public const string RequestInvalid = "REQUEST_INVALID";
     public const string RequestTooLarge = "REQUEST_TOO_LARGE";
+    public const string ClientNotAllowed = "AGENT_CLIENT_NOT_ALLOWED";
     public const string TargetNotAllowed = "TARGET_NOT_ALLOWED";
     public const string AgentBusy = "AGENT_BUSY";
     public const string TlsIdentityInvalid = "TLS_IDENTITY_INVALID";

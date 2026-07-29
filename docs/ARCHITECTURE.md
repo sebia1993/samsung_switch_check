@@ -53,6 +53,7 @@ Setup은 사용자가 CIDR을 계산하거나 직접 입력하게 하지 않습�
 - `SamsungSwitchWatchAgent` 무창 Windows 서비스 설치와 자동 시작 구성
 - `NT SERVICE\SamsungSwitchWatchAgent` 서비스 SID와 제한된 서비스 ACL 적용
 - Viewer 고정 IPv4를 정확한 `/32`로 허용하는 HTTPS/18443 방화벽 규칙 적용
+- 같은 Viewer IPv4를 Agent 설정에 저장하고 모든 API 요청에서 재검증
 - Agent HTTPS 신원과 기존 유효 설정 보존
 - 로컬 `/health/ready` 점검 후 완료 처리
 - 실패 시 프로그램, 서비스와 방화벽 상태 rollback 시도
@@ -60,6 +61,11 @@ Setup은 사용자가 CIDR을 계산하거나 직접 입력하게 하지 않습�
 관리자 권한은 Setup 실행과 시스템 설정 변경에만 필요합니다. 설치 후 Agent는 일반 사용자의
 데스크톱 세션과 분리된 서비스이므로 Agent 창이나 트레이 아이콘이 표시되지 않습니다. 로컬
 관리자는 Windows 정책상 서비스를 제어할 수 있습니다.
+
+Setup이 다른 프로그램 소유의 TCP/18443 인바운드 허용 규칙을 발견해도 이를 변경하지
+않습니다. 사전 점검에 `FIREWALL_OVERLAP_PROTECTED` 경고를 남기고 설치를 계속하며, Agent의
+Viewer IPv4 검증을 추가 경계로 사용합니다. 방화벽 비활성화, 기본 인바운드 허용, Public
+프로필만 활성, 로컬 규칙 병합 차단 또는 제품 규칙 이름 충돌은 계속 설치를 차단합니다.
 
 ### Viewer PC
 
@@ -158,6 +164,7 @@ Setup이 만드는 대표 운영 설정은 다음과 같습니다. 사용자는 
     "ListenUrl": "https://0.0.0.0:18443",
     "DataDirectory": "C:\\ProgramData\\SamsungSwitchWatch",
     "MockMode": false,
+    "AllowedViewerIpv4": "10.20.30.41",
     "AllowedTargetCidrs": [
       "10.40.0.0/16"
     ],
@@ -176,6 +183,10 @@ Setup이 만드는 대표 운영 설정은 다음과 같습니다. 사용자는 
 }
 ```
 
+`AllowedViewerIpv4`는 Agent API가 실제 TCP 연결의 원격 IPv4와 비교하는 단일 주소입니다.
+운영 모드에서는 RFC1918 사설 IPv4가 반드시 필요합니다. 일치하지 않는 요청은
+`AGENT_CLIENT_NOT_ALLOWED`로 거부되며 전달 헤더는 주소 판정에 사용하지 않습니다.
+
 `AllowedTargetCidrs`는 요청마다 Agent가 적용하는 SSRF/Telnet 대상 허용 목록입니다. Agent는
 canonical dotted IPv4와 고정 TCP/23만 허용하며 DNS 이름, IPv6, loopback, link-local,
 multicast와 선택 범위 밖 주소를 거부합니다.
@@ -191,6 +202,8 @@ multicast와 선택 범위 밖 주소를 거부합니다.
   - 프로세스 생존 상태
 - `GET /health/ready`
   - HTTPS 신원과 실행기 초기화 완료 상태
+  - Setup의 로컬 설치 후 검증에 필요한 상태, API 버전, 프로토콜과 제품 버전을 반환
+  - 운영 모드에서 loopback `/api/v4/identity`를 열지 않고 이 응답만 16KiB 한도로 검증
 
 ### 접속 시험
 

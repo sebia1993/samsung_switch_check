@@ -6,6 +6,12 @@ namespace SamsungSwitchWatch.Agent.Setup.Infrastructure;
 
 public sealed class WindowsFirewallManager : IFirewallManager
 {
+    internal const string LegacyPowerShellHttpsFriendlyName =
+        "Samsung Switch Watch Agent HTTPS";
+    internal const string LegacyPowerShellGroup = "Samsung Switch Watch";
+    internal const string FirewallOverlapWarningCode =
+        "FIREWALL_OVERLAP_PROTECTED";
+
     private const int NetFwProfileDomain = 1;
     private const int NetFwProfilePrivate = 2;
     private const int NetFwRuleDirectionIn = 1;
@@ -53,7 +59,12 @@ public sealed class WindowsFirewallManager : IFirewallManager
                         (int)rule.Profiles,
                         (string?)rule.InterfaceTypes ?? "All",
                         (bool)rule.EdgeTraversal,
-                        (string?)rule.Grouping ?? string.Empty);
+                        (string?)rule.Grouping ?? string.Empty)
+                    {
+                        ApplicationName = (string?)rule.ApplicationName ??
+                                          string.Empty,
+                        ServiceName = (string?)rule.ServiceName ?? string.Empty
+                    };
                 }
                 finally
                 {
@@ -228,6 +239,14 @@ public sealed class WindowsFirewallManager : IFirewallManager
             {
                 rule.Grouping = snapshot.Grouping;
             }
+            if (!string.IsNullOrWhiteSpace(snapshot.ApplicationName))
+            {
+                rule.ApplicationName = snapshot.ApplicationName;
+            }
+            if (!string.IsNullOrWhiteSpace(snapshot.ServiceName))
+            {
+                rule.ServiceName = snapshot.ServiceName;
+            }
             rules.Add(rule);
         }
         catch (Exception exception)
@@ -265,35 +284,24 @@ public sealed class WindowsFirewallManager : IFirewallManager
                !snapshot.EdgeTraversal;
     }
 
-    public void AssertSecurityGate(int port, string agentExecutablePath)
+    public FirewallSecurityAssessment AssertSecurityGate(
+        int port,
+        string agentExecutablePath)
     {
         EnsureWindows();
         object? policyObject = null;
         object? rulesObject = null;
         try
         {
-            if (!WindowsServiceManager.IsServiceRunningReadOnly("MpsSvc"))
-            {
-                throw new SetupException(
-                    SetupErrorCodes.FirewallFailed,
-                    "Windows 방화벽 서비스가 실행 중이 아니어서 Agent를 안전하게 열 수 없습니다.");
-            }
-
+            var firewallServiceRunning =
+                WindowsServiceManager.IsServiceRunningReadOnly("MpsSvc");
             policyObject = CreateComObject("HNetCfg.FwPolicy2");
             dynamic policy = policyObject;
             var activeProfiles = (int)policy.CurrentProfileTypes;
-            var supportedProfiles =
-                activeProfiles & (NetFwProfileDomain | NetFwProfilePrivate);
-            if (supportedProfiles == 0)
-            {
-                throw new SetupException(
-                    SetupErrorCodes.FirewallFailed,
-                    "활성 네트워크가 Domain 또는 Private 프로필이 아닙니다.");
-            }
-
             var evaluatedProfiles =
                 activeProfiles &
                 (NetFwProfileDomain | NetFwProfilePrivate | NetFwProfilePublic);
+            var profileStates = new List<FirewallProfileSecurityState>();
             foreach (var profile in new[]
                      {
                          NetFwProfileDomain,
@@ -306,23 +314,20 @@ public sealed class WindowsFirewallManager : IFirewallManager
                     continue;
                 }
 
-                if (!(bool)policy.FirewallEnabled[profile] ||
-                    (int)policy.DefaultInboundAction[profile] != NetFwActionBlock)
-                {
-                    throw new SetupException(
-                        SetupErrorCodes.FirewallFailed,
-                        "활성 네트워크의 Windows 방화벽 또는 기본 인바운드 차단 정책이 비활성화되어 있습니다.");
-                }
-
-                if (profile != NetFwProfilePublic &&
-                    !AllowsLocalFirewallRules(profile))
-                {
-                    throw new SetupException(
-                        SetupErrorCodes.FirewallFailed,
-                        "그룹 정책이 로컬 방화벽 규칙 병합을 차단하고 있어 Viewer 전용 규칙을 보장할 수 없습니다.");
-                }
+                profileStates.Add(new FirewallProfileSecurityState(
+                    profile,
+                    (bool)policy.FirewallEnabled[profile],
+                    (int)policy.DefaultInboundAction[profile],
+                    profile == NetFwProfilePublic ||
+                    AllowsLocalFirewallRules(profile)));
             }
 
+            AssertPolicySecurityGate(
+                firewallServiceRunning,
+                activeProfiles,
+                profileStates);
+
+            var externalOverlapCount = 0;
             rulesObject = policy.Rules;
             dynamic rules = rulesObject;
             foreach (var item in rules)
@@ -331,51 +336,45 @@ public sealed class WindowsFirewallManager : IFirewallManager
                 try
                 {
                     dynamic rule = ruleObject;
-                    if (!(bool)rule.Enabled ||
-                        (int)rule.Direction != NetFwRuleDirectionIn ||
-                        (int)rule.Action != NetFwActionAllow ||
-                        ((int)rule.Profiles & evaluatedProfiles) == 0)
-                    {
-                        continue;
-                    }
-
                     var protocol = (int)rule.Protocol;
-                    var localPorts = (string?)rule.LocalPorts;
-                    if (protocol != AnyProtocol &&
-                        (protocol != TcpProtocol ||
-                         !PortSpecificationIncludes(localPorts, port)))
-                    {
-                        continue;
-                    }
-
-                    if (!RuleMayApplyToAgent(
-                            (string?)rule.ApplicationName,
-                            (string?)rule.ServiceName,
-                            agentExecutablePath,
-                            SetupConstants.ServiceName))
-                    {
-                        continue;
-                    }
-
+                    var localPorts = protocol is TcpProtocol or AnyProtocol
+                        ? (string?)rule.LocalPorts
+                        : string.Empty;
                     var snapshot = new FirewallRuleSnapshot(
                         true,
                         (string)rule.Name,
                         (string?)rule.Description ?? string.Empty,
-                        true,
-                        NetFwRuleDirectionIn,
-                        NetFwActionAllow,
+                        (bool)rule.Enabled,
+                        (int)rule.Direction,
+                        (int)rule.Action,
                         protocol,
                         localPorts ?? string.Empty,
                         (string?)rule.RemoteAddresses ?? string.Empty,
                         (int)rule.Profiles,
                         (string?)rule.InterfaceTypes ?? "All",
                         (bool)rule.EdgeTraversal,
-                        (string?)rule.Grouping ?? string.Empty);
-                    if (!IsOwnedRule(snapshot))
+                        (string?)rule.Grouping ?? string.Empty)
+                    {
+                        ApplicationName = (string?)rule.ApplicationName ??
+                                          string.Empty,
+                        ServiceName = (string?)rule.ServiceName ?? string.Empty
+                    };
+
+                    var disposition = ClassifyRuleForSecurity(
+                        snapshot,
+                        port,
+                        evaluatedProfiles,
+                        agentExecutablePath);
+                    if (disposition == FirewallRuleDisposition.ProductNameCollision)
                     {
                         throw new SetupException(
                             SetupErrorCodes.FirewallFailed,
-                            $"TCP/{port}을 허용하는 비소유 인바운드 방화벽 규칙이 있어 설치를 중단했습니다.");
+                            "Agent 전용 이름을 사용하는 비소유 방화벽 규칙이 있어 안전을 위해 설치를 중단했습니다.");
+                    }
+
+                    if (disposition == FirewallRuleDisposition.ExternalOverlap)
+                    {
+                        externalOverlapCount++;
                     }
                 }
                 finally
@@ -383,6 +382,16 @@ public sealed class WindowsFirewallManager : IFirewallManager
                     ReleaseCom(ruleObject);
                 }
             }
+
+            return externalOverlapCount == 0
+                ? FirewallSecurityAssessment.Safe
+                : new FirewallSecurityAssessment(
+                [
+                    new FirewallSecurityWarning(
+                        FirewallOverlapWarningCode,
+                        $"TCP/{port}을 허용하는 다른 인바운드 방화벽 규칙 {externalOverlapCount}개가 있습니다. " +
+                        "해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")
+                ]);
         }
         catch (SetupException)
         {
@@ -400,6 +409,95 @@ public sealed class WindowsFirewallManager : IFirewallManager
             ReleaseCom(rulesObject);
             ReleaseCom(policyObject);
         }
+    }
+
+    internal static void AssertPolicySecurityGate(
+        bool firewallServiceRunning,
+        int activeProfiles,
+        IReadOnlyList<FirewallProfileSecurityState> profileStates)
+    {
+        if (!firewallServiceRunning)
+        {
+            throw new SetupException(
+                SetupErrorCodes.FirewallFailed,
+                "Windows 방화벽 서비스가 실행 중이 아니어서 Agent를 안전하게 열 수 없습니다.");
+        }
+
+        var supportedProfiles =
+            activeProfiles & (NetFwProfileDomain | NetFwProfilePrivate);
+        if (supportedProfiles == 0)
+        {
+            throw new SetupException(
+                SetupErrorCodes.FirewallFailed,
+                "활성 네트워크가 Domain 또는 Private 프로필이 아닙니다.");
+        }
+
+        foreach (var state in profileStates)
+        {
+            if (!state.FirewallEnabled ||
+                state.DefaultInboundAction != NetFwActionBlock)
+            {
+                throw new SetupException(
+                    SetupErrorCodes.FirewallFailed,
+                    "활성 네트워크의 Windows 방화벽 또는 기본 인바운드 차단 정책이 비활성화되어 있습니다.");
+            }
+
+            if (state.Profile != NetFwProfilePublic &&
+                !state.AllowsLocalFirewallRules)
+            {
+                throw new SetupException(
+                    SetupErrorCodes.FirewallFailed,
+                    "그룹 정책이 로컬 방화벽 규칙 병합을 차단하고 있어 Viewer 전용 규칙을 보장할 수 없습니다.");
+            }
+        }
+    }
+
+    internal static FirewallRuleDisposition ClassifyRuleForSecurity(
+        FirewallRuleSnapshot snapshot,
+        int port,
+        int evaluatedProfiles,
+        string agentExecutablePath)
+    {
+        if ((string.Equals(
+                 snapshot.Name,
+                 SetupConstants.FirewallRuleName,
+                 StringComparison.Ordinal) ||
+             string.Equals(
+                 snapshot.Name,
+                 LegacyPowerShellHttpsFriendlyName,
+                 StringComparison.Ordinal)) &&
+            !IsOwnedRule(snapshot))
+        {
+            return FirewallRuleDisposition.ProductNameCollision;
+        }
+
+        if (!snapshot.Enabled ||
+            snapshot.Direction != NetFwRuleDirectionIn ||
+            snapshot.Action != NetFwActionAllow ||
+            (snapshot.Profiles & evaluatedProfiles) == 0)
+        {
+            return FirewallRuleDisposition.Ignored;
+        }
+
+        if (snapshot.Protocol != AnyProtocol &&
+            (snapshot.Protocol != TcpProtocol ||
+             !PortSpecificationIncludes(snapshot.LocalPorts, port)))
+        {
+            return FirewallRuleDisposition.Ignored;
+        }
+
+        if (!RuleMayApplyToAgent(
+                snapshot.ApplicationName,
+                snapshot.ServiceName,
+                agentExecutablePath,
+                SetupConstants.ServiceName))
+        {
+            return FirewallRuleDisposition.Ignored;
+        }
+
+        return IsOwnedRule(snapshot)
+            ? FirewallRuleDisposition.Owned
+            : FirewallRuleDisposition.ExternalOverlap;
     }
 
     internal static bool PortSpecificationIncludes(string? specification, int port)
@@ -505,12 +603,46 @@ public sealed class WindowsFirewallManager : IFirewallManager
                 snapshot.Description is
                     "Owned by SamsungSwitchWatchAgent native setup v1" or
                     "Owned by SamsungSwitchWatchAgent installer v3" or
-                    "Owned by SamsungSwitchWatchAgent installer v1",
+                    "Owned by SamsungSwitchWatchAgent installer v1" &&
+                HasExpectedOwnedRuleStructure(snapshot, SetupConstants.HttpsPort) &&
+                HasExpectedProductScope(snapshot),
             SetupConstants.LegacyFirewallRuleName =>
                 snapshot.Description == "Owned by SamsungSwitchWatchAgent installer v2",
+            LegacyPowerShellHttpsFriendlyName =>
+                snapshot.Description is
+                    "Owned by SamsungSwitchWatchAgent installer v3" or
+                    "Owned by SamsungSwitchWatchAgent installer v1" &&
+                string.Equals(
+                    snapshot.Grouping,
+                    LegacyPowerShellGroup,
+                    StringComparison.Ordinal) &&
+                HasExpectedOwnedRuleStructure(snapshot, SetupConstants.HttpsPort) &&
+                HasExpectedProductScope(snapshot),
             _ => false
         };
     }
+
+    private static bool HasExpectedOwnedRuleStructure(
+        FirewallRuleSnapshot snapshot,
+        int port) =>
+        snapshot.Direction == NetFwRuleDirectionIn &&
+        snapshot.Action == NetFwActionAllow &&
+        snapshot.Protocol == TcpProtocol &&
+        string.Equals(
+            snapshot.LocalPorts,
+            port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            StringComparison.Ordinal) &&
+        snapshot.Profiles == (NetFwProfileDomain | NetFwProfilePrivate) &&
+        string.Equals(snapshot.InterfaceTypes, "All", StringComparison.OrdinalIgnoreCase) &&
+        !snapshot.EdgeTraversal;
+
+    private static bool HasExpectedProductScope(FirewallRuleSnapshot snapshot) =>
+        IsAnyScope(snapshot.ApplicationName) &&
+        IsAnyScope(snapshot.ServiceName);
+
+    private static bool IsAnyScope(string? value) =>
+        string.IsNullOrWhiteSpace(value) ||
+        value.Trim() is "*" or "Any";
 
     private static object CreateComObject(string programId)
     {
@@ -540,4 +672,18 @@ public sealed class WindowsFirewallManager : IFirewallManager
             throw new PlatformNotSupportedException();
         }
     }
+}
+
+internal sealed record FirewallProfileSecurityState(
+    int Profile,
+    bool FirewallEnabled,
+    int DefaultInboundAction,
+    bool AllowsLocalFirewallRules);
+
+internal enum FirewallRuleDisposition
+{
+    Ignored,
+    Owned,
+    ExternalOverlap,
+    ProductNameCollision
 }

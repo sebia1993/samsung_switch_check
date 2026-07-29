@@ -18,12 +18,16 @@ public sealed class StatelessTelnetApiTests
 
         using var identityResponse = await host.Client.GetAsync("/api/v4/identity");
         using var liveResponse = await host.Client.GetAsync("/health/live");
+        using var readyResponse = await host.Client.GetAsync("/health/ready");
         using var oldStatus = await host.Client.GetAsync("/api/v1/status");
         using var identity = JsonDocument.Parse(
             await identityResponse.Content.ReadAsStringAsync());
+        using var readiness = JsonDocument.Parse(
+            await readyResponse.Content.ReadAsStringAsync());
 
         Assert.True(identityResponse.IsSuccessStatusCode);
         Assert.True(liveResponse.IsSuccessStatusCode);
+        Assert.True(readyResponse.IsSuccessStatusCode);
         Assert.Equal(HttpStatusCode.NotFound, oldStatus.StatusCode);
         Assert.Equal(4, identity.RootElement.GetProperty("apiVersion").GetInt32());
         Assert.Matches(
@@ -33,6 +37,12 @@ public sealed class StatelessTelnetApiTests
         Assert.Matches(
             "^[0-9A-F]{64}$",
             identity.RootElement.GetProperty("certificatePublicKeySha256").GetString()!);
+        Assert.Equal("ready", readiness.RootElement.GetProperty("status").GetString());
+        Assert.Equal(4, readiness.RootElement.GetProperty("apiVersion").GetInt32());
+        Assert.Equal(
+            identity.RootElement.GetProperty("productVersion").GetString(),
+            readiness.RootElement.GetProperty("productVersion").GetString());
+        Assert.Equal("https", readiness.RootElement.GetProperty("protocol").GetString());
         Assert.DoesNotContain(
             host.Services.GetServices<IHostedService>(),
             service => service.GetType().Namespace?.StartsWith(

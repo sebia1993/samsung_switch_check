@@ -57,6 +57,7 @@ internal sealed class ViewerDiagnosticLog
     private static readonly HashSet<string> AllowedConnectionErrorCodes =
     [
         "AGENT_ACCESS_DENIED",
+        "AGENT_CLIENT_NOT_ALLOWED",
         "AGENT_CONNECTION_REFUSED",
         "AGENT_DNS_FAILED",
         "AGENT_HTTP_ERROR",

@@ -52,13 +52,16 @@ Agent와 Viewer 버전은 달라도 되는 구성이 아닙니다. 반드시 같
 - [ ] Domain·Private 프로필에만 규칙이 적용됨
 - [ ] Public 프로필에는 제품 규칙이 적용되지 않음
 - [ ] 등록한 Viewer PC에서 Agent HTTPS/18443 연결이 성공함
-- [ ] 다른 시험 PC에서 Agent HTTPS/18443 연결이 차단됨
+- [ ] 다른 시험 PC의 Agent API 요청이 `AGENT_CLIENT_NOT_ALLOWED`로 거부됨
+- [ ] 다른 프로그램 소유 TCP/18443 허용 규칙이 있으면 Setup이
+      `FIREWALL_OVERLAP_PROTECTED` 경고만 표시하고 해당 규칙을 변경하지 않음
+- [ ] 다른 프로그램 소유 규칙이 있어도 등록하지 않은 시험 PC의 API 요청은 계속 거부됨
 - [ ] 선택한 스위치 관리망의 IPv4와 TCP/23 요청은 허용됨
 - [ ] 선택하지 않은 시험 주소는 `TARGET_NOT_ALLOWED`로 거부됨
 - [ ] DNS 이름, IPv6, loopback, link-local과 포트 23 이외 값은 거부됨
 
-Viewer 주소가 바뀌면 Setup을 다시 실행하여 새 고정 IPv4를 입력하고 방화벽을 갱신합니다. 방화벽
-규칙을 넓은 CIDR로 수동 확장하지 않습니다.
+Viewer 주소가 바뀌면 Setup을 다시 실행하여 새 고정 IPv4를 입력하고 방화벽과 Agent 내부
+허용 주소를 함께 갱신합니다. 방화벽 규칙을 넓은 CIDR로 수동 확장하지 않습니다.
 
 ## 5. ProgramData와 Agent 신원
 
@@ -105,6 +108,8 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 - [ ] 연결 성공 후 과거 `AGENT_CONNECTION_REFUSED` 경고가 화면에서 제거됨
 - [ ] 버전을 다르게 한 시험은 `AGENT_VERSION_MISMATCH`로 중단됨
 - [ ] 연결 거부 시 Setup의 `검사`로 서비스·listener·방화벽 상태를 구분할 수 있음
+- [ ] `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Agent Setup에 현재 Viewer 고정 IPv4를 다시
+      입력하라는 안내가 표시됨
 
 ## 8. Viewer 장비와 자격 증명
 
@@ -181,6 +186,7 @@ Viewer가 종료되면 감시도 중단되는 구조가 현장 운영 요구와 
 - [ ] 업데이트 후 HTTPS 신원이 유지되어 Viewer 재신뢰 입력이 없음
 - [ ] 기존 유효 실행 한도 설정이 보존됨
 - [ ] 현재 입력한 Viewer IPv4가 정확한 `/32` 방화벽 규칙으로 적용됨
+- [ ] 현재 입력한 Viewer IPv4가 Agent `AllowedViewerIpv4`에도 적용됨
 - [ ] 현재 선택한 관리망 1~2개가 대상 허용 목록으로 적용됨
 - [ ] 업데이트 후 Agent가 `/health/ready` 상태임
 - [ ] 강제 readiness 실패 시험에서 이전 프로그램과 서비스가 rollback됨
@@ -202,7 +208,7 @@ Viewer가 종료되면 감시도 중단되는 구조가 현장 운영 요구와 
 
 - [ ] Telnet 구간의 ID, 비밀번호와 결과가 평문이라는 위험을 승인함
 - [ ] Agent API에 Windows/AD 로그인과 애플리케이션 토큰이 없음을 승인함
-- [ ] Viewer `/32` 방화벽이 현재 API 접근 경계임을 승인함
+- [ ] Viewer `/32` 방화벽과 Agent 내부 고정 IPv4 검증이 현재 API 접근 경계임을 승인함
 - [ ] TOFU 첫 연결이 중앙 인증기관 검증이 아님을 승인함
 - [ ] 코드 서명 없는 `-poc` 배포물의 EDR·SmartScreen 위험을 승인함
 - [ ] Viewer가 꺼지면 감시가 중단됨을 승인함

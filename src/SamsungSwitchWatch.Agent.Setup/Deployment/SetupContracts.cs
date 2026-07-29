@@ -95,6 +95,7 @@ public enum SetupStepState
     Running,
     Succeeded,
     Failed,
+    Warning,
     Information
 }
 
@@ -199,9 +200,22 @@ public sealed record FirewallRuleSnapshot(
     bool EdgeTraversal,
     string Grouping)
 {
+    public string ApplicationName { get; init; } = string.Empty;
+    public string ServiceName { get; init; } = string.Empty;
+
     public static FirewallRuleSnapshot Missing(string name) =>
         new(false, name, string.Empty, false, 0, 0, 0, string.Empty,
             string.Empty, 0, string.Empty, false, string.Empty);
+}
+
+public sealed record FirewallSecurityWarning(
+    string Code,
+    string Message);
+
+public sealed record FirewallSecurityAssessment(
+    IReadOnlyList<FirewallSecurityWarning> Warnings)
+{
+    public static FirewallSecurityAssessment Safe { get; } = new([]);
 }
 
 public interface IAgentPackageValidator
@@ -263,7 +277,9 @@ public interface IFirewallManager
     void RemoveOwnedRule(string ruleName);
     void Restore(FirewallRuleSnapshot snapshot);
     bool IsExactViewerRule(string ruleName, int port, string viewerIpv4);
-    void AssertSecurityGate(int port, string agentExecutablePath);
+    FirewallSecurityAssessment AssertSecurityGate(
+        int port,
+        string agentExecutablePath);
 }
 
 public interface IAgentHealthProbe

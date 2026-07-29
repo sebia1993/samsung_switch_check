@@ -2,21 +2,21 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.2-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.3-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.2-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.2-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.3-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.3-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.2-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.3-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
-Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.2-poc` Agent ZIP의 Setup을
+Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.3-poc` Agent ZIP의 Setup을
 다시 실행하십시오.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
@@ -66,6 +66,7 @@ Agent Setup은 다음 항목을 구성합니다.
 - 자동 시작과 서비스 실패 복구 정책
 - HTTPS/TCP 18443 수신
 - 입력한 Viewer IPv4 한 개만 허용하는 Domain·Private 방화벽 규칙
+- 입력한 Viewer IPv4만 Agent API에서 다시 허용하는 애플리케이션 접근 제한
 - 선택한 관리망만 허용하는 Telnet 대상 정책
 - `%ProgramData%\SamsungSwitchWatch`의 Agent 설정과 HTTPS 신원
 
@@ -89,6 +90,19 @@ Agent Setup의 `검사`는 설정을 변경하지 않고 다음 단계를 확인
 6. 제품 소유 방화벽 규칙
 7. Agent 준비 상태
 
+다른 프로그램이 만든 TCP/18443 인바운드 허용 규칙이 발견되면 노란색
+`FIREWALL_OVERLAP_PROTECTED` 경고를 표시하지만 설치를 중단하지 않습니다. Setup은 그 규칙을
+삭제·비활성화·변경하지 않습니다. `설치/업데이트`를 계속하면 제품 소유 Viewer `/32` 규칙을
+적용하고 Agent도 입력한 Viewer IPv4를 API 요청마다 다시 확인합니다.
+
+다음 조건은 경고가 아니라 설치 중단 사유입니다.
+
+- Windows 방화벽 서비스 또는 활성 프로필 방화벽이 꺼짐
+- 활성 프로필의 기본 인바운드 정책이 허용
+- Public 프로필만 활성
+- 그룹 정책이 로컬 방화벽 규칙 병합을 차단
+- 제품 전용 규칙 이름을 다른 프로그램이 사용
+
 설치 후 Viewer 연결이 안 되면 Agent Setup을 다시 열어 `검사`부터 실행하십시오. 명령줄
 PowerShell을 실행하거나 실행 정책을 변경할 필요가 없습니다.
 
@@ -99,6 +113,10 @@ HTTPS 신원과 유효한 네트워크 정책은 보존합니다. 파일 교체,
 검사에 실패하면 기존 프로그램·설정·방화벽을 복구하고 실패 단계를 표시해야 합니다.
 
 Agent를 먼저 업데이트하고 준비 상태를 확인한 뒤 같은 Release의 Viewer를 사용하십시오.
+
+Viewer 주소가 바뀌어 `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Agent PC에서 같은 Release의
+Agent Setup을 다시 실행하고 현재 Viewer PC의 고정 IPv4를 입력한 뒤 `설치/업데이트`를
+수행하십시오. 방화벽 규칙과 Agent 내부 허용 주소가 함께 갱신됩니다.
 
 ## 4. Viewer 실행
 

@@ -5,12 +5,12 @@
 | 경계 | 보호 방식 | 남는 위험 |
 |---|---|---|
 | Viewer 로컬 저장소 | DPAPI CurrentUser | 같은 Windows 사용자 세션 또는 계정 탈취 |
-| Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, Viewer 고정 IPv4 `/32` 방화벽 | 애플리케이션 사용자 인증 없음 |
+| Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, Viewer 고정 IPv4 `/32` 방화벽, Agent의 동일 IPv4 재검증 | 애플리케이션 사용자 인증 없음 |
 | Agent → 스위치 | Setup에서 선택한 직접 연결 관리망 제한, TCP/23 고정, 한 줄 `show` 정책 | Telnet 평문 노출 |
 | Agent 서비스와 데이터 | 전용 서비스 SID, 제한된 서비스·폴더 ACL, 무창 서비스 | 로컬 관리자는 제어 가능 |
 
-HTTPS를 사용하더라도 방화벽에서 허용된 Viewer IPv4를 사용하는 클라이언트는 Agent API에 접근할
-수 있습니다. Agent PC와 Viewer PC를 일반 사용자 VLAN, 공용 Wi-Fi 또는 인터넷에 노출하지
+HTTPS를 사용하더라도 등록된 Viewer IPv4를 사용하는 클라이언트는 Agent API에 접근할 수
+있습니다. Agent PC와 Viewer PC를 일반 사용자 VLAN, 공용 Wi-Fi 또는 인터넷에 노출하지
 마십시오.
 
 ## 2. 자격 증명
@@ -104,8 +104,19 @@ Public 프로필은 허용하지 않습니다. Viewer IPv4는 CIDR 또는 대역
 입력하며 Setup이 `/32` 규칙을 만듭니다. Viewer 주소가 DHCP로 바뀌면 연결이 거부되므로 고정
 주소 또는 조직에서 관리하는 예약 주소를 사용해야 합니다.
 
-이 방화벽 규칙은 Viewer 사용자 인증을 대신하는 현재 POC의 핵심 경계입니다. Viewer PC 주소를
-넓은 대역으로 허용하거나 규칙을 수동 확장하지 마십시오.
+Agent는 운영 설정의 `AllowedViewerIpv4`와 실제 TCP 연결의 원격 주소를 정확히 비교합니다.
+일치하지 않거나 원격 주소를 확인할 수 없으면 모든 Agent API를
+`403 / AGENT_CLIENT_NOT_ALLOWED`로 거부합니다. `X-Forwarded-For` 같은 전달 헤더는 신뢰하지
+않습니다. 로컬 상태 점검은 `/health/live`와 `/health/ready`에만 허용합니다.
+
+따라서 제품 소유 `/32` 규칙과 Agent 내부 검증이 함께 접근 경계를 구성합니다. Viewer PC
+주소를 넓은 대역으로 허용하거나 규칙을 수동 확장하지 마십시오.
+
+다른 프로그램이 만든 TCP/18443 인바운드 허용 규칙은 Setup이 소유하지 않으므로 삭제,
+비활성화 또는 변경하지 않습니다. 해당 규칙을 발견하면
+`FIREWALL_OVERLAP_PROTECTED` 경고를 표시하고, Agent 내부 Viewer IPv4 검증으로 API 접근을
+계속 제한합니다. 다만 허용되지 않은 PC도 TLS 연결 시도 자체는 할 수 있으므로 불필요한 외부
+규칙은 소유 부서에서 별도로 검토해야 합니다.
 
 ## 6. 스위치 대상 경계
 
@@ -156,7 +167,8 @@ Agent는 최초 정상 시작 때 ECDSA P-256 자체 서명 신원을 생성합�
 - 토큰 또는 지문 입력으로 신원 불일치를 우회할 수 없습니다.
 
 TOFU는 첫 연결 상대를 공인 CA나 AD로 인증하지 않습니다. 첫 연결의 안전성은 정확한 Viewer
-`/32` 방화벽, 격리된 관리망, Agent PC 주소 확인과 운영자 통제에 의존합니다.
+`/32` 방화벽과 Agent의 동일 주소 검증, 격리된 관리망, Agent PC 주소 확인과 운영자 통제에
+의존합니다.
 
 ## 9. 세션, 부하와 가용성
 

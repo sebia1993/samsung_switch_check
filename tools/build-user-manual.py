@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.2 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.3 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.2-poc"
+VERSION = "0.10.3-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -712,7 +712,7 @@ Viewer PC                 Agent PC                    Samsung Switch
         doc,
         ["구간", "고정 통신", "운영 제한"],
         [
-            ("Viewer → Agent", "HTTPS/TCP 18443", "설치 시 지정한 Viewer PC IPv4만 기본 허용"),
+            ("Viewer → Agent", "HTTPS/TCP 18443", "Viewer /32 방화벽과 Agent의 동일 IPv4 재검증"),
             ("Agent → Switch", "Telnet/TCP 23", "설치 시 선택한 관리망만 허용"),
         ],
         [1900, 2100, 5360],
@@ -760,6 +760,15 @@ Viewer PC                 Agent PC                    Samsung Switch
         alt_text="고정 Viewer IPv4와 자동 검색된 직접 연결 관리망을 선택하는 Agent Setup 화면",
         caption="그림 1. Agent 서비스 설치와 네트워크 범위 선택",
     )
+    add_callout(
+        doc,
+        "기존 TCP/18443 허용 규칙 경고",
+        "다른 프로그램이 만든 인바운드 허용 규칙이 있으면 "
+        "FIREWALL_OVERLAP_PROTECTED 경고를 표시하지만 해당 규칙은 변경하지 않고 설치를 "
+        "계속합니다. 설치 후 제품 소유 Viewer /32 규칙과 Agent 내부 Viewer IPv4 검증을 "
+        "함께 적용합니다.",
+        "warning",
+    )
     add_code_block(
         doc,
         """
@@ -794,7 +803,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         "Viewer PC 주소나 스위치 관리망이 바뀌면 같은 Release의 Agent Setup을 다시 열어 "
         "고정 Viewer IPv4와 자동 검색된 관리망을 검토합니다. 사용자가 CIDR을 계산하거나 "
         "사설망 전체를 직접 허용하지 않습니다. 검사에서 서비스, TCP/18443 listener, "
-        "방화벽, 활성 프로필과 live/ready를 확인합니다.",
+        "방화벽, Agent 내부 Viewer 허용 주소, 활성 프로필과 live/ready를 확인합니다.",
         "info",
     )
     add_callout(
@@ -804,6 +813,8 @@ Viewer PC IPv4 예     : 10.20.30.25
         "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP, Viewer PC 주소 또는 "
         "localhost가 아니라 Agent를 설치한 PC 주소를 입력했는지 먼저 확인하세요. 그 다음 "
         "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
+        "AGENT_CLIENT_NOT_ALLOWED이면 현재 Viewer PC의 고정 IPv4를 Agent Setup에 다시 "
+        "입력하고 설치/업데이트합니다. "
         f"서비스를 수동 등록하지 말고 {VERSION} Agent Setup을 사용하세요.",
         "danger",
     )
@@ -1098,8 +1109,9 @@ Viewer PC IPv4 예     : 10.20.30.25
             "Viewer 설정을 다른 PC나 Windows 사용자에게 복사해도 계정은 복호화되지 않으며, 진단 파일에는 "
             "IP·ID·비밀번호·호스트명·수동 명령 원문을 넣지 않습니다.",
             "기존 Agent HTTPS 신원과 유효한 실행 설정은 같은 PC의 업데이트에서 보존합니다.",
-            "방화벽은 고정 Viewer IPv4의 HTTPS/18443만 허용하고, Agent는 Setup에서 선택한 직접 연결 "
-            "관리망의 Telnet/23만 사용합니다.",
+            "제품 소유 방화벽 규칙과 Agent 원격 업무 API는 같은 고정 Viewer IPv4를 허용합니다. "
+            "외부 방화벽 규칙은 변경하지 않으며, Agent PC의 로컬 준비 상태 점검만 예외입니다. "
+            "Agent는 Setup에서 선택한 직접 연결 관리망의 Telnet/23만 사용합니다.",
         ],
         bullet_num_id,
     )
@@ -1122,6 +1134,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         [
             ("AGENT_DNS_FAILED", "입력한 Agent PC 이름 → 사내 DNS → IPv4 직접 입력"),
             ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → Agent Setup 검사 → 고정 Viewer IP → 원격 TCP/18443"),
+            ("AGENT_CLIENT_NOT_ALLOWED", "Agent PC에서 Setup 재실행 → 현재 Viewer 고정 IPv4 입력 → 설치/업데이트"),
             ("AGENT_UNREACHABLE", "Viewer와 Agent PC 사이 라우팅 → 방화벽 → EDR 차단"),
             ("AGENT_VERSION_MISMATCH", "같은 Release의 Agent ZIP과 Viewer ZIP으로 함께 업데이트"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
@@ -1129,7 +1142,8 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("SETUP_PACKAGE_NOT_FOUND", "Agent ZIP 전체 압축 해제 → Setup과 Agent EXE·BUILD-MANIFEST 존재 확인"),
             ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
-            ("SETUP_FIREWALL_FAILED", "Windows 방화벽 서비스 → 동명 비소유 규칙 → 보안 정책"),
+            ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
+            ("SETUP_FIREWALL_FAILED", "Windows 방화벽 서비스 → 제품 규칙 이름 충돌 → 기본 인바운드·그룹 정책"),
             ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
             ("SETUP_ROLLBACK_FAILED", "재실행하지 말고 표시 단계와 보존된 백업을 Windows 관리자에게 전달"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택한 관리망 내부인지 확인"),

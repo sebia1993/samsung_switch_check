@@ -61,13 +61,16 @@ public sealed class SetupDiagnosticsService(
                 "PATHS_READY",
                 "경로 사전 확인",
                 "설치·데이터 경로 형식과 상위 폴더를 확인했습니다. 실제 쓰기 권한과 EDR 허용 여부는 설치 중 확인합니다."));
-            firewallManager.AssertSecurityGate(
+            var firewallAssessment = firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
                 paths.AgentExecutablePath);
+            AddFirewallWarnings(steps, firewallAssessment);
             steps.Add(Success(
                 "FIREWALL_GATE_READY",
                 "방화벽 보안",
-                "Windows 방화벽 기본 차단과 Viewer 전용 규칙 적용 조건이 정상입니다."));
+                firewallAssessment.Warnings.Count == 0
+                    ? "Windows 방화벽 기본 차단과 Viewer 전용 규칙 적용 조건이 정상입니다."
+                    : "필수 방화벽 보안 조건은 정상입니다. 다른 허용 규칙은 유지하고 Agent에서 Viewer IP를 추가로 제한합니다."));
 
             steps.Add(new SetupStepResult(
                 service.Exists ? "SERVICE_FOUND" : "SERVICE_NOT_INSTALLED",
@@ -186,6 +189,18 @@ public sealed class SetupDiagnosticsService(
 
     private static SetupStepResult Success(string code, string label, string message) =>
         new(code, label, SetupStepState.Succeeded, message);
+
+    internal static void AddFirewallWarnings(
+        List<SetupStepResult> steps,
+        FirewallSecurityAssessment assessment)
+    {
+        steps.AddRange(assessment.Warnings.Select(warning =>
+            new SetupStepResult(
+                warning.Code,
+                "방화벽 중복 규칙",
+                SetupStepState.Warning,
+                warning.Message)));
+    }
 
     private static SetupStepResult Failure(string code, string label, string message) =>
         new(code, label, SetupStepState.Failed, message);

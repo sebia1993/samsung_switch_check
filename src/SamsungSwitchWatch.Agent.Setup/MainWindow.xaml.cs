@@ -128,6 +128,8 @@ public partial class MainWindow : Window
         var confirmation = MessageBox.Show(
             this,
             $"Viewer: {request.ViewerIpv4}/32\n스위치 관리망: {networks}\n\n" +
+            "기존의 다른 방화벽 규칙은 변경하지 않습니다.\n" +
+            "Agent 원격 업무 API가 입력한 Viewer IP만 허용하도록 설정합니다.\n\n" +
             "Agent 서비스를 설치하거나 업데이트하시겠습니까?",
             "Agent 설치 확인",
             MessageBoxButton.YesNo,
@@ -177,11 +179,17 @@ public partial class MainWindow : Window
                 _results.Add(ResultRow.From(step));
             }
 
+            var warningCount = result.Steps.Count(step =>
+                step.State == SetupStepState.Warning);
             OperationStateText.Text = result.Succeeded
-                ? "완료"
+                ? warningCount == 0
+                    ? "완료"
+                    : $"경고 {warningCount}건 · 완료"
                 : $"실패 · {result.Code}";
             OperationStateText.Foreground = result.Succeeded
-                ? Brushes.SeaGreen
+                ? warningCount == 0
+                    ? Brushes.SeaGreen
+                    : Brushes.DarkGoldenrod
                 : Brushes.Firebrick;
         }
         catch
@@ -284,6 +292,7 @@ public sealed record ResultRow(
                 SetupStepState.Succeeded => "●",
                 SetupStepState.Failed => "✕",
                 SetupStepState.Running => "…",
+                SetupStepState.Warning => "▲",
                 _ => "●"
             },
             step.State switch
@@ -291,6 +300,7 @@ public sealed record ResultRow(
                 SetupStepState.Succeeded => Brushes.SeaGreen,
                 SetupStepState.Failed => Brushes.Firebrick,
                 SetupStepState.Running => Brushes.RoyalBlue,
+                SetupStepState.Warning => Brushes.DarkGoldenrod,
                 _ => Brushes.DarkGoldenrod
             },
             step.Label,

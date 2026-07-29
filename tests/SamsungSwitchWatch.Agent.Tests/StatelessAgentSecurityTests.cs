@@ -172,6 +172,7 @@ public sealed class StatelessAgentSecurityTests
             {
                 ListenUrl = "http://0.0.0.0:18443",
                 DataDirectory = folder,
+                AllowedViewerIpv4 = "192.168.10.20",
                 AllowedTargetCidrs = ["192.0.2.0/24"]
             };
 
@@ -255,6 +256,7 @@ public sealed class StatelessAgentSecurityTests
             {
                 ListenUrl = "https://127.0.0.1:18443",
                 DataDirectory = folder,
+                AllowedViewerIpv4 = "192.168.10.20",
                 AllowedTargetCidrs = ["192.0.2.0/24"]
             };
             AgentOptionsValidator.ValidateAndNormalize(options, folder);

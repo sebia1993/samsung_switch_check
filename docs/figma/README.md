@@ -6,6 +6,7 @@
 - Current device-management dialog: node `37:4`
 - Current device-command dashboard: node `37:333`
 - Current automatic HTTPS Agent connection dialog: node `36:2`
+- Current Agent Setup firewall-overlap warning state: node `42:340`
 - Mini window: 400x260 offline/recovery frame, node `14:127`
 - Popup state strip: node `15:129`
 - Operational and security state gallery: node `15:148`
@@ -54,6 +55,14 @@ Node `36:2` replaces the historical fingerprint, pairing-token, `SSW1:`
 pairing, and Bearer-token flows. The current dialog contains only the Agent
 address and fixed HTTPS port `18443`; access control belongs to the management
 network and Windows Firewall rules.
+
+Node `42:340` is the source of truth for Agent Setup when another program
+already has an inbound TCP/18443 Allow rule. The existing rule is shown as a
+warning and is never changed or removed. The existing `설치 / 업데이트` flow
+continues, creates the product-owned Viewer `/32` rule, and configures the Agent
+to allow only the fixed Viewer IPv4 at the remote-work API boundary. Local
+`/health/live` and `/health/ready` checks remain the only loopback exception. It
+intentionally adds no separate auto-fix button.
 
 Node `33:205` keeps the three-column operational dashboard while adding clear
 entry points for Agent connection and device management. It explicitly states

@@ -1,11 +1,25 @@
 using System.Net;
 using System.Text.Json.Nodes;
+using System.Windows.Media;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
 
 namespace SamsungSwitchWatch.Agent.Setup.Tests;
 
 public sealed class ConfigurationAndInputTests
 {
+    [Fact]
+    public void ResultRow_WarningUsesDistinctYellowIndicator()
+    {
+        var row = ResultRow.From(new SetupStepResult(
+            "FIREWALL_OVERLAP_PROTECTED",
+            "방화벽 중복 규칙",
+            SetupStepState.Warning,
+            "warning"));
+
+        Assert.Equal("▲", row.Symbol);
+        Assert.Equal(Brushes.DarkGoldenrod, row.Brush);
+    }
+
     [Fact]
     public void Create_PreservesValidatedV09SettingsAndChangesOnlyDeploymentOwnedValues()
     {
@@ -16,6 +30,7 @@ public sealed class ConfigurationAndInputTests
                 "ListenUrl": "https://127.0.0.1:18443",
                 "DataDirectory": "old",
                 "MockMode": true,
+                "AllowedViewerIpv4": "192.168.1.99",
                 "AllowedTargetCidrs": [ "10.9.0.0/16" ],
                 "MaxConcurrentExecutions": 7,
                 "RateLimitPerMinute": 75,
@@ -35,12 +50,16 @@ public sealed class ConfigurationAndInputTests
         var created = AgentConfigurationFactory.Create(
             @"C:\ProgramData\SamsungSwitchWatch",
             ["192.168.30.0/24"],
+            "192.168.1.20",
             existing);
         var agent = JsonNode.Parse(created)!["Agent"]!;
 
         Assert.Equal("existing-agent", agent["AgentId"]!.GetValue<string>());
         Assert.Equal("https://0.0.0.0:18443", agent["ListenUrl"]!.GetValue<string>());
         Assert.False(agent["MockMode"]!.GetValue<bool>());
+        Assert.Equal(
+            "192.168.1.20",
+            agent["AllowedViewerIpv4"]!.GetValue<string>());
         Assert.Equal(7, agent["MaxConcurrentExecutions"]!.GetValue<int>());
         Assert.Equal(75, agent["RateLimitPerMinute"]!.GetValue<int>());
         Assert.Equal(180, agent["Telnet"]!["MaxSessionSeconds"]!.GetValue<int>());
@@ -71,6 +90,7 @@ public sealed class ConfigurationAndInputTests
         var agent = JsonNode.Parse(AgentConfigurationFactory.Create(
             @"C:\ProgramData\SamsungSwitchWatch",
             ["10.20.0.0/16"],
+            "10.1.1.20",
             existing))!["Agent"]!;
 
         Assert.NotEqual("../bad", agent["AgentId"]!.GetValue<string>());
@@ -91,6 +111,7 @@ public sealed class ConfigurationAndInputTests
             AgentConfigurationFactory.Create(
                 @"C:\ProgramData\SamsungSwitchWatch",
                 ["10.20.0.0/16"],
+                "10.1.1.20",
                 existing));
 
         Assert.Equal(SetupErrorCodes.ConfigurationInvalid, exception.Code);

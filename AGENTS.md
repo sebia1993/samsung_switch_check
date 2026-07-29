@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.2-poc
+.\scripts\build-release.ps1 -Version 0.10.3-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -43,7 +43,8 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
 ## Safety
 
 - Never commit credentials, tokens, certificates, real IPs, host names, MAC addresses, or company command output.
-- The Agent API has no application authentication. Windows Firewall management CIDRs are the access boundary.
+- The Agent API has no application authentication. The exact Viewer IPv4 is enforced both by the
+  product-owned Windows Firewall rule and by the Agent request middleware.
 - Persistent Agent ECDSA identity is stored only under ProgramData and protected with DPAPI LocalMachine.
 - Agent DataDirectory is exactly `%ProgramData%\SamsungSwitchWatch`; reject custom paths and even
   empty pre-existing roots during a new install.

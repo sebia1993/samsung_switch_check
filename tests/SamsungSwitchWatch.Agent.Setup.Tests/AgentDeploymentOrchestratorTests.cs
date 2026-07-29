@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
+using SamsungSwitchWatch.Agent.Setup.Infrastructure;
 
 namespace SamsungSwitchWatch.Agent.Setup.Tests;
 
@@ -28,6 +29,9 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Equal("preserved-agent", agent["AgentId"]!.GetValue<string>());
         Assert.Equal(90, agent["Telnet"]!["MaxSessionSeconds"]!.GetValue<int>());
         Assert.Equal(45, agent["RateLimitPerMinute"]!.GetValue<int>());
+        Assert.Equal(
+            "192.168.1.20",
+            agent["AllowedViewerIpv4"]!.GetValue<string>());
         Assert.Equal(
             "192.168.40.0/24",
             agent["AllowedTargetCidrs"]![0]!.GetValue<string>());
@@ -381,6 +385,61 @@ public sealed class AgentDeploymentOrchestratorTests
                 step.Code == "FIREWALL_UPDATE_REQUIRED" &&
                 step.State == SetupStepState.Information);
         Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task Diagnostics_GenericFirewallOverlapWarnsWithoutMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.SecurityAssessment = OverlapAssessment();
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code == WindowsFirewallManager.FirewallOverlapWarningCode);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.Contains("변경하지 않으며", warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            fixture.Firewall.Operations,
+            operation => operation == "apply" ||
+                         operation.StartsWith("remove:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DeployAsync_GenericFirewallOverlapSucceedsAndKeepsWarning()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.SecurityAssessment = OverlapAssessment();
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(
+            result.Steps,
+            step =>
+                step.Code == WindowsFirewallManager.FirewallOverlapWarningCode &&
+                step.State == SetupStepState.Warning);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Contains("apply", fixture.Firewall.Operations);
+        Assert.DoesNotContain(
+            fixture.Firewall.Operations,
+            operation => operation.Contains("Company TCP 18443", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -981,6 +1040,15 @@ public sealed class AgentDeploymentOrchestratorTests
             "All",
             false,
             string.Empty);
+
+    private static FirewallSecurityAssessment OverlapAssessment() =>
+        new(
+        [
+            new FirewallSecurityWarning(
+                WindowsFirewallManager.FirewallOverlapWarningCode,
+                "TCP/18443을 허용하는 다른 인바운드 방화벽 규칙 1개가 있습니다. " +
+                "해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")
+        ]);
 
     private sealed class DeploymentFixture(
         DeploymentPaths paths,

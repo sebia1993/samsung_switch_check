@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260723-v6-viewer-control-figma-synced",
+  "runId": "ssw-20260729-v7-firewall-viewer-ip-guard-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -29,10 +29,13 @@
     "deviceManagementV6": "37:4",
     "deviceCommandV6": "37:333",
     "httpsConnectionV6": "36:2",
+    "agentSetupFirewallWarningV7": "42:340",
+    "agentSetupExternalRuleWarningV7": "42:367",
+    "agentSetupViewerIpGuardV7": "42:371",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v6-viewer-control",
+    "version": "v7-firewall-viewer-ip-guard",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -43,6 +46,17 @@
     "monitoringOwner": "viewer",
     "fingerprintInput": false,
     "pairingTokenInput": false
+  },
+  "agentSetupSecurityFlow": {
+    "externalFirewallRulesModified": false,
+    "externalTcp18443AllowRule": "warning-and-continue",
+    "agentAllowedViewerIpv4Required": true,
+    "windowsFirewallViewer32RulePreserved": true,
+    "productionLoopbackEndpoints": [
+      "/health/live",
+      "/health/ready"
+    ],
+    "additionalAutoFixButton": false
   },
   "operatorFlow": {
     "deviceInputOrder": [

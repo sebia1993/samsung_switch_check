@@ -121,11 +121,44 @@ internal static class Program
                 var viewerIpInput = FindVisualChildren<TextBox>(setupLifetime.Window)
                     .First();
                 viewerIpInput.Text = "10.20.30.25";
+                var resultItems = (ItemsControl)setupLifetime.Window.FindName(
+                    "ResultItemsControl");
+                resultItems.ItemsSource = new[]
+                {
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "INPUT_VALID",
+                            "입력 확인",
+                            SetupStepState.Succeeded,
+                            "Viewer IP와 관리망 선택이 올바릅니다.")),
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "FIREWALL_GATE_READY",
+                            "방화벽 보안",
+                            SetupStepState.Succeeded,
+                            "필수 방화벽 보안 조건은 정상입니다. 다른 허용 규칙은 유지되고 Agent에서 Viewer IP를 추가로 제한합니다.")),
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "FIREWALL_OVERLAP_PROTECTED",
+                            "방화벽 중복 규칙",
+                            SetupStepState.Warning,
+                            "TCP/18443을 허용하는 다른 인바운드 방화벽 규칙 1개가 있습니다. 해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")),
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "FIREWALL_NOT_INSTALLED",
+                            "방화벽 상태",
+                            SetupStepState.Information,
+                            "설치 시 Viewer 전용 방화벽 규칙을 만듭니다."))
+                };
+                var operationState = (TextBlock)setupLifetime.Window.FindName(
+                    "OperationStateText");
+                operationState.Text = "경고 1건 · 완료";
+                operationState.Foreground = Brushes.DarkGoldenrod;
                 RefreshLayout(setupLifetime.Window);
                 Capture(
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
-                    "고정 Viewer IPv4를 입력하고 자동 검색된 직접 연결 관리망을 선택하는 Agent Setup 화면");
+                    "외부 TCP 18443 규칙을 보존하고 Viewer IPv4를 Agent 원격 업무 API에서 제한하는 Agent Setup 경고 화면");
             }
 
             using var dashboardLifetime = new WindowLifetime(

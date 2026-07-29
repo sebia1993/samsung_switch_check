@@ -109,6 +109,7 @@ public static class AgentApplication
             }
         });
         app.UseMiddleware<ErrorHandlingMiddleware>();
+        app.UseMiddleware<ViewerIpAccessMiddleware>();
         app.MapAgentEndpoints(options);
         return app;
     }
