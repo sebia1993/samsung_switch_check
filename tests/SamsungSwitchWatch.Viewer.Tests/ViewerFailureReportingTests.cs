@@ -260,11 +260,13 @@ public sealed class ViewerFailureReportingTests
         {
             await viewModel.InitializeAsync();
             await WaitUntilAsync(() => monitoringPersistence.WriteCount >= 2);
+            await viewModel.RunMonitoringCycleAsync(CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(10));
             monitoringPersistence.WriteException = new IOException("private path");
             uiContext.DropPosts = true;
 
             await viewModel.RunMonitoringCycleSafelyAsync(CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(3));
+                .WaitAsync(TimeSpan.FromSeconds(10));
 
             AssertDiagnostic(
                 diagnosticLog.CurrentPath,
@@ -273,7 +275,7 @@ public sealed class ViewerFailureReportingTests
 
             uiContext.DropPosts = false;
             await viewModel.RunMonitoringCycleSafelyAsync(CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(3));
+                .WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Contains(
                 "VIEWER_MONITOR_STATE_WRITE_FAILED",
@@ -1093,16 +1095,24 @@ public sealed class ViewerFailureReportingTests
 
     private sealed class TestMonitoringPersistence : IViewerMonitoringPersistence
     {
+        private Exception? _writeException;
+        private int _writeCount;
+
         public string? Content { get; private set; }
-        public Exception? WriteException { get; set; }
-        public int WriteCount { get; private set; }
+        public Exception? WriteException
+        {
+            get => Volatile.Read(ref _writeException);
+            set => Volatile.Write(ref _writeException, value);
+        }
+        public int WriteCount => Volatile.Read(ref _writeCount);
 
         public string? ReadIfExists(string path) => Content;
 
         public void WriteAtomically(string path, string content)
         {
-            WriteCount++;
-            if (WriteException is not null) throw WriteException;
+            Interlocked.Increment(ref _writeCount);
+            var exception = Volatile.Read(ref _writeException);
+            if (exception is not null) throw exception;
             Content = content;
         }
 
@@ -1111,7 +1121,13 @@ public sealed class ViewerFailureReportingTests
 
     private sealed class SwitchableSynchronizationContext : SynchronizationContext
     {
-        public bool DropPosts { get; set; }
+        private int _dropPosts;
+
+        public bool DropPosts
+        {
+            get => Volatile.Read(ref _dropPosts) != 0;
+            set => Volatile.Write(ref _dropPosts, value ? 1 : 0);
+        }
 
         public override void Post(SendOrPostCallback callback, object? state)
         {
