@@ -2,22 +2,24 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.6-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.7-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.6-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.6-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.7-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.7-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.6-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.7-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
-Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
-Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.6-poc` Agent ZIP의 Setup을
-다시 실행하십시오.
+Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
+`설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
+`0.10.7-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
+자동으로 설치를 이어서 실행하지는 않습니다.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
 `SHA256SUMS.txt`는 내부 검증용이라 별도 Asset으로 배포하지 않습니다.
@@ -64,7 +66,9 @@ Viewer에는 고정 주소를 사용하고, Agent PC에서 해당 관리망까�
 5. 자동 검색된 목록에서 스위치 관리망을 선택합니다. 목록에 없으면 승인된 관리망을
    `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`를 눌러 입력값과 현재 서비스·포트·방화벽 상태를 확인합니다.
-7. `설치/업데이트`를 누르고 모든 단계가 성공인지 확인합니다.
+7. 이전 작업이 감지되면 `설치/업데이트`가 비활성화됩니다. 복구 가능 상태에서만
+   `이전 상태 복구`를 누르고, 복구 완료 뒤 검사를 다시 확인합니다.
+8. `설치/업데이트`를 누르고 모든 단계가 성공인지 확인합니다.
 
 Agent Setup은 다음 항목을 구성합니다.
 
@@ -122,6 +126,28 @@ Domain/Private·Edge Traversal 비활성 조건도 모두 그대로 확인합니
 
 설치 후 Viewer 연결이 안 되면 Agent Setup을 다시 열어 `검사`부터 실행하십시오. 명령줄
 PowerShell을 실행하거나 실행 정책을 변경할 필요가 없습니다.
+
+### 중단된 설치·업데이트 복구
+
+Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하지 않고 먼저 확인합니다.
+
+- 안전하게 되돌릴 수 있는 상태이면 `이전 상태 복구`만 활성화하고 `설치/업데이트`는
+  비활성화합니다.
+- 작업 기록이 손상됐거나 파일·서비스 상태가 기록과 맞지 않아 복구 안전성을 증명할 수 없으면
+  복구와 설치를 모두 비활성화하고 Windows 관리자 확인을 요청합니다.
+- 복구가 성공하면 설치 버튼은 다시 활성화되지만 설치를 자동으로 시작하지 않습니다.
+  운영자가 검사 결과를 확인한 뒤 설치 또는 업데이트를 별도로 실행합니다.
+- 복구가 실패하면 최초 설치·업데이트 실패 원인과 복구 단계별 원인을 구분해 표시합니다.
+  하나의 `SETUP_ROLLBACK_FAILED`만 반복 표시되는 것으로 원인을 판단하지 마십시오.
+- 실패 화면에만 나타나는 `진단정보 복사`는 제품 버전, UTC 시각, 작업 종류, 안전한 오류 코드,
+  작업 기록 형식·단계, 필요한 파일의 존재 여부와 서비스 상태만 클립보드에 복사합니다.
+
+복구 대기 또는 실패 상태에서는 `%ProgramFiles%\SamsungSwitchWatch` 아래의
+`Agent.__staging_*`, `Agent.__backup_*`, `Agent.__failed_*` 폴더와
+`%ProgramData%\SamsungSwitchWatch-Operations`의 작업 기록을 수동으로 삭제·이동·이름
+변경하지 마십시오. 제품이 보존한 복구 근거가 사라지면 안전한 복구 여부를 판단할 수 없습니다.
+안전하지 않거나 손상된 상태는 `진단정보 복사` 결과를 사내 Windows 관리자에게 전달하고,
+승인된 현장 절차로 확인해야 합니다.
 
 ### 업데이트
 
@@ -295,15 +321,45 @@ Cause에는 실제 Viewer 주소나 규칙 원문 대신 `FIREWALL_REMOTE_ADDRES
 불일치 코드만 표시됩니다.
 
 1. 오류 창과 불일치 코드를 기록합니다.
-2. Setup이 rollback 완료를 표시했는지 확인합니다.
-3. 같은 Release의 Agent ZIP을 새 로컬 폴더에 다시 압축 해제한 뒤 Setup의 `검사`를 실행합니다.
+2. Setup이 미완료 작업을 표시하면 설치를 다시 누르지 말고 `이전 상태 복구`를 실행합니다.
+3. 복구가 완료된 뒤 같은 Release의 Agent ZIP을 새 로컬 폴더에 다시 압축 해제하고 Setup의
+   `검사`를 실행합니다.
 4. Windows 방화벽 서비스와 Domain/Private 프로필이 켜져 있는지 확인합니다.
-5. 계속 실패하면 오류 코드만 사내 Windows 관리자에게 전달합니다.
+5. 복구가 실패하거나 안전하지 않은 상태로 차단되면 `진단정보 복사`의 안전한 요약만 사내
+   Windows 관리자에게 전달합니다.
 
 방화벽 규칙을 직접 만들거나 `Any`, `LocalSubnet`, 사설망 전체와 `/31` 이하의 넓은 prefix로
 확대하여 우회하지 마십시오. 제품 규칙의 원격 주소가 같은 Viewer IPv4의 `IP`,
 `IP/32`, `IP/255.255.255.255`로 보이는 차이는 정상적인 단일 호스트 표기 차이이며 Setup이
 자동으로 처리합니다.
+
+### SETUP_RECOVERY_REQUIRED / SETUP_ROLLBACK_FAILED
+
+- `SETUP_RECOVERY_REQUIRED`: 이전 설치·업데이트가 끝나지 않아 새 설치를 시작할 수 없습니다.
+  Setup이 복구 가능 상태로 표시할 때만 `이전 상태 복구`를 누릅니다.
+- `SETUP_ROLLBACK_FAILED`: 설치·업데이트 실패 뒤 이전 상태 복구도 완전히 끝나지 않았습니다.
+  화면의 최초 실패 원인과 복구 단계별 원인을 함께 확인합니다.
+- 복구 성공은 설치 성공이 아닙니다. 설치 버튼이 다시 활성화되면 검사 결과를 확인하고
+  운영자가 새 설치·업데이트를 별도로 시작합니다.
+- `진단정보 복사`는 실패 화면에서만 사용합니다. 복사된 내용에는 실제 IP/CIDR, PC·사용자명,
+  절대 경로, 작업 ID, 서비스 계정, 방화벽 규칙 원문, 자격 증명, 인증서, 명령과 장비 출력이
+  포함되지 않아야 합니다.
+- 복구 자료와 작업 기록을 직접 정리하거나, 구형 Setup을 실행하거나, 설치 버튼을 반복해서
+  눌러 우회하지 마십시오.
+
+복구 단계 코드는 다음 위치를 뜻합니다.
+
+| 코드 | 확인 위치 |
+|---|---|
+| `ROLLBACK_STATE_MISMATCH` | 작업 기록과 현재 복구 대상 상태 |
+| `ROLLBACK_SERVICE_STOP_FAILED` | 새 Agent 서비스 중지 |
+| `ROLLBACK_FILE_RESTORE_FAILED` | 이전 프로그램 파일과 ACL 복원·검증 |
+| `ROLLBACK_DATA_CLEANUP_FAILED` | 설치 도중 생성한 데이터 정리 |
+| `ROLLBACK_SERVICE_RESTORE_FAILED` | 이전 Agent 서비스 구성과 실행 상태 복원 |
+| `ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED` | HTTPS/18443 방화벽 snapshot 복원 |
+| `ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED` | 이전 버전 방화벽 snapshot 복원 |
+| `ROLLBACK_JOURNAL_WRITE_FAILED` | 복구 상태 작업 기록 저장 |
+| `ROLLBACK_EVIDENCE_CLEANUP_FAILED` | 복구 완료 뒤 staging·backup·failed 자료 정리 |
 
 ### SETUP_EXISTING_NETWORKS_NOT_LOADED
 

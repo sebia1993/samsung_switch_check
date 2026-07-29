@@ -18,7 +18,15 @@ public sealed record DeploymentJournal(
     bool DataDirectoryCreated,
     ServiceSnapshot PreviousService,
     FirewallRuleSnapshot PreviousHttpsFirewall,
-    FirewallRuleSnapshot PreviousHttpFirewall);
+    FirewallRuleSnapshot PreviousHttpFirewall)
+{
+    // Optional diagnostic metadata keeps format 1/2 journals readable. These
+    // values are sanitized stable codes/messages only; paths and secrets are
+    // never added here.
+    public string? PrimaryFailureCode { get; init; }
+    public string? PrimaryFailureMessage { get; init; }
+    public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+}
 
 public sealed class DeploymentJournalStore(
     ISetupFileSystem fileSystem,

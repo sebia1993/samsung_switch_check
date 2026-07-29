@@ -114,6 +114,30 @@ Node `33:205` keeps the three-column operational dashboard while adding clear
 entry points for Agent connection and device management. It explicitly states
 that monitoring is Viewer-owned and stops when the Viewer is closed.
 
+## v11 Agent Setup recovery flow
+
+Nodes `58:72`, `58:97`, `58:120`, and `58:147` are the source of truth for
+interrupted Agent Setup recovery.
+
+1. Setup detects an unfinished transaction without changing files, services,
+   or firewall rules.
+2. A safe pending transaction disables installation and exposes a separate
+   `이전 상태 복구` action.
+3. Successful recovery re-enables `설치 / 업데이트`, but never starts a new
+   installation automatically.
+4. A failed recovery shows the original installation failure separately from
+   each rollback-stage failure. It does not repeat the generic
+   `SETUP_ROLLBACK_FAILED` row.
+5. `진단정보 복사` appears only after failure and copies sanitized metadata to
+   the clipboard. It does not create a persistent diagnostic file.
+6. A corrupt or state-mismatched journal disables both installation and
+   recovery and asks for administrator review. Operators must not delete or
+   move staging, backup, failed, or journal evidence manually.
+
+The four frames cover recovery required (`58:72`), recovery completed
+(`58:97`), retryable recovery failure with diagnostic-copy feedback
+(`58:120`), and unsafe recovery state (`58:147`).
+
 ## Historical references
 
 - Previous simplified dashboard v5: node `25:138`

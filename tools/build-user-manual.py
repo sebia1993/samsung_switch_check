@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.6 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.7 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.6-poc"
+VERSION = "0.10.7-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -751,7 +751,8 @@ Viewer PC                 Agent PC                    Samsung Switch
             "원격 Viewer PC의 고정 IPv4를 입력합니다. 동일 PC 사전 테스트라면 '이 PC 주소 넣기'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
             "자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
             "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
-            "검사를 실행한 뒤 설치/업데이트를 누르고 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
+            "Setup이 중단된 이전 설치 기록을 발견하면 설치/업데이트가 잠깁니다. '이전 상태 복구'를 먼저 누르고 복구 완료를 확인합니다.",
+            "복구 성공 뒤 설치는 자동으로 시작되지 않습니다. 별도로 '설치 / 업데이트'를 누른 뒤 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
     )
     add_image(
@@ -759,8 +760,17 @@ Viewer PC                 Agent PC                    Samsung Switch
         images_dir / "00-agent-setup.png",
         width=4.5,
         title="Agent Setup 화면",
-        alt_text="이 PC 주소 넣기, 고정 Viewer IPv4, 자동 검색 관리망과 정규화된 직접 추가 관리망을 확인하는 Agent Setup 화면",
-        caption="그림 1. 동일 PC 주소 도우미와 Agent 서비스 설치 범위 확인",
+        alt_text="중단된 이전 설치 기록을 감지하여 이전 상태 복구 버튼만 활성화하고 설치 업데이트 버튼은 비활성화한 Agent Setup 화면",
+        caption="그림 1. 이전 상태 복구가 필요한 안전 대기 화면",
+    )
+    add_callout(
+        doc,
+        "복구 대기 화면",
+        "Setup은 시작할 때 이전 작업의 journal을 읽기 전용으로 확인합니다. 안전하게 복구할 수 있는 "
+        "기록이면 '이전 상태 복구'만 활성화하고 설치/업데이트는 비활성화합니다. 이 확인만으로 "
+        "파일·서비스·방화벽을 변경하거나 복구를 자동 실행하지 않습니다. 복구 성공 뒤에도 설치는 "
+        "자동으로 이어지지 않으므로 운영자가 결과를 확인한 뒤 설치/업데이트를 별도로 시작합니다.",
+        "warning",
     )
     add_callout(
         doc,
@@ -807,8 +817,20 @@ Viewer PC IPv4 예     : 10.20.30.25
         "업데이트 안정성",
         "Setup은 BUILD-MANIFEST.json과 Agent 실행 파일 SHA-256을 확인하고, Program Files의 "
         "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램·방화벽 변경 중 "
-        "실패하면 설치 전 상태로 자동 복구하고, 완전히 복구하지 못하면 "
-        "SETUP_ROLLBACK_FAILED를 표시합니다.",
+        "현재 작업이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 다음 실행에서 완료되지 않은 "
+        "journal이 남아 있으면 자동 복구하지 않고 별도의 '이전 상태 복구' 작업을 요구합니다. "
+        "복구까지 실패하면 최초 설치 실패 코드를 별도로 유지하고 SETUP_ROLLBACK_FAILED와 "
+        "실패한 ROLLBACK_* 단계를 함께 표시합니다.",
+        "info",
+    )
+    add_callout(
+        doc,
+        "실패할 때만 진단정보 복사",
+        "설치 또는 복구가 실패한 경우에만 '진단정보 복사' 버튼이 나타납니다. 복사 내용에는 "
+        "프로그램 버전, UTC 시각, 작업 종류, 최초 실패 코드, ROLLBACK_* 코드, journal 단계와 "
+        "파일·서비스 존재 여부만 포함됩니다. 실제 IP/CIDR, PC·사용자 이름, 절대 경로, 계정, "
+        "비밀번호, 인증서, 방화벽 규칙 원문과 장비 명령·출력은 포함하지 않으며 별도 로그 파일로 "
+        "저장하지 않습니다.",
         "info",
     )
     add_callout(
@@ -913,7 +935,13 @@ Viewer PC IPv4 예     : 10.20.30.25
         "적용하고 원격 Viewer PC에서 연결 진단을 반복하세요.",
         "info",
     )
-    add_heading(doc, "장비와 계정 등록", 1, heading_num_id)
+    add_heading(
+        doc,
+        "장비와 계정 등록",
+        1,
+        heading_num_id,
+        page_break_before=False,
+    )
     add_image(
         doc,
         images_dir / "03-device-management.png",
@@ -1177,7 +1205,14 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
             ("SETUP_FIREWALL_FAILED", "안전한 불일치 코드 기록 → rollback 완료 확인 → 방화벽 서비스·Domain/Private·그룹 정책"),
             ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
-            ("SETUP_ROLLBACK_FAILED", "재실행하지 말고 표시 단계와 보존된 백업을 Windows 관리자에게 전달"),
+            ("SETUP_RECOVERY_REQUIRED", "설치/업데이트를 누르지 말고 '이전 상태 복구' 실행 → 복구 완료 확인 → 설치/업데이트를 별도로 시작"),
+            ("SETUP_ROLLBACK_FAILED", "'진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계 확인 → 증거 폴더를 그대로 보존 → Windows 관리자에게 전달"),
+            ("ROLLBACK_STATE_MISMATCH", "복구 기록과 현재 설치 상태가 다름. 복구·설치 재시도와 파일 수동 정리를 중지"),
+            ("ROLLBACK_SERVICE_STOP_FAILED", "SamsungSwitchWatchAgent 중지 상태와 서비스 제어 권한 확인"),
+            ("ROLLBACK_FILE_RESTORE_FAILED / ROLLBACK_DATA_CLEANUP_FAILED", "Program Files·ProgramData 권한, 파일 잠금, 백신·EDR 격리 확인. 증거 폴더는 보존"),
+            ("ROLLBACK_SERVICE_RESTORE_FAILED", "파일 복구 완료 여부를 먼저 확인한 뒤 기존 서비스 설정·시작 실패를 Windows 관리자에게 전달"),
+            ("ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED / ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED", "제품 HTTPS 규칙과 이전 legacy 규칙의 개별 복원 실패. 규칙 범위를 수동 확대하지 않음"),
+            ("ROLLBACK_JOURNAL_WRITE_FAILED / ROLLBACK_EVIDENCE_CLEANUP_FAILED", "journal 또는 증거 정리 단계 실패. 남은 기록·폴더를 삭제하지 않고 진단정보 전달"),
             ("SETUP_EXISTING_NETWORKS_NOT_LOADED", "기존 관리망을 자동 복원하지 못함. 승인된 관리망을 다시 선택하거나 IPv4/prefix로 직접 추가"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택·추가한 관리망 내부인지 확인. 필요하면 승인된 사설 CIDR을 Setup에서 추가"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
@@ -1217,11 +1252,13 @@ Viewer PC IPv4 예     : 10.20.30.25
     spacer.paragraph_format.space_after = Pt(2)
     add_callout(
         doc,
-        "자동 복구 실패 시",
-        "설치 도중 실패하면 Setup이 이전 프로그램·서비스·방화벽 상태를 되돌립니다. "
-        "SETUP_ROLLBACK_FAILED가 표시되면 남은 .__staging_, .__backup_, .__failed_ 폴더를 "
-        "삭제·이동·이름 변경하지 말고 표시된 단계와 오류 코드를 사내 Windows 관리자에게 "
-        "전달하세요.",
+        "이전 상태 복구가 필요한 경우",
+        "Setup은 남아 있는 journal을 읽기 전용으로 확인하고 SETUP_RECOVERY_REQUIRED를 표시합니다. "
+        "이때 설치/업데이트는 잠겨 있으며 복구가 자동으로 시작되지 않습니다. '이전 상태 복구'를 "
+        "직접 실행하고, 성공한 경우에만 결과를 확인한 뒤 설치/업데이트를 별도로 시작하세요. "
+        "실패하면 '진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계를 전달합니다. "
+        ".__staging_, .__backup_, .__failed_ 폴더와 journal은 원인 확인 증거이므로 "
+        "삭제·이동·이름 변경하지 마세요.",
         "danger",
     )
     add_callout(

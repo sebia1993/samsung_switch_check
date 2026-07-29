@@ -35,6 +35,18 @@ public static class SetupErrorCodes
     public const string HealthFailed = "SETUP_HEALTH_FAILED";
     public const string RollbackFailed = "SETUP_ROLLBACK_FAILED";
     public const string RecoveryRequired = "SETUP_RECOVERY_REQUIRED";
+    public const string RollbackStateMismatch = "ROLLBACK_STATE_MISMATCH";
+    public const string RollbackServiceStopFailed = "ROLLBACK_SERVICE_STOP_FAILED";
+    public const string RollbackFileRestoreFailed = "ROLLBACK_FILE_RESTORE_FAILED";
+    public const string RollbackDataCleanupFailed = "ROLLBACK_DATA_CLEANUP_FAILED";
+    public const string RollbackServiceRestoreFailed = "ROLLBACK_SERVICE_RESTORE_FAILED";
+    public const string RollbackHttpsFirewallRestoreFailed =
+        "ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED";
+    public const string RollbackLegacyFirewallRestoreFailed =
+        "ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED";
+    public const string RollbackJournalWriteFailed = "ROLLBACK_JOURNAL_WRITE_FAILED";
+    public const string RollbackEvidenceCleanupFailed =
+        "ROLLBACK_EVIDENCE_CLEANUP_FAILED";
     public const string AlreadyRunning = "SETUP_ALREADY_RUNNING";
     public const string Cancelled = "SETUP_CANCELLED";
     public const string Unexpected = "SETUP_UNEXPECTED";
@@ -113,6 +125,10 @@ public sealed record SetupOperationResult(
     string Message,
     IReadOnlyList<SetupStepResult> Steps)
 {
+    public string? PrimaryFailureCode { get; init; }
+    public string? PrimaryFailureMessage { get; init; }
+    public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+
     public static SetupOperationResult Failure(
         string code,
         string message,
@@ -123,6 +139,34 @@ public sealed record SetupOperationResult(
         string message,
         IReadOnlyList<SetupStepResult> steps) =>
         new(true, SetupErrorCodes.Ok, message, steps);
+}
+
+public sealed record PendingRecoveryInspection(
+    bool Exists,
+    bool CanRecover,
+    string Code,
+    string Message)
+{
+    public int? JournalFormatVersion { get; init; }
+    public string? JournalStage { get; init; }
+    public string? PrimaryFailureCode { get; init; }
+    public string? PrimaryFailureMessage { get; init; }
+    public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+    public IReadOnlyList<string> FailureCodes => RollbackFailureCodes;
+    public string ServiceState { get; init; } = "unknown";
+    public bool EvidenceStateKnown { get; init; } = true;
+    public bool InstallDirectoryExists { get; init; }
+    public bool StagingDirectoryExists { get; init; }
+    public bool BackupDirectoryExists { get; init; }
+    public bool FailedDirectoryExists { get; init; }
+    public bool DataDirectoryExists { get; init; }
+
+    public static PendingRecoveryInspection None { get; } =
+        new(
+            false,
+            false,
+            SetupErrorCodes.Ok,
+            "복구가 필요한 이전 설치 작업이 없습니다.");
 }
 
 public sealed record ServiceSnapshot(
