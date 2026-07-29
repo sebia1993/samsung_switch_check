@@ -31,7 +31,24 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
             $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllText(temporaryPath, contents, Utf8WithoutBom);
+            using (var stream = new FileStream(
+                       temporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(
+                       stream,
+                       Utf8WithoutBom,
+                       bufferSize: 4096,
+                       leaveOpen: true))
+            {
+                writer.Write(contents);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
             if (File.Exists(fullPath))
             {
                 var backupPath = $"{temporaryPath}.bak";
@@ -42,6 +59,15 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
             {
                 File.Move(temporaryPath, fullPath);
             }
+
+            using var committed = new FileStream(
+                fullPath,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.Read,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+            committed.Flush(flushToDisk: true);
         }
         finally
         {

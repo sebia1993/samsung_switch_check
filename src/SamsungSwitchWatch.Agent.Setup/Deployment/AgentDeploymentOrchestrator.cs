@@ -11,6 +11,7 @@ public sealed class AgentDeploymentOrchestrator(
     DeploymentPaths paths)
 {
     private static readonly SemaphoreSlim ProcessDeploymentGate = new(1, 1);
+    private const string RollbackCompletedStage = "rollback-completed";
 
     public async Task<SetupOperationResult> DeployAsync(
         SetupRequest request,
@@ -71,6 +72,7 @@ public sealed class AgentDeploymentOrchestrator(
         var dataDirectoryExistedBefore = false;
         var dataDirectoryCreated = false;
         var mutationStarted = false;
+        var currentTransactionOwned = false;
         ServiceSnapshot? previousService = null;
         FirewallRuleSnapshot? previousHttpsFirewall = null;
         FirewallRuleSnapshot? previousHttpFirewall = null;
@@ -126,7 +128,7 @@ public sealed class AgentDeploymentOrchestrator(
                 paths.AgentExecutablePath);
 
             journal = new DeploymentJournal(
-                1,
+                DeploymentJournalStore.CurrentFormatVersion,
                 transactionId,
                 "prepared",
                 package.Version,
@@ -141,6 +143,7 @@ public sealed class AgentDeploymentOrchestrator(
                 previousService,
                 previousHttpsFirewall,
                 previousHttpFirewall);
+            currentTransactionOwned = true;
 
             var existingConfiguration = fileSystem.FileExists(paths.ProductionConfigurationPath)
                 ? fileSystem.ReadAllText(paths.ProductionConfigurationPath)
@@ -344,20 +347,27 @@ public sealed class AgentDeploymentOrchestrator(
         }
         catch (OperationCanceledException)
         {
-            var rollbackCode = TryRollback(
-                previousService,
-                previousHttpsFirewall,
-                previousHttpFirewall,
-                stagingDirectory,
-                backupDirectory,
-                failedDirectory,
-                installMovedToBackup,
-                stagingActivated,
-                dataDirectoryExistedBefore,
-                dataDirectoryCreated,
-                mutationStarted,
-                steps);
-            DeleteJournalAfterRollback(journalStore, rollbackCode);
+            var rollbackCode = currentTransactionOwned
+                ? TryRollback(
+                    journalStore,
+                    journal,
+                    previousService,
+                    previousHttpsFirewall,
+                    previousHttpFirewall,
+                    stagingDirectory,
+                    backupDirectory,
+                    failedDirectory,
+                    installMovedToBackup,
+                    stagingActivated,
+                    dataDirectoryExistedBefore,
+                    dataDirectoryCreated,
+                    mutationStarted,
+                    steps)
+                : null;
+            if (currentTransactionOwned)
+            {
+                DeleteJournalAfterRollback(journalStore, journal, rollbackCode);
+            }
             var code = rollbackCode ?? SetupErrorCodes.Cancelled;
             var message = rollbackCode is null
                 ? "설치가 취소되어 이전 상태로 복구했습니다."
@@ -367,20 +377,27 @@ public sealed class AgentDeploymentOrchestrator(
         }
         catch (SetupException exception)
         {
-            var rollbackCode = TryRollback(
-                previousService,
-                previousHttpsFirewall,
-                previousHttpFirewall,
-                stagingDirectory,
-                backupDirectory,
-                failedDirectory,
-                installMovedToBackup,
-                stagingActivated,
-                dataDirectoryExistedBefore,
-                dataDirectoryCreated,
-                mutationStarted,
-                steps);
-            DeleteJournalAfterRollback(journalStore, rollbackCode);
+            var rollbackCode = currentTransactionOwned
+                ? TryRollback(
+                    journalStore,
+                    journal,
+                    previousService,
+                    previousHttpsFirewall,
+                    previousHttpFirewall,
+                    stagingDirectory,
+                    backupDirectory,
+                    failedDirectory,
+                    installMovedToBackup,
+                    stagingActivated,
+                    dataDirectoryExistedBefore,
+                    dataDirectoryCreated,
+                    mutationStarted,
+                    steps)
+                : null;
+            if (currentTransactionOwned)
+            {
+                DeleteJournalAfterRollback(journalStore, journal, rollbackCode);
+            }
             var code = rollbackCode ?? exception.Code;
             var message = rollbackCode is null
                 ? exception.Message
@@ -390,20 +407,27 @@ public sealed class AgentDeploymentOrchestrator(
         }
         catch (Exception)
         {
-            var rollbackCode = TryRollback(
-                previousService,
-                previousHttpsFirewall,
-                previousHttpFirewall,
-                stagingDirectory,
-                backupDirectory,
-                failedDirectory,
-                installMovedToBackup,
-                stagingActivated,
-                dataDirectoryExistedBefore,
-                dataDirectoryCreated,
-                mutationStarted,
-                steps);
-            DeleteJournalAfterRollback(journalStore, rollbackCode);
+            var rollbackCode = currentTransactionOwned
+                ? TryRollback(
+                    journalStore,
+                    journal,
+                    previousService,
+                    previousHttpsFirewall,
+                    previousHttpFirewall,
+                    stagingDirectory,
+                    backupDirectory,
+                    failedDirectory,
+                    installMovedToBackup,
+                    stagingActivated,
+                    dataDirectoryExistedBefore,
+                    dataDirectoryCreated,
+                    mutationStarted,
+                    steps)
+                : null;
+            if (currentTransactionOwned)
+            {
+                DeleteJournalAfterRollback(journalStore, journal, rollbackCode);
+            }
             var code = rollbackCode ?? SetupErrorCodes.Unexpected;
             var message = rollbackCode is null
                 ? "예상하지 못한 오류로 설치를 완료하지 못했습니다."
@@ -414,6 +438,8 @@ public sealed class AgentDeploymentOrchestrator(
     }
 
     private string? TryRollback(
+        DeploymentJournalStore journalStore,
+        DeploymentJournal? journal,
         ServiceSnapshot? previousService,
         FirewallRuleSnapshot? previousHttpsFirewall,
         FirewallRuleSnapshot? previousHttpFirewall,
@@ -428,6 +454,51 @@ public sealed class AgentDeploymentOrchestrator(
         List<SetupStepResult> steps)
     {
         var failed = false;
+        var installExists = false;
+        var backupExists = false;
+        var failedExists = false;
+        var stagingExists = false;
+        var dataDirectoryExists = false;
+
+        try
+        {
+            installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
+            backupExists = backupDirectory is not null &&
+                           fileSystem.DirectoryExists(backupDirectory);
+            failedExists = failedDirectory is not null &&
+                           fileSystem.DirectoryExists(failedDirectory);
+            stagingExists = stagingDirectory is not null &&
+                            fileSystem.DirectoryExists(stagingDirectory);
+            dataDirectoryExists = fileSystem.DirectoryExists(paths.DataDirectory);
+            if ((!installMovedToBackup && backupExists) ||
+                (!stagingActivated && failedExists) ||
+                (stagingExists && failedExists) ||
+                (dataDirectoryExistedBefore && !dataDirectoryExists) ||
+                (!dataDirectoryExistedBefore &&
+                 !dataDirectoryCreated &&
+                 dataDirectoryExists) ||
+                (installMovedToBackup &&
+                 !stagingActivated &&
+                 installExists &&
+                 backupExists))
+            {
+                throw new InvalidOperationException();
+            }
+        }
+        catch
+        {
+            failed = true;
+        }
+
+        if (failed)
+        {
+            steps.Add(new SetupStepResult(
+                SetupErrorCodes.RollbackFailed,
+                "자동 복구",
+                SetupStepState.Failed,
+                "자동 복구를 시작하기 전 파일 상태가 작업 기록과 일치하지 않습니다. 설치 폴더와 백업 자료를 보존했습니다."));
+            return SetupErrorCodes.RollbackFailed;
+        }
 
         if (mutationStarted)
         {
@@ -447,13 +518,6 @@ public sealed class AgentDeploymentOrchestrator(
 
         try
         {
-            var installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
-            var backupExists = installMovedToBackup &&
-                               backupDirectory is not null &&
-                               fileSystem.DirectoryExists(backupDirectory);
-            var failedExists = stagingActivated &&
-                               failedDirectory is not null &&
-                               fileSystem.DirectoryExists(failedDirectory);
             // A previous rollback may have moved backup -> install and then
             // failed while restoring the install ACL. In that state the failed
             // new version and restored old version both exist, so repeating the
@@ -461,7 +525,17 @@ public sealed class AgentDeploymentOrchestrator(
             var backupWasAlreadyRestored = installMovedToBackup &&
                                            installExists &&
                                            !backupExists &&
-                                           failedExists;
+                                           (failedExists || stagingExists);
+            var rollbackTopologyIsAmbiguous = installMovedToBackup &&
+                                              stagingActivated &&
+                                              installExists &&
+                                              !backupExists &&
+                                              !failedExists &&
+                                              !stagingExists;
+            if (rollbackTopologyIsAmbiguous)
+            {
+                throw new InvalidOperationException();
+            }
 
             if (stagingActivated && installExists && !backupWasAlreadyRestored)
             {
@@ -505,11 +579,6 @@ public sealed class AgentDeploymentOrchestrator(
                 fileSystem.EnsureDirectoryAccess(
                     paths.InstallDirectory,
                     DirectoryAccessKind.ProgramReadExecute);
-            }
-
-            if (stagingDirectory is not null && fileSystem.DirectoryExists(stagingDirectory))
-            {
-                fileSystem.DeleteDirectory(stagingDirectory, recursive: true);
             }
 
             if (dataDirectoryCreated &&
@@ -566,10 +635,37 @@ public sealed class AgentDeploymentOrchestrator(
             }
         }
 
+        if (!failed && stagingActivated && journal is not null)
+        {
+            try
+            {
+                journalStore.Write(journal with
+                {
+                    FormatVersion = DeploymentJournalStore.CurrentFormatVersion,
+                    Stage = RollbackCompletedStage,
+                    InstallMovedToBackup = installMovedToBackup,
+                    StagingActivated = true,
+                    DataDirectoryCreated = dataDirectoryCreated
+                });
+            }
+            catch
+            {
+                // Keep the failed new installation as recovery evidence unless
+                // the completed rollback marker is durably persisted first.
+                failed = true;
+            }
+        }
+
         if (!failed)
         {
             try
             {
+                if (stagingDirectory is not null &&
+                    fileSystem.DirectoryExists(stagingDirectory))
+                {
+                    fileSystem.DeleteDirectory(stagingDirectory, recursive: true);
+                }
+
                 if (failedDirectory is not null && fileSystem.DirectoryExists(failedDirectory))
                 {
                     fileSystem.DeleteDirectory(failedDirectory, recursive: true);
@@ -610,6 +706,7 @@ public sealed class AgentDeploymentOrchestrator(
                 SetupErrorCodes.RecoveryRequired,
                 "이전 설치 기록의 경로가 현재 Agent 제품 경로와 일치하지 않습니다.");
         }
+        ValidatePendingJournalState(pending);
 
         var currentService = serviceManager.Capture(SetupConstants.ServiceName);
         fileSystem.ValidateRecoveryPaths(
@@ -620,38 +717,22 @@ public sealed class AgentDeploymentOrchestrator(
             !pending.DataDirectoryExistedBefore,
             [pending.StagingDirectory, pending.BackupDirectory, pending.FailedDirectory]);
 
-        if (string.Equals(pending.Stage, "committed", StringComparison.Ordinal))
+        if (string.Equals(pending.Stage, RollbackCompletedStage, StringComparison.Ordinal))
         {
-            foreach (var obsolete in new[]
-                     {
-                         pending.BackupDirectory,
-                         pending.StagingDirectory,
-                         pending.FailedDirectory
-                     })
-            {
-                try
-                {
-                    if (fileSystem.DirectoryExists(obsolete))
-                    {
-                        fileSystem.DeleteDirectory(obsolete, recursive: true);
-                    }
-                }
-                catch
-                {
-                    // A committed installation remains authoritative. Preserve leftovers.
-                }
-            }
-
-            journalStore.Delete();
-            steps.Add(new SetupStepResult(
-                "COMMITTED_TRANSACTION_CLEANED",
-                "이전 작업 정리",
-                SetupStepState.Information,
-                "완료된 이전 설치 작업 기록을 정리했습니다."));
+            RecoverCompletedRollback(journalStore, pending, steps);
             return;
         }
 
+        if (string.Equals(pending.Stage, "committed", StringComparison.Ordinal))
+        {
+            RecoverCommittedTransaction(journalStore, pending, steps);
+            return;
+        }
+
+        pending = UpgradePendingJournalForRecovery(journalStore, pending);
         var rollbackCode = TryRollback(
+            journalStore,
+            pending,
             pending.PreviousService,
             pending.PreviousHttpsFirewall,
             pending.PreviousHttpFirewall,
@@ -671,14 +752,147 @@ public sealed class AgentDeploymentOrchestrator(
                 "이전 설치 상태를 자동 복구하지 못했습니다. 작업 기록과 백업을 보존했습니다.");
         }
 
-        journalStore.Delete();
+        try
+        {
+            journalStore.Delete();
+        }
+        catch (Exception exception)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "이전 설치 복구 기록을 정리할 수 없습니다. 다음 실행에서 복구를 다시 시도합니다.",
+                exception);
+        }
+    }
+
+    private void RecoverCompletedRollback(
+        DeploymentJournalStore journalStore,
+        DeploymentJournal pending,
+        List<SetupStepResult> steps)
+    {
+        var installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
+        var backupExists = fileSystem.DirectoryExists(pending.BackupDirectory);
+        var stagingExists = fileSystem.DirectoryExists(pending.StagingDirectory);
+        var failedExists = fileSystem.DirectoryExists(pending.FailedDirectory);
+        var freshDataStillExists =
+            pending.DataDirectoryCreated &&
+            !pending.DataDirectoryExistedBefore &&
+            fileSystem.DirectoryExists(paths.DataDirectory);
+        var unexpectedFreshDataExists =
+            !pending.DataDirectoryCreated &&
+            !pending.DataDirectoryExistedBefore &&
+            fileSystem.DirectoryExists(paths.DataDirectory);
+        var missingPreexistingData =
+            pending.DataDirectoryExistedBefore &&
+            !fileSystem.DirectoryExists(paths.DataDirectory);
+        var installStateIsSafe =
+            pending.InstallMovedToBackup
+                ? installExists
+                : !pending.StagingActivated || !installExists;
+        var transactionRemnantsAreSafe =
+            pending.MutationStarted &&
+            pending.StagingActivated &&
+            !(stagingExists && failedExists);
+
+        if (!installStateIsSafe ||
+            backupExists ||
+            freshDataStillExists ||
+            unexpectedFreshDataExists ||
+            missingPreexistingData ||
+            !transactionRemnantsAreSafe)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "완료된 이전 설치 복구 상태가 안전한 파일 시스템 조건과 일치하지 않습니다.");
+        }
+
+        try
+        {
+            if (stagingExists)
+            {
+                fileSystem.DeleteDirectory(pending.StagingDirectory, recursive: true);
+            }
+
+            if (failedExists)
+            {
+                fileSystem.DeleteDirectory(pending.FailedDirectory, recursive: true);
+            }
+
+            journalStore.Delete();
+        }
+        catch (Exception exception)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "완료된 이전 설치 복구 자료를 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.",
+                exception);
+        }
+
+        steps.Add(new SetupStepResult(
+            "ROLLBACK_RECOVERY_CLEANED",
+            "이전 복구 정리",
+            SetupStepState.Information,
+            "완료된 이전 설치 복구 자료를 안전하게 정리했습니다."));
+    }
+
+    private void RecoverCommittedTransaction(
+        DeploymentJournalStore journalStore,
+        DeploymentJournal pending,
+        List<SetupStepResult> steps)
+    {
+        if (!fileSystem.DirectoryExists(paths.InstallDirectory) ||
+            !fileSystem.DirectoryExists(paths.DataDirectory))
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "완료된 이전 설치 기록과 실제 Agent 프로그램 또는 데이터 폴더가 일치하지 않습니다.");
+        }
+
+        foreach (var obsolete in new[]
+                 {
+                     pending.BackupDirectory,
+                     pending.StagingDirectory,
+                     pending.FailedDirectory
+                 })
+        {
+            try
+            {
+                if (fileSystem.DirectoryExists(obsolete))
+                {
+                    fileSystem.DeleteDirectory(obsolete, recursive: true);
+                }
+            }
+            catch
+            {
+                // A committed installation remains authoritative. Preserve leftovers.
+            }
+        }
+
+        try
+        {
+            journalStore.Delete();
+        }
+        catch (Exception exception)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "완료된 이전 설치 작업 기록을 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.",
+                exception);
+        }
+
+        steps.Add(new SetupStepResult(
+            "COMMITTED_TRANSACTION_CLEANED",
+            "이전 작업 정리",
+            SetupStepState.Information,
+            "완료된 이전 설치 작업 기록을 정리했습니다."));
     }
 
     private static void DeleteJournalAfterRollback(
         DeploymentJournalStore journalStore,
+        DeploymentJournal? journal,
         string? rollbackCode)
     {
-        if (rollbackCode is null)
+        if (journal is not null && rollbackCode is null)
         {
             try
             {
@@ -711,6 +925,97 @@ public sealed class AgentDeploymentOrchestrator(
             throw new SetupException(
                 SetupErrorCodes.ServiceFailed,
                 "같은 이름의 Windows 서비스가 Agent 설치 계약과 일치하지 않아 안전을 위해 중단했습니다.");
+        }
+    }
+
+    private static void ValidatePendingJournalState(DeploymentJournal pending)
+    {
+        var dataFlagsAreValid =
+            !pending.DataDirectoryCreated ||
+            !pending.DataDirectoryExistedBefore;
+        var stageRequiresDataDecision = pending.Stage is
+            "service-configured" or
+            "firewall-configured" or
+            "service-started" or
+            "committed";
+        var dataDecisionIsValid =
+            !stageRequiresDataDecision ||
+            pending.DataDirectoryExistedBefore != pending.DataDirectoryCreated;
+        var stageFlagsAreValid = pending.Stage switch
+        {
+            "prepared" =>
+                !pending.MutationStarted &&
+                !pending.InstallMovedToBackup &&
+                !pending.StagingActivated &&
+                !pending.DataDirectoryCreated,
+            "service-stop-pending" =>
+                pending.MutationStarted &&
+                !pending.InstallMovedToBackup &&
+                !pending.StagingActivated &&
+                !pending.DataDirectoryCreated,
+            "backup-move-pending" =>
+                pending.MutationStarted &&
+                pending.InstallMovedToBackup &&
+                !pending.StagingActivated &&
+                !pending.DataDirectoryCreated,
+            "activation-pending" =>
+                pending.MutationStarted &&
+                pending.StagingActivated &&
+                !pending.DataDirectoryCreated,
+            "data-directory-create-pending" =>
+                pending.MutationStarted &&
+                pending.StagingActivated &&
+                pending.DataDirectoryCreated,
+            "service-configured" or
+            "firewall-configured" or
+            "service-started" or
+            "committed" or
+            RollbackCompletedStage =>
+                pending.MutationStarted &&
+                pending.StagingActivated,
+            _ => false
+        };
+        var formatAndStageAreCompatible =
+            pending.FormatVersion == DeploymentJournalStore.CurrentFormatVersion ||
+            !string.Equals(
+                pending.Stage,
+                RollbackCompletedStage,
+                StringComparison.Ordinal);
+        if (!dataFlagsAreValid ||
+            !dataDecisionIsValid ||
+            !stageFlagsAreValid ||
+            !formatAndStageAreCompatible)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "이전 설치 기록의 단계와 상태 플래그가 일치하지 않습니다.");
+        }
+    }
+
+    private static DeploymentJournal UpgradePendingJournalForRecovery(
+        DeploymentJournalStore journalStore,
+        DeploymentJournal pending)
+    {
+        if (pending.FormatVersion == DeploymentJournalStore.CurrentFormatVersion)
+        {
+            return pending;
+        }
+
+        var upgraded = pending with
+        {
+            FormatVersion = DeploymentJournalStore.CurrentFormatVersion
+        };
+        try
+        {
+            journalStore.Write(upgraded);
+            return upgraded;
+        }
+        catch (Exception exception)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RecoveryRequired,
+                "이전 설치 작업 기록을 안전한 복구 형식으로 전환할 수 없습니다. 기존 기록을 보존했습니다.",
+                exception);
         }
     }
 
