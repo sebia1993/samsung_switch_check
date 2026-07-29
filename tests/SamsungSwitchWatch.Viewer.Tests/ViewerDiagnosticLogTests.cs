@@ -378,6 +378,30 @@ public sealed class ViewerDiagnosticLogTests
     }
 
     [Fact]
+    public void ConnectionTransitions_PreserveViewerIpNotAllowedCode()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(folder);
+
+            log.WriteConnectionTransition(
+                "agent-http",
+                "AGENT_CLIENT_NOT_ALLOWED",
+                "failed");
+
+            using var document = JsonDocument.Parse(File.ReadAllText(log.CurrentPath));
+            Assert.Equal(
+                "AGENT_CLIENT_NOT_ALLOWED",
+                document.RootElement.GetProperty("errorCode").GetString());
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void DiagnosticLog_ConcurrentWritesProduceCompleteJsonLines()
     {
         var folder = TemporaryFolder();

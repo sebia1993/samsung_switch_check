@@ -36,6 +36,141 @@ public sealed class FirewallOwnershipTests
         Assert.False(WindowsFirewallManager.IsOwnedRule(Rule(name, description)));
     }
 
+    [Fact]
+    public void IsOwnedRule_RecognizesVerifiedLegacyPowerShellFriendlyRule()
+    {
+        var snapshot = Rule(
+            WindowsFirewallManager.LegacyPowerShellHttpsFriendlyName,
+            "Owned by SamsungSwitchWatchAgent installer v3") with
+        {
+            Grouping = WindowsFirewallManager.LegacyPowerShellGroup
+        };
+
+        Assert.True(WindowsFirewallManager.IsOwnedRule(snapshot));
+        Assert.Equal(
+            FirewallRuleDisposition.Owned,
+            WindowsFirewallManager.ClassifyRuleForSecurity(
+                snapshot,
+                18443,
+                3,
+                AgentPath));
+    }
+
+    [Theory]
+    [InlineData("", "", "18443")]
+    [InlineData("Wrong Group", "", "18443")]
+    [InlineData("Samsung Switch Watch", @"C:\Other\server.exe", "18443")]
+    [InlineData("Samsung Switch Watch", "", "443")]
+    public void IsOwnedRule_RejectsFriendlyRuleWithoutFullOwnershipSignature(
+        string group,
+        string application,
+        string localPorts)
+    {
+        var snapshot = Rule(
+            WindowsFirewallManager.LegacyPowerShellHttpsFriendlyName,
+            "Owned by SamsungSwitchWatchAgent installer v3") with
+        {
+            Grouping = group,
+            ApplicationName = application,
+            LocalPorts = localPorts
+        };
+
+        Assert.False(WindowsFirewallManager.IsOwnedRule(snapshot));
+    }
+
+    [Fact]
+    public void ClassifyRuleForSecurity_GenericOverlapReturnsWarningDisposition()
+    {
+        var snapshot = Rule(
+            "Company TCP 18443",
+            "Company managed rule");
+
+        Assert.Equal(
+            FirewallRuleDisposition.ExternalOverlap,
+            WindowsFirewallManager.ClassifyRuleForSecurity(
+                snapshot,
+                18443,
+                3,
+                AgentPath));
+    }
+
+    [Fact]
+    public void ClassifyRuleForSecurity_NonOwnedNativeNameIsHardCollision()
+    {
+        var snapshot = Rule(
+            SetupConstants.FirewallRuleName,
+            "Company managed rule") with
+        {
+            Enabled = false,
+            Protocol = 17,
+            LocalPorts = "53"
+        };
+
+        Assert.Equal(
+            FirewallRuleDisposition.ProductNameCollision,
+            WindowsFirewallManager.ClassifyRuleForSecurity(
+                snapshot,
+                18443,
+                3,
+                AgentPath));
+    }
+
+    [Fact]
+    public void ClassifyRuleForSecurity_NonOwnedLegacyFriendlyNameIsHardCollision()
+    {
+        var snapshot = Rule(
+            WindowsFirewallManager.LegacyPowerShellHttpsFriendlyName,
+            "Company managed rule");
+
+        Assert.Equal(
+            FirewallRuleDisposition.ProductNameCollision,
+            WindowsFirewallManager.ClassifyRuleForSecurity(
+                snapshot,
+                18443,
+                3,
+                AgentPath));
+    }
+
+    [Fact]
+    public void AssertPolicySecurityGate_AcceptsDomainOrPrivateBlockPolicy()
+    {
+        WindowsFirewallManager.AssertPolicySecurityGate(
+            firewallServiceRunning: true,
+            activeProfiles: 3,
+            [
+                new FirewallProfileSecurityState(1, true, 0, true),
+                new FirewallProfileSecurityState(2, true, 0, true)
+            ]);
+    }
+
+    [Theory]
+    [InlineData(false, 1, true, 0, true)]
+    [InlineData(true, 4, true, 0, true)]
+    [InlineData(true, 1, false, 0, true)]
+    [InlineData(true, 1, true, 1, true)]
+    [InlineData(true, 1, true, 0, false)]
+    public void AssertPolicySecurityGate_PreservesHardFailureConditions(
+        bool serviceRunning,
+        int activeProfiles,
+        bool firewallEnabled,
+        int defaultInboundAction,
+        bool allowsLocalRules)
+    {
+        var exception = Assert.Throws<SetupException>(() =>
+            WindowsFirewallManager.AssertPolicySecurityGate(
+                serviceRunning,
+                activeProfiles,
+                [
+                    new FirewallProfileSecurityState(
+                        activeProfiles,
+                        firewallEnabled,
+                        defaultInboundAction,
+                        allowsLocalRules)
+                ]));
+
+        Assert.Equal(SetupErrorCodes.FirewallFailed, exception.Code);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
@@ -75,7 +210,7 @@ public sealed class FirewallOwnershipTests
             WindowsFirewallManager.RuleMayApplyToAgent(
                 application,
                 service,
-                @"C:\Program Files\SamsungSwitchWatch\Agent\SamsungSwitchWatch.Agent.exe",
+                AgentPath,
                 "SamsungSwitchWatchAgent"));
     }
 
@@ -118,4 +253,7 @@ public sealed class FirewallOwnershipTests
             "All",
             false,
             string.Empty);
+
+    private const string AgentPath =
+        @"C:\Program Files\SamsungSwitchWatch\Agent\SamsungSwitchWatch.Agent.exe";
 }

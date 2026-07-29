@@ -176,6 +176,9 @@ public sealed class ViewerStabilityTests
     {
         var unauthorized = AgentClientErrors.FromStatus(HttpStatusCode.Unauthorized, "secret response");
         var forbidden = AgentClientErrors.FromStatus(HttpStatusCode.Forbidden);
+        var viewerNotAllowed = AgentClientErrors.FromStatus(
+            HttpStatusCode.Forbidden,
+            """{"error":{"code":"AGENT_CLIENT_NOT_ALLOWED","message":"sensitive"}}""");
         var unavailable = AgentClientErrors.FromStatus(HttpStatusCode.ServiceUnavailable,
             """{"error":{"code":"AGENT_DB_INTEGRITY_FAILED","message":"sensitive"}}""");
         var unsafeCode = AgentClientErrors.FromStatus(HttpStatusCode.ServiceUnavailable,
@@ -183,10 +186,13 @@ public sealed class ViewerStabilityTests
 
         Assert.Equal("AGENT_ACCESS_DENIED", unauthorized.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, forbidden.SuggestedConnectionState);
+        Assert.Equal("AGENT_CLIENT_NOT_ALLOWED", viewerNotAllowed.ErrorCode);
+        Assert.Equal(AgentConnectionState.Stale, viewerNotAllowed.SuggestedConnectionState);
         Assert.Equal("AGENT_DB_INTEGRITY_FAILED", unavailable.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, unavailable.SuggestedConnectionState);
         Assert.Equal("AGENT_NOT_READY", unsafeCode.ErrorCode);
         Assert.DoesNotContain("secret", unauthorized.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sensitive", viewerNotAllowed.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

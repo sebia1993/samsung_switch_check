@@ -18,6 +18,7 @@ public sealed class AgentOptions
     public string ListenUrl { get; set; } = "https://0.0.0.0:18443";
     public string DataDirectory { get; set; } = "data";
     public bool MockMode { get; set; }
+    public string AllowedViewerIpv4 { get; set; } = string.Empty;
     public List<string> AllowedTargetCidrs { get; set; } = [];
     public int MaxConcurrentExecutions { get; set; } = 2;
     public int RateLimitPerMinute { get; set; } = 60;
@@ -88,6 +89,31 @@ public static class AgentOptionsValidator
                 "Allowed target CIDRs must use canonical IPv4 CIDR notation.");
         }
 
+        if (string.IsNullOrWhiteSpace(options.AllowedViewerIpv4))
+        {
+            if (!options.MockMode)
+            {
+                throw new AgentConfigurationException(
+                    AgentErrorCodes.ConfigurationInvalid,
+                    "A private IPv4 Viewer address is required.");
+            }
+
+            options.AllowedViewerIpv4 = string.Empty;
+        }
+        else if (!Ipv4Cidr.TryParseStrictAddress(
+                     options.AllowedViewerIpv4,
+                     out var viewerAddress) ||
+                 !IsPrivateAddress(viewerAddress))
+        {
+            throw new AgentConfigurationException(
+                AgentErrorCodes.ConfigurationInvalid,
+                "The allowed Viewer address must be one exact private IPv4 address.");
+        }
+        else
+        {
+            options.AllowedViewerIpv4 = viewerAddress.ToString();
+        }
+
         if (!Uri.TryCreate(options.ListenUrl, UriKind.Absolute, out var listenUri) ||
             !string.IsNullOrEmpty(listenUri.UserInfo) ||
             !string.IsNullOrEmpty(listenUri.Query) ||
@@ -119,6 +145,19 @@ public static class AgentOptionsValidator
     private static bool IsLoopbackHost(string host) =>
         string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
         IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
+
+    private static bool IsPrivateAddress(IPAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 10 ||
+               bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
+               bytes[0] == 192 && bytes[1] == 168;
+    }
 }
 
 public readonly record struct Ipv4Cidr(uint Network, int PrefixLength)

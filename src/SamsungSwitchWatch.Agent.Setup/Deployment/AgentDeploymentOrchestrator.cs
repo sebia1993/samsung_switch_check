@@ -123,9 +123,12 @@ public sealed class AgentDeploymentOrchestrator(
 
             previousHttpsFirewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
             previousHttpFirewall = firewallManager.Capture(SetupConstants.LegacyFirewallRuleName);
-            firewallManager.AssertSecurityGate(
+            var firewallAssessment = firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
                 paths.AgentExecutablePath);
+            SetupDiagnosticsService.AddFirewallWarnings(
+                steps,
+                firewallAssessment);
 
             journal = new DeploymentJournal(
                 DeploymentJournalStore.CurrentFormatVersion,
@@ -151,6 +154,7 @@ public sealed class AgentDeploymentOrchestrator(
             var configuration = AgentConfigurationFactory.Create(
                 paths.DataDirectory,
                 request.TargetCidrs,
+                request.ViewerIpv4,
                 existingConfiguration);
 
             fileSystem.CreateDirectory(Path.GetDirectoryName(paths.InstallDirectory)!);
@@ -274,7 +278,7 @@ public sealed class AgentDeploymentOrchestrator(
                     SetupErrorCodes.FirewallFailed,
                     "Viewer 전용 방화벽 규칙을 확인하지 못했습니다.");
             }
-            firewallManager.AssertSecurityGate(
+            _ = firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
                 paths.AgentExecutablePath);
             journal = journal with { Stage = "firewall-configured" };
@@ -283,7 +287,7 @@ public sealed class AgentDeploymentOrchestrator(
             steps.Add(Succeeded(
                 "FIREWALL_CONFIGURED",
                 "방화벽 구성",
-                $"Viewer {request.ViewerIpv4}/32만 HTTPS/18443에 연결할 수 있습니다."));
+                $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
 
             serviceManager.Start(SetupConstants.ServiceName, TimeSpan.FromSeconds(30));
             journal = journal with { Stage = "service-started" };

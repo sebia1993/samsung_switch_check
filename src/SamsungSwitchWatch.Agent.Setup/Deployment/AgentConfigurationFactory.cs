@@ -8,6 +8,7 @@ public static class AgentConfigurationFactory
     public static string Create(
         string dataDirectory,
         IReadOnlyList<string> allowedTargetCidrs,
+        string allowedViewerIpv4,
         string? existingConfiguration)
     {
         var existing = ReadExistingAgent(existingConfiguration);
@@ -41,6 +42,7 @@ public static class AgentConfigurationFactory
                 ListenUrl = "https://0.0.0.0:18443",
                 DataDirectory = Path.GetFullPath(dataDirectory),
                 MockMode = false,
+                AllowedViewerIpv4 = allowedViewerIpv4,
                 AllowedTargetCidrs = allowedTargetCidrs,
                 MaxConcurrentExecutions = maxConcurrent,
                 RateLimitPerMinute = rateLimit,

@@ -252,6 +252,8 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public FirewallRuleSnapshot State { get; private set; } = initial;
     public List<string> Operations { get; } = [];
     public SetupException? SecurityGateException { get; set; }
+    public FirewallSecurityAssessment SecurityAssessment { get; set; } =
+        FirewallSecurityAssessment.Safe;
 
     public FirewallRuleSnapshot Capture(string ruleName)
     {
@@ -306,13 +308,17 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
         State.RemoteAddresses == $"{viewerIpv4}/32" &&
         State.Profiles == 3;
 
-    public void AssertSecurityGate(int port, string agentExecutablePath)
+    public FirewallSecurityAssessment AssertSecurityGate(
+        int port,
+        string agentExecutablePath)
     {
         Operations.Add("security-gate");
         if (SecurityGateException is not null)
         {
             throw SecurityGateException;
         }
+
+        return SecurityAssessment;
     }
 }
 

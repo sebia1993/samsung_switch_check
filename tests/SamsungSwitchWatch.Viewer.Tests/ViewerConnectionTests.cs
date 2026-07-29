@@ -630,6 +630,7 @@ public sealed class ViewerConnectionTests
     [InlineData("AGENT_CONNECTION_REFUSED", "Agent를 설치한 PC")]
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
+    [InlineData("AGENT_CLIENT_NOT_ALLOWED", "Agent Setup")]
     [InlineData("AGENT_PROTOCOL_MISMATCH", "최신")]
     [InlineData("AGENT_VERSION_MISMATCH", "같은 릴리스")]
     public void ConnectionMessages_AreActionableAndDoNotRequestSecrets(string code, string expected)
@@ -639,6 +640,18 @@ public sealed class ViewerConnectionTests
         Assert.Contains(expected, message, StringComparison.Ordinal);
         Assert.DoesNotContain("지문", message, StringComparison.Ordinal);
         Assert.DoesNotContain("토큰", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ViewerIpNotAllowedMessage_ExplainsExactRecoveryFlow()
+    {
+        var message = ViewerConnectionMessages.ForCode("AGENT_CLIENT_NOT_ALLOWED");
+
+        Assert.Contains("현재 Viewer IP", message, StringComparison.Ordinal);
+        Assert.Contains("Agent PC", message, StringComparison.Ordinal);
+        Assert.Contains("Agent Setup", message, StringComparison.Ordinal);
+        Assert.Contains("고정 IPv4", message, StringComparison.Ordinal);
+        Assert.Contains("설치/업데이트", message, StringComparison.Ordinal);
     }
 
     [Theory]

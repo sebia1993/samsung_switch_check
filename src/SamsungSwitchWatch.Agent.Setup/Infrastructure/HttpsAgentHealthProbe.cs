@@ -7,11 +7,23 @@ namespace SamsungSwitchWatch.Agent.Setup.Infrastructure;
 
 public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
 {
-    private const int MaximumIdentityBytes = 16 * 1024;
+    private const int MaximumReadinessBytes = 16 * 1024;
     private const int AddressFamilyIpv4 = 2;
     private const int TcpTableOwnerPidListener = 3;
     private const uint NoError = 0;
     private const uint InsufficientBuffer = 122;
+    private readonly Func<HttpMessageHandler> _handlerFactory;
+
+    public HttpsAgentHealthProbe()
+        : this(CreateHandler)
+    {
+    }
+
+    internal HttpsAgentHealthProbe(Func<HttpMessageHandler> handlerFactory)
+    {
+        _handlerFactory = handlerFactory ??
+                          throw new ArgumentNullException(nameof(handlerFactory));
+    }
 
     public async Task<bool> WaitUntilReadyAsync(
         Uri endpoint,
@@ -27,17 +39,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                 nameof(endpoint));
         }
 
-        using var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = (_, _, _, _) => true
-        };
+        using var handler = _handlerFactory();
         using var client = new HttpClient(handler)
         {
             Timeout = TimeSpan.FromSeconds(5)
         };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
-        var identityEndpoint = new Uri(endpoint, "/api/v4/identity");
 
         while (!deadline.IsCancellationRequested)
         {
@@ -50,8 +58,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     continue;
                 }
 
-                using var readyResponse = await client.GetAsync(endpoint, deadline.Token);
-                if (readyResponse.StatusCode != HttpStatusCode.OK)
+                using var readyRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                using var readyResponse = await client.SendAsync(
+                    readyRequest,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    deadline.Token);
+                if (readyResponse.StatusCode != HttpStatusCode.OK ||
+                    readyResponse.Content.Headers.ContentLength > MaximumReadinessBytes)
                 {
                     await DelayBeforeRetry(deadline.Token, cancellationToken);
                     continue;
@@ -62,24 +75,12 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     return true;
                 }
 
-                using var request = new HttpRequestMessage(HttpMethod.Get, identityEndpoint);
-                using var identityResponse = await client.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
+                var readinessJson = await ReadBoundedAsync(
+                    readyResponse.Content,
+                    MaximumReadinessBytes,
                     deadline.Token);
-                if (identityResponse.StatusCode != HttpStatusCode.OK ||
-                    identityResponse.Content.Headers.ContentLength > MaximumIdentityBytes)
-                {
-                    await DelayBeforeRetry(deadline.Token, cancellationToken);
-                    continue;
-                }
-
-                var identityJson = await ReadBoundedAsync(
-                    identityResponse.Content,
-                    MaximumIdentityBytes,
-                    deadline.Token);
-                if (identityJson is not null &&
-                    IsExpectedIdentity(identityJson, expectedProductVersion))
+                if (readinessJson is not null &&
+                    IsExpectedReadiness(readinessJson, expectedProductVersion))
                 {
                     return true;
                 }
@@ -97,7 +98,7 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             }
             catch (JsonException)
             {
-                // A non-Agent or incomplete identity payload is never accepted.
+                // A non-Agent or incomplete readiness payload is never accepted.
             }
 
             await DelayBeforeRetry(deadline.Token, cancellationToken);
@@ -107,26 +108,40 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
         return false;
     }
 
-    internal static bool IsExpectedIdentity(string json, string expectedProductVersion)
+    internal static bool IsExpectedReadiness(string json, string expectedProductVersion)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         return root.ValueKind == JsonValueKind.Object &&
+               root.TryGetProperty("status", out var status) &&
+               status.ValueKind == JsonValueKind.String &&
+               string.Equals(
+                   status.GetString(),
+                   "ready",
+                   StringComparison.Ordinal) &&
                root.TryGetProperty("apiVersion", out var apiVersion) &&
                apiVersion.ValueKind == JsonValueKind.Number &&
                apiVersion.TryGetInt32(out var api) &&
                api == 4 &&
                root.TryGetProperty("protocol", out var protocol) &&
+               protocol.ValueKind == JsonValueKind.String &&
                string.Equals(
                    protocol.GetString(),
                    "https",
                    StringComparison.Ordinal) &&
                root.TryGetProperty("productVersion", out var version) &&
+               version.ValueKind == JsonValueKind.String &&
                string.Equals(
                    NormalizeVersion(version.GetString()),
                    NormalizeVersion(expectedProductVersion),
                    StringComparison.OrdinalIgnoreCase);
     }
+
+    private static HttpMessageHandler CreateHandler() =>
+        new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, _, _, _) => true
+        };
 
     internal static string NormalizeVersion(string? version)
     {

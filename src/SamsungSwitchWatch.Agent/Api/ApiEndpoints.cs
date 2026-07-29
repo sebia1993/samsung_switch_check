@@ -27,6 +27,8 @@ public static class ApiEndpoints
             status = "ready",
             agentId = options.AgentId,
             apiVersion = 4,
+            productVersion = ProductVersion,
+            protocol = "https",
             utc = DateTimeOffset.UtcNow
         }));
 

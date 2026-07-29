@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.2-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.3-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.2-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.2-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.3-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.3-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -86,10 +86,11 @@ Viewer의 연결 진단은 다음 순서로 표시됩니다.
 ## 보안 경계
 
 - Viewer→Agent는 HTTPS/TCP 18443을 사용합니다.
-- Agent Setup은 입력한 고정 Viewer IPv4만 Windows 방화벽에서 `/32`로 허용합니다.
+- Agent Setup은 입력한 고정 Viewer IPv4만 Windows 방화벽에서 `/32`로 허용하고, Agent도
+  같은 주소를 모든 API 요청에서 다시 확인합니다.
 - Agent→스위치는 선택한 관리망의 IPv4와 Telnet/TCP 23만 허용합니다.
-- Agent API에는 별도 로그인이나 페어링 토큰이 없습니다. 고정 Viewer IP 방화벽 정책이
-  접근 경계이므로 사용자 VLAN·공용 Wi-Fi·인터넷에 노출하면 안 됩니다.
+- Agent API에는 별도 로그인이나 페어링 토큰이 없습니다. 고정 Viewer IP의 Windows 방화벽과
+  Agent 내부 접근 제한을 함께 사용하므로 사용자 VLAN·공용 Wi-Fi·인터넷에 노출하면 안 됩니다.
 - Agent가 만드는 ECDSA P-256 신원은 `%ProgramData%\SamsungSwitchWatch`에 보관하고
   DPAPI LocalMachine으로 보호합니다.
 - Telnet 구간은 암호화되지 않습니다. Agent와 스위치는 격리된 관리망에서만 사용합니다.
@@ -102,7 +103,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.2-poc
+.\scripts\build-release.ps1 -Version 0.10.3-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -119,5 +120,5 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.10.2-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.2_POC_KO.md)
+- [0.10.3-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.3_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)
