@@ -2,21 +2,21 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.3-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.4-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.3-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.3-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.4-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.4-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.3-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.4-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
-Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.3-poc` Agent ZIP의 Setup을
+Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.4-poc` Agent ZIP의 Setup을
 다시 실행하십시오.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
@@ -38,15 +38,19 @@ Agent 설치 전에 다음 정보만 준비합니다.
 | 항목 | 의미 | 조건 |
 |---|---|---|
 | Viewer PC IPv4 | Viewer가 Agent에 접속할 때 사용하는 출발지 주소 | 고정 IPv4 한 개 |
-| 관리망 | Agent가 스위치에 Telnet 접속할 직접 연결 사설망 | 자동 검색 결과 중 1~2개 |
+| 관리망 | Agent가 스위치에 Telnet 접속하도록 허용할 사설망 | 자동 검색에서 선택하거나 직접 추가, 합계 1~2개 |
 | Agent 주소 | Viewer에 입력할 Agent PC IPv4 또는 사내 DNS 이름 | Viewer에서 접근 가능 |
 
-사용자가 CIDR을 계산하거나 입력하지 않습니다. Agent Setup이 활성 네트워크 어댑터에서 직접
-연결된 RFC1918 사설망을 검색하고 선택 결과를 내부 CIDR 정책으로 저장합니다.
+Agent Setup은 활성 네트워크 어댑터에서 직접 연결된 RFC1918 사설망을 자동 검색합니다. 이
+목록을 우선 사용하고, 승인된 관리망이 목록에 없을 때만 `IPv4/prefix` 형식으로 직접
+추가합니다. 예를 들어 `10.50.0.10/24`는 `10.50.0.0/24`로 정규화되어 표시·저장됩니다.
+자동 선택과 직접 추가를 합해 서로 다른 관리망 1~2개만 사용할 수 있으며, 공인망, RFC1918
+경계를 벗어나는 범위와 정규화 후 중복되는 범위는 거부됩니다.
 
 Viewer PC 주소가 DHCP로 자주 바뀌거나 Agent PC가 스위치 관리망에 직접 연결되어 있지 않다면
-임의로 사설망 전체를 허용하지 마십시오. 이 버전의 단순 연결 모델과 맞지 않으므로 고정 주소와
-관리망 구성을 사내 네트워크 관리자에게 요청해야 합니다.
+Viewer에는 고정 주소를 사용하고, Agent PC에서 해당 관리망까지 승인된 라우팅과 TCP/23 경로가
+있는지 사내 네트워크 관리자에게 확인하십시오. 연결 문제를 피하려고 사설망 전체나 승인받지
+않은 범위를 추가하지 마십시오.
 
 ## 3. Agent 설치 또는 업데이트
 
@@ -56,7 +60,8 @@ Viewer PC 주소가 DHCP로 자주 바뀌거나 Agent PC가 스위치 관리망�
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행합니다.
 3. Windows UAC에서 관리자 권한을 승인합니다.
 4. Viewer PC의 고정 IPv4를 입력합니다.
-5. 자동 검색된 목록에서 스위치 관리망 1~2개를 선택합니다.
+5. 자동 검색된 목록에서 스위치 관리망을 선택합니다. 목록에 없으면 승인된 관리망을
+   `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`를 눌러 입력값과 현재 서비스·포트·방화벽 상태를 확인합니다.
 7. `설치/업데이트`를 누르고 모든 단계가 성공인지 확인합니다.
 
@@ -67,7 +72,7 @@ Agent Setup은 다음 항목을 구성합니다.
 - HTTPS/TCP 18443 수신
 - 입력한 Viewer IPv4 한 개만 허용하는 Domain·Private 방화벽 규칙
 - 입력한 Viewer IPv4만 Agent API에서 다시 허용하는 애플리케이션 접근 제한
-- 선택한 관리망만 허용하는 Telnet 대상 정책
+- 선택하거나 직접 추가한 관리망만 허용하는 Telnet 대상 정책
 - `%ProgramData%\SamsungSwitchWatch`의 Agent 설정과 HTTPS 신원
 
 설치가 끝나면 Agent는 서비스로만 실행합니다. 일반 사용자의 바탕 화면, 작업 표시줄과
@@ -84,7 +89,7 @@ Agent Setup의 `검사`는 설정을 변경하지 않고 다음 단계를 확인
 
 1. 운영체제와 관리자 권한
 2. 패키지 파일과 BUILD-MANIFEST
-3. Viewer IPv4와 선택 관리망
+3. Viewer IPv4와 선택·추가한 관리망
 4. 서비스 상태
 5. HTTPS/TCP 18443 수신 상태
 6. 제품 소유 방화벽 규칙
@@ -111,6 +116,13 @@ PowerShell을 실행하거나 실행 정책을 변경할 필요가 없습니다.
 같은 폴더에서 새 Release의 Agent Setup을 실행하면 기존 설치를 검사한 후 업데이트합니다.
 HTTPS 신원과 유효한 네트워크 정책은 보존합니다. 파일 교체, 서비스 시작 또는 준비 상태
 검사에 실패하면 기존 프로그램·설정·방화벽을 복구하고 실패 단계를 표시해야 합니다.
+
+기존 운영 설정에 서로 다른 canonical RFC1918 대상 CIDR이 1~2개 있으면 Setup이 관리망
+목록에 다시 불러와 선택 상태로 표시합니다. 기존 대상 목록이 없거나 불완전하거나 중복되는 등
+안전하게 복원할 수 없으면 `SETUP_EXISTING_NETWORKS_NOT_LOADED` 경고를 표시하고 아무
+관리망도 미리 선택하지 않습니다. 이는 영구 차단이 아니며, 운영자가 자동 검색 결과를 다시
+선택하거나 승인된 CIDR을 직접 추가한 뒤 검사와 설치를 계속해야 합니다. 전체 운영 설정 JSON
+자체가 손상된 경우에는 별도의 기존 배포 설정 검증이 설치를 차단할 수 있습니다.
 
 Agent를 먼저 업데이트하고 준비 상태를 확인한 뒤 같은 Release의 Viewer를 사용하십시오.
 
@@ -192,7 +204,7 @@ Viewer의 신뢰 재설정을 사용합니다.
 |---|---:|---|
 | 장비명 | 예 | 운영자가 알아볼 이름 |
 | 모델 | 예 | IES4224GP, IES4028XP, IES4226XP 등 |
-| 장비 IPv4 | 예 | Agent Setup에서 선택한 관리망 내부 주소 |
+| 장비 IPv4 | 예 | Agent Setup에서 선택하거나 직접 추가한 관리망 내부 주소 |
 | ID | 예 | Telnet 로그인 ID |
 | 로그인 PW | 예 | Telnet 로그인 비밀번호 |
 | enable PW | 아니요 | 장비가 enable 전환을 요구할 때만 |
@@ -245,10 +257,19 @@ Viewer가 Agent PC의 TCP/18443에 연결하지 못했습니다.
 
 Agent와 Viewer가 서로 다른 Release입니다. 두 PC 모두 같은 버전의 공식 ZIP으로 맞춥니다.
 
+### SETUP_EXISTING_NETWORKS_NOT_LOADED
+
+기존 Agent 설정의 대상 관리망을 안전하게 불러오지 못했습니다. Setup은 불완전한 값을 임의로
+보정하거나 일부만 미리 선택하지 않습니다. 자동 검색된 관리망을 다시 선택하거나 승인된
+RFC1918 관리망을 `IPv4/prefix`로 직접 추가한 뒤 `검사`를 실행하십시오. 전체 설정 JSON이
+손상되었다는 별도 오류가 함께 표시되면 임의로 덮어쓰지 말고 기존 배포 설정의 복구 절차를
+따릅니다.
+
 ### TARGET_NOT_ALLOWED
 
-장비 IPv4가 Agent Setup에서 선택한 관리망에 포함되지 않습니다. 주소 오입력을 먼저 확인하고
-정말 다른 관리망 장비라면 Agent Setup을 관리자 권한으로 다시 실행하여 정책을 검토합니다.
+장비 IPv4가 Agent Setup에서 확정한 관리망에 포함되지 않습니다. 주소 오입력을 먼저
+확인하십시오. 정말 다른 승인 관리망의 장비라면 Agent Setup을 관리자 권한으로 다시 실행하여
+자동 검색 결과를 선택하거나 해당 RFC1918 CIDR을 직접 추가한 뒤 검사와 설치를 수행합니다.
 
 ### TCP_TIMEOUT / AUTH_FAILED / ENABLE_FAILED
 

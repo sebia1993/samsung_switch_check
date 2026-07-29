@@ -39,12 +39,15 @@ Agent는 요청마다 새 Telnet 세션을 만들고 성공, 실패 또는 취�
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행합니다.
 3. Windows UAC를 한 번 승인합니다.
 4. Viewer PC의 고정 IPv4 한 개를 입력합니다.
-5. Setup이 찾은 직접 연결 RFC1918 사설 IPv4 관리망 중 1~2개를 선택합니다.
+5. Setup이 찾은 RFC1918 사설 IPv4 관리망을 선택하고, 목록에 없는 승인 관리망은
+   `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`로 사전 점검한 뒤 설치 또는 업데이트합니다.
 
-Setup은 사용자가 CIDR을 계산하거나 직접 입력하게 하지 않습니다. 작동 중인 로컬 네트워크
-어댑터의 IPv4 주소와 마스크를 읽어 관리망 후보를 계산하며, loopback·tunnel·공인 주소는 후보에서
-제외합니다. 선택된 망은 Agent의 Telnet 대상 허용 목록이 됩니다.
+Setup은 작동 중인 로컬 네트워크 어댑터의 IPv4 주소와 마스크를 읽어 관리망 후보를 자동
+계산하며, loopback·tunnel·공인 주소는 후보에서 제외합니다. 자동 검색이 기본 경로이지만,
+승인된 라우팅 관리망이 목록에 없으면 운영자가 직접 추가할 수 있습니다. 입력한 호스트 주소는
+canonical 네트워크 주소로 정규화하며, 정규화된 전체 범위가 RFC1918 안에 있는지 확인합니다.
+자동 선택과 직접 추가에서 중복을 제거한 1~2개 망만 Agent의 Telnet 대상 허용 목록이 됩니다.
 
 설치기는 다음 작업을 수행합니다.
 
@@ -154,8 +157,8 @@ Agent는 장비 목록, 장비 자격 증명, 감시 일정, 상태 기준선 �
 
 ## 5. Agent 설정
 
-Setup이 만드는 대표 운영 설정은 다음과 같습니다. 사용자는 CIDR을 직접 편집하는 대신 Setup에서
-관리망을 선택합니다.
+Setup이 만드는 대표 운영 설정은 다음과 같습니다. 운영자는 자동 검색 결과를 선택하거나
+승인된 CIDR을 Setup에서 직접 추가하며, 운영 설정 파일을 직접 편집하지 않습니다.
 
 ```json
 {
@@ -187,9 +190,11 @@ Setup이 만드는 대표 운영 설정은 다음과 같습니다. 사용자는 
 운영 모드에서는 RFC1918 사설 IPv4가 반드시 필요합니다. 일치하지 않는 요청은
 `AGENT_CLIENT_NOT_ALLOWED`로 거부되며 전달 헤더는 주소 판정에 사용하지 않습니다.
 
-`AllowedTargetCidrs`는 요청마다 Agent가 적용하는 SSRF/Telnet 대상 허용 목록입니다. Agent는
-canonical dotted IPv4와 고정 TCP/23만 허용하며 DNS 이름, IPv6, loopback, link-local,
-multicast와 선택 범위 밖 주소를 거부합니다.
+`AllowedTargetCidrs`는 요청마다 Agent가 적용하는 SSRF/Telnet 대상 허용 목록입니다. Setup은
+직접 입력한 `IPv4/prefix`를 canonical 네트워크 주소로 정규화하고, 전체 네트워크가 RFC1918
+범위 안에 있는지 확인합니다. 자동 선택과 직접 추가에서 중복을 제거한 1~2개만 저장합니다.
+Agent는 canonical dotted IPv4와 고정 TCP/23만 허용하며 DNS 이름, IPv6, loopback,
+link-local, multicast와 허용 범위 밖 주소를 거부합니다.
 
 ## 6. API v4
 
@@ -296,9 +301,13 @@ Agent와 Viewer는 같은 Release 버전을 사용합니다. 버전이 다르면
 `AGENT_VERSION_MISMATCH`로 중단하고 두 ZIP을 같은 Release 조합으로 교체합니다.
 
 v0.10 Agent Setup은 기존 설치를 감지하여 Agent ID, HTTPS 신원과 유효 실행 한도를 보존하고,
-현재 입력한 Viewer `/32`와 선택한 관리망으로 접근 경계를 다시 구성합니다. v0.7 계열의 Agent
-장비 목록, Agent 자격 증명 저장소, 자체 Poll Scheduler, 이벤트 DB와 SignalR 수집 흐름은 v0.10
-구조에 포함되지 않습니다.
+현재 입력한 Viewer `/32`와 확정한 관리망으로 접근 경계를 다시 구성합니다. 기존
+`AllowedTargetCidrs`가 서로 다른 canonical RFC1918 CIDR 1~2개이면 Setup 목록에 복원합니다.
+대상 목록을 안전하게 복원할 수 없으면 `SETUP_EXISTING_NETWORKS_NOT_LOADED` 경고를 표시하고
+아무 관리망도 미리 선택하지 않으므로 운영자가 다시 선택하거나 직접 추가해야 합니다. 이
+경고만으로 설치를 영구 차단하지는 않지만, 전체 운영 설정 JSON 손상은 별도의 기존 배포 설정
+검증에서 차단할 수 있습니다. v0.7 계열의 Agent 장비 목록, Agent 자격 증명 저장소, 자체 Poll
+Scheduler, 이벤트 DB와 SignalR 수집 흐름은 v0.10 구조에 포함되지 않습니다.
 
 ## 10. 의도적으로 하지 않는 동작
 
@@ -306,6 +315,7 @@ v0.10 Agent Setup은 기존 설치를 감지하여 Agent ID, HTTPS 신원과 유
 - Viewer 자동 시작 또는 시스템 전체 설치
 - Agent가 Viewer 없이 독립적으로 장비 감시
 - Viewer에서 설정 변경 명령 실행
-- CIDR 수동 입력
+- 공인망 또는 승인받지 않은 CIDR 허용
+- 관리망을 세 개 이상 허용
 - 지문 또는 페어링 토큰 수동 입력
 - 공개 ZIP에서 PowerShell·CMD 스크립트 실행

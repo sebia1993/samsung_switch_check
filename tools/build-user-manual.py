@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.3 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.4 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.3-poc"
+VERSION = "0.10.4-poc"
 DOCUMENT_DATE = "2026-07-29"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -679,7 +679,7 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
-            "고정 Viewer IPv4를 입력하고 자동 검색된 스위치 관리망 1~2개를 선택해 Agent 서비스를 설치합니다.",
+            "고정 Viewer IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 사설 관리망을 직접 추가해 합계 1~2개로 설치합니다.",
             "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
             "Viewer가 열리면 Agent를 설치한 원격 PC의 주소만 입력합니다. HTTPS/18443은 자동입니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
@@ -713,7 +713,7 @@ Viewer PC                 Agent PC                    Samsung Switch
         ["구간", "고정 통신", "운영 제한"],
         [
             ("Viewer → Agent", "HTTPS/TCP 18443", "Viewer /32 방화벽과 Agent의 동일 IPv4 재검증"),
-            ("Agent → Switch", "Telnet/TCP 23", "설치 시 선택한 관리망만 허용"),
+            ("Agent → Switch", "Telnet/TCP 23", "설치 시 선택·추가한 관리망만 허용"),
         ],
         [1900, 2100, 5360],
     )
@@ -748,7 +748,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
             "SamsungSwitchWatch.Agent.Setup.exe를 실행하고 UAC 관리자 승인을 합니다.",
-            "고정 Viewer PC IPv4를 입력하고 자동 검색된 직접 연결 사설 관리망 1~2개를 선택합니다.",
+            "고정 Viewer PC IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
+            "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
             "검사를 실행한 뒤 설치/업데이트를 누르고 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
     )
@@ -757,8 +758,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         images_dir / "00-agent-setup.png",
         width=4.5,
         title="Agent Setup 화면",
-        alt_text="고정 Viewer IPv4와 자동 검색된 직접 연결 관리망을 선택하는 Agent Setup 화면",
-        caption="그림 1. Agent 서비스 설치와 네트워크 범위 선택",
+        alt_text="고정 Viewer IPv4, 자동 검색 관리망, 정규화된 직접 추가 관리망을 확인하는 Agent Setup 화면",
+        caption="그림 1. Agent 서비스 설치와 자동·직접 추가 관리망 범위 확인",
     )
     add_callout(
         doc,
@@ -773,7 +774,9 @@ Viewer PC                 Agent PC                    Samsung Switch
         doc,
         """
 Viewer PC IPv4 예     : 10.20.30.25
-선택 관리망 예       : 10.50.0.0/24
+자동 검색 관리망     : 10.50.0.0/24
+직접 추가 입력       : 172.20.40.25/24
+정규화 결과          : 172.20.40.0/24
 서비스 이름          : SamsungSwitchWatchAgent
 서비스 계정          : NT SERVICE\\SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
@@ -801,8 +804,8 @@ Viewer PC IPv4 예     : 10.20.30.25
         doc,
         "네트워크 정책 변경",
         "Viewer PC 주소나 스위치 관리망이 바뀌면 같은 Release의 Agent Setup을 다시 열어 "
-        "고정 Viewer IPv4와 자동 검색된 관리망을 검토합니다. 사용자가 CIDR을 계산하거나 "
-        "사설망 전체를 직접 허용하지 않습니다. 검사에서 서비스, TCP/18443 listener, "
+        "고정 Viewer IPv4와 자동 검색 또는 직접 추가 관리망을 검토합니다. 직접 입력은 "
+        "네트워크 주소로 자동 정규화되며 RFC1918 범위만 허용됩니다. 검사에서 서비스, TCP/18443 listener, "
         "방화벽, Agent 내부 Viewer 허용 주소, 활성 프로필과 live/ready를 확인합니다.",
         "info",
     )
@@ -1111,7 +1114,7 @@ Viewer PC IPv4 예     : 10.20.30.25
             "기존 Agent HTTPS 신원과 유효한 실행 설정은 같은 PC의 업데이트에서 보존합니다.",
             "제품 소유 방화벽 규칙과 Agent 원격 업무 API는 같은 고정 Viewer IPv4를 허용합니다. "
             "외부 방화벽 규칙은 변경하지 않으며, Agent PC의 로컬 준비 상태 점검만 예외입니다. "
-            "Agent는 Setup에서 선택한 직접 연결 관리망의 Telnet/23만 사용합니다.",
+            "Agent는 Setup에서 선택하거나 직접 추가해 확정한 관리망의 Telnet/23만 사용합니다.",
         ],
         bullet_num_id,
     )
@@ -1146,7 +1149,8 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("SETUP_FIREWALL_FAILED", "Windows 방화벽 서비스 → 제품 규칙 이름 충돌 → 기본 인바운드·그룹 정책"),
             ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
             ("SETUP_ROLLBACK_FAILED", "재실행하지 말고 표시 단계와 보존된 백업을 Windows 관리자에게 전달"),
-            ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택한 관리망 내부인지 확인"),
+            ("SETUP_EXISTING_NETWORKS_NOT_LOADED", "기존 관리망을 자동 복원하지 못함. 승인된 관리망을 다시 선택하거나 IPv4/prefix로 직접 추가"),
+            ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택·추가한 관리망 내부인지 확인. 필요하면 승인된 사설 CIDR을 Setup에서 추가"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),

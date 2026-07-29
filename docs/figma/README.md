@@ -6,7 +6,8 @@
 - Current device-management dialog: node `37:4`
 - Current device-command dashboard: node `37:333`
 - Current automatic HTTPS Agent connection dialog: node `36:2`
-- Current Agent Setup firewall-overlap warning state: node `42:340`
+- Current Agent Setup manual management-network screen: node `46:72`
+- Agent Setup manual CIDR states: normalized `48:72`, invalid `48:85`, maximum `48:98`
 - Mini window: 400x260 offline/recovery frame, node `14:127`
 - Popup state strip: node `15:129`
 - Operational and security state gallery: node `15:148`
@@ -56,13 +57,26 @@ pairing, and Bearer-token flows. The current dialog contains only the Agent
 address and fixed HTTPS port `18443`; access control belongs to the management
 network and Windows Firewall rules.
 
-Node `42:340` is the source of truth for Agent Setup when another program
-already has an inbound TCP/18443 Allow rule. The existing rule is shown as a
-warning and is never changed or removed. The existing `설치 / 업데이트` flow
-continues, creates the product-owned Viewer `/32` rule, and configures the Agent
-to allow only the fixed Viewer IPv4 at the remote-work API boundary. Local
-`/health/live` and `/health/ready` checks remain the only loopback exception. It
-intentionally adds no separate auto-fix button.
+Node `46:72` is the current source of truth for Agent Setup. Automatic RFC1918
+management-network discovery remains the default, while an approved routed
+network that is absent from the list may be added as `IPv4/prefix`. A host
+address is normalized to its canonical network address, public or
+RFC1918-crossing ranges are rejected, and automatic plus manual selections are
+limited to two unique networks.
+
+The companion state frames show the required feedback: `48:72` for successful
+normalization, `48:85` for invalid or non-private input, and `48:98` when a
+third unique network is attempted. Existing one or two canonical
+`AllowedTargetCidrs` are restored into the same list. If that target list cannot
+be restored safely, Setup shows `SETUP_EXISTING_NETWORKS_NOT_LOADED`, preloads
+no network, and asks the operator to select or add the approved networks again.
+
+The v8 screen preserves the v7 firewall behavior: another program's inbound
+TCP/18443 Allow rule is shown as a warning and is never changed or removed.
+The existing `설치 / 업데이트` flow creates the product-owned Viewer `/32`
+rule and configures the Agent to allow only the fixed Viewer IPv4 at the
+remote-work API boundary. Local `/health/live` and `/health/ready` checks remain
+the only loopback exception, and no separate auto-fix button is added.
 
 Node `33:205` keeps the three-column operational dashboard while adding clear
 entry points for Agent connection and device management. It explicitly states
@@ -72,6 +86,7 @@ that monitoring is Viewer-owned and stops when the Viewer is closed.
 
 - Previous simplified dashboard v5: node `25:138`
 - Previous HTTP connection v4: node `25:214`
+- Previous Agent Setup firewall-overlap state v7: node `42:340`
 - Historical v3 pairing wizard: node `20:129`
 - Historical-flow warning banner: node `29:205`
 - Previous command capability and fallback screen: node `22:131`

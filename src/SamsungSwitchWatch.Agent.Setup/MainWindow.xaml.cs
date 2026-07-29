@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
 
@@ -16,7 +17,10 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<NetworkSelectionItem> _networks = [];
     private readonly ObservableCollection<ResultRow> _results = [];
     private CancellationTokenSource? _operationCancellation;
+    private IReadOnlyList<string> _initialTargetCidrs = [];
+    private SetupStepResult? _existingNetworksWarning;
     private bool _suppressNetworkSelectionEvent;
+    private bool _initialNetworksApplied;
     private bool _closeRequested;
 
     public MainWindow(
@@ -45,12 +49,34 @@ public partial class MainWindow : Window
         Closing += OnClosing;
     }
 
+    internal void InitializeExistingTargetNetworks(
+        IReadOnlyList<string> targetCidrs,
+        SetupStepResult? warning)
+    {
+        if (IsLoaded)
+        {
+            throw new InvalidOperationException(
+                "Existing management networks must be initialized before the window is shown.");
+        }
+
+        _initialTargetCidrs = targetCidrs.ToArray();
+        _existingNetworksWarning = warning;
+    }
+
     private void RefreshNetworksButton_Click(object sender, RoutedEventArgs e) =>
         RefreshNetworks();
 
     private void RefreshNetworks()
     {
-        _networks.Clear();
+        var applyingInitialNetworks = !_initialNetworksApplied;
+        var selectedCidrs = _networks
+            .Where(item => item.IsSelected)
+            .Select(item => item.Cidr)
+            .ToHashSet(StringComparer.Ordinal);
+        var preservedManualItems = _networks
+            .Where(item => item.CanRemove)
+            .ToArray();
+
         IReadOnlyList<NetworkCandidate> candidates;
         try
         {
@@ -65,16 +91,62 @@ public partial class MainWindow : Window
                 "Windows 네트워크 어댑터 정보를 읽지 못했습니다.");
         }
 
+        if (applyingInitialNetworks)
+        {
+            selectedCidrs.Clear();
+            if (_existingNetworksWarning is null)
+            {
+                selectedCidrs.UnionWith(_initialTargetCidrs);
+                if (_initialTargetCidrs.Count == 0)
+                {
+                    var discoveredCidrs = candidates
+                        .Select(candidate => candidate.Cidr)
+                        .Distinct(StringComparer.Ordinal)
+                        .ToArray();
+                    if (discoveredCidrs.Length == 1)
+                    {
+                        selectedCidrs.Add(discoveredCidrs[0]);
+                    }
+                }
+            }
+
+            _initialNetworksApplied = true;
+            ShowExistingNetworksStatus();
+        }
+
+        _networks.Clear();
         foreach (var candidate in candidates)
         {
             _networks.Add(new NetworkSelectionItem(candidate)
             {
-                IsSelected = candidates.Count == 1
+                IsSelected = selectedCidrs.Contains(candidate.Cidr)
             });
         }
 
+        var discovered = candidates
+            .Select(candidate => candidate.Cidr)
+            .ToHashSet(StringComparer.Ordinal);
+        var manualItems = preservedManualItems
+            .Where(item => !discovered.Contains(item.Cidr))
+            .ToDictionary(item => item.Cidr, StringComparer.Ordinal);
+        foreach (var cidr in selectedCidrs)
+        {
+            if (!discovered.Contains(cidr) && !manualItems.ContainsKey(cidr))
+            {
+                manualItems.Add(
+                    cidr,
+                    NetworkSelectionItem.FromSavedConfiguration(cidr));
+            }
+        }
+
+        foreach (var item in manualItems.Values.OrderBy(item => item.Cidr, StringComparer.Ordinal))
+        {
+            item.IsSelected = selectedCidrs.Contains(item.Cidr);
+            _networks.Add(item);
+        }
+
         NoNetworksText.Visibility =
-            _networks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            candidates.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void NetworkSelectionChanged(object sender, RoutedEventArgs e)
@@ -84,18 +156,37 @@ public partial class MainWindow : Window
             return;
         }
 
-        var selected = _networks.Count(item => item.IsSelected);
-        if (selected <= 2)
+        if (sender is not FrameworkElement
+            {
+                DataContext: NetworkSelectionItem selectedItem
+            })
         {
             return;
         }
 
+        var requestedState = selectedItem.IsSelected;
         _suppressNetworkSelectionEvent = true;
         try
         {
-            if (sender is FrameworkElement { DataContext: NetworkSelectionItem item })
+            foreach (var item in _networks.Where(item =>
+                         string.Equals(
+                             item.Cidr,
+                             selectedItem.Cidr,
+                             StringComparison.Ordinal)))
             {
-                item.IsSelected = false;
+                item.IsSelected = requestedState;
+            }
+
+            if (SelectedCidrCount() > 2)
+            {
+                foreach (var item in _networks.Where(item =>
+                             string.Equals(
+                                 item.Cidr,
+                                 selectedItem.Cidr,
+                                 StringComparison.Ordinal)))
+                {
+                    item.IsSelected = false;
+                }
             }
         }
         finally
@@ -103,12 +194,152 @@ public partial class MainWindow : Window
             _suppressNetworkSelectionEvent = false;
         }
 
-        MessageBox.Show(
-            this,
-            "관리망은 최대 두 개까지 선택할 수 있습니다.",
-            "관리망 선택",
-            MessageBoxButton.OK,
-            MessageBoxImage.Information);
+        if (requestedState && !selectedItem.IsSelected)
+        {
+            ShowManualNetworkFeedback(
+                "자동 선택과 직접 추가를 합해 최대 두 개까지 사용할 수 있습니다. 기존 항목을 먼저 해제하세요.",
+                Brushes.DarkGoldenrod);
+        }
+    }
+
+    private void AddManualNetworkButton_Click(object sender, RoutedEventArgs e) =>
+        AddManualNetwork();
+
+    private void ManualCidrTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        AddManualNetwork();
+    }
+
+    private void AddManualNetwork()
+    {
+        if (!Ipv4Input.TryNormalizePrivateCidr(
+                ManualCidrTextBox.Text,
+                out var canonicalCidr))
+        {
+            ShowManualNetworkFeedback(
+                "입력 오류: RFC1918 사설 IPv4 CIDR과 /0~32 범위를 확인하세요.",
+                Brushes.Firebrick);
+            return;
+        }
+
+        var matchingItems = _networks
+            .Where(item => string.Equals(
+                item.Cidr,
+                canonicalCidr,
+                StringComparison.Ordinal))
+            .ToArray();
+        if (matchingItems.Length > 0)
+        {
+            if (matchingItems.Any(item => item.IsSelected))
+            {
+                ShowManualNetworkFeedback(
+                    $"이미 같은 관리망이 선택되어 있습니다: {canonicalCidr}",
+                    Brushes.RoyalBlue);
+                return;
+            }
+
+            if (SelectedCidrCount() >= 2)
+            {
+                ShowManualNetworkFeedback(
+                    "최대 두 개까지 선택할 수 있습니다. 기존 항목을 먼저 해제하세요.",
+                    Brushes.DarkGoldenrod);
+                return;
+            }
+
+            SetCidrSelected(canonicalCidr, true);
+            ManualCidrTextBox.Clear();
+            ShowManualNetworkFeedback(
+                $"기존 항목을 선택했습니다: {canonicalCidr}",
+                Brushes.SeaGreen);
+            return;
+        }
+
+        if (SelectedCidrCount() >= 2)
+        {
+            ShowManualNetworkFeedback(
+                "최대 두 개까지 선택할 수 있습니다. 기존 항목을 먼저 해제하세요.",
+                Brushes.DarkGoldenrod);
+            return;
+        }
+
+        var manualItem = NetworkSelectionItem.FromManualInput(canonicalCidr);
+        manualItem.IsSelected = true;
+        _networks.Add(manualItem);
+        ManualCidrTextBox.Clear();
+        ShowManualNetworkFeedback(
+            $"추가됨: {canonicalCidr} · 총 2개 중 {SelectedCidrCount()}개 선택",
+            Brushes.SeaGreen);
+    }
+
+    private void RemoveManualNetworkButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement
+            {
+                DataContext: NetworkSelectionItem { CanRemove: true } item
+            })
+        {
+            return;
+        }
+
+        _networks.Remove(item);
+        ShowManualNetworkFeedback(
+            $"직접 추가 관리망을 삭제했습니다: {item.Cidr}",
+            Brushes.RoyalBlue);
+    }
+
+    private int SelectedCidrCount() =>
+        _networks
+            .Where(item => item.IsSelected)
+            .Select(item => item.Cidr)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+    private void SetCidrSelected(string cidr, bool isSelected)
+    {
+        _suppressNetworkSelectionEvent = true;
+        try
+        {
+            foreach (var item in _networks.Where(item =>
+                         string.Equals(item.Cidr, cidr, StringComparison.Ordinal)))
+            {
+                item.IsSelected = isSelected;
+            }
+        }
+        finally
+        {
+            _suppressNetworkSelectionEvent = false;
+        }
+    }
+
+    private void ShowManualNetworkFeedback(string message, Brush brush)
+    {
+        ManualNetworkFeedbackText.Text = message;
+        ManualNetworkFeedbackText.Foreground = brush;
+    }
+
+    private void ShowExistingNetworksStatus()
+    {
+        if (_existingNetworksWarning is not null)
+        {
+            ExistingNetworksWarningText.Text =
+                $"{_existingNetworksWarning.Code}: {_existingNetworksWarning.Message}";
+            ExistingNetworksWarningText.Visibility = Visibility.Visible;
+            return;
+        }
+
+        ExistingNetworksWarningText.Visibility = Visibility.Collapsed;
+        if (_initialTargetCidrs.Count > 0)
+        {
+            ShowManualNetworkFeedback(
+                $"기존 설정의 관리망 {_initialTargetCidrs.Count}개를 불러왔습니다.",
+                Brushes.SeaGreen);
+        }
     }
 
     private async void CheckButton_Click(object sender, RoutedEventArgs e)
@@ -159,6 +390,7 @@ public partial class MainWindow : Window
             _networks
                 .Where(item => item.IsSelected)
                 .Select(item => item.Cidr)
+                .Distinct(StringComparer.Ordinal)
                 .ToArray());
 
     private async Task RunOperationAsync(
@@ -225,6 +457,8 @@ public partial class MainWindow : Window
         ViewerIpTextBox.IsEnabled = !busy;
         RefreshNetworksButton.IsEnabled = !busy;
         NetworkItemsControl.IsEnabled = !busy;
+        ManualCidrTextBox.IsEnabled = !busy;
+        AddManualNetworkButton.IsEnabled = !busy;
         CheckButton.IsEnabled = !busy;
         InstallButton.IsEnabled = !busy && !_diagnosticsOnly;
     }
@@ -251,14 +485,67 @@ public partial class MainWindow : Window
     }
 }
 
-public sealed class NetworkSelectionItem(NetworkCandidate candidate) : INotifyPropertyChanged
+public sealed class NetworkSelectionItem : INotifyPropertyChanged
 {
     private bool _isSelected;
 
-    public string InterfaceName { get; } = candidate.InterfaceName;
-    public string Address { get; } = candidate.Address;
-    public string Cidr { get; } = candidate.Cidr;
-    public string Description { get; } = candidate.Description;
+    public NetworkSelectionItem(NetworkCandidate candidate)
+        : this(
+            candidate.InterfaceName,
+            candidate.Address,
+            candidate.Cidr,
+            candidate.Description,
+            $"이 PC 주소: {candidate.Address} · {candidate.Description}",
+            $"{candidate.InterfaceName} · {candidate.Cidr} · 이 PC {candidate.Address}",
+            canRemove: false)
+    {
+    }
+
+    private NetworkSelectionItem(
+        string interfaceName,
+        string address,
+        string cidr,
+        string description,
+        string detailText,
+        string displayText,
+        bool canRemove)
+    {
+        InterfaceName = interfaceName;
+        Address = address;
+        Cidr = cidr;
+        Description = description;
+        DetailText = detailText;
+        DisplayText = displayText;
+        CanRemove = canRemove;
+    }
+
+    public string InterfaceName { get; }
+    public string Address { get; }
+    public string Cidr { get; }
+    public string Description { get; }
+    public string DetailText { get; }
+    public string DisplayText { get; }
+    public bool CanRemove { get; }
+
+    internal static NetworkSelectionItem FromManualInput(string cidr) =>
+        new(
+            "직접 추가",
+            "-",
+            cidr,
+            "수동 입력",
+            "수동 입력",
+            $"직접 추가 · {cidr} · 수동 입력",
+            canRemove: true);
+
+    internal static NetworkSelectionItem FromSavedConfiguration(string cidr) =>
+        new(
+            "기존 설정",
+            "-",
+            cidr,
+            "직접 연결 아님",
+            "직접 연결 아님",
+            $"기존 설정 · {cidr} · 직접 연결 아님",
+            canRemove: true);
 
     public bool IsSelected
     {

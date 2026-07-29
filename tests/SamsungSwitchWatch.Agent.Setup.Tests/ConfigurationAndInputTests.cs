@@ -8,6 +8,24 @@ namespace SamsungSwitchWatch.Agent.Setup.Tests;
 public sealed class ConfigurationAndInputTests
 {
     [Fact]
+    public void NetworkSelectionItem_PreservesExistingCandidateProperties()
+    {
+        var candidate = new NetworkCandidate(
+            "adapter-1",
+            "Ethernet",
+            "10.20.30.10",
+            "10.20.30.0/24",
+            "management adapter");
+
+        var item = new NetworkSelectionItem(candidate);
+
+        Assert.Equal(candidate.InterfaceName, item.InterfaceName);
+        Assert.Equal(candidate.Address, item.Address);
+        Assert.Equal(candidate.Cidr, item.Cidr);
+        Assert.Equal(candidate.Description, item.Description);
+    }
+
+    [Fact]
     public void ResultRow_WarningUsesDistinctYellowIndicator()
     {
         var row = ResultRow.From(new SetupStepResult(
@@ -162,5 +180,76 @@ public sealed class ConfigurationAndInputTests
 
         var candidate = Assert.Single(candidates);
         Assert.Equal("192.168.20.0/24", candidate.Cidr);
+    }
+
+    [Theory]
+    [InlineData("10.42.55.99/8", "10.0.0.0/8")]
+    [InlineData("10.42.55.99/24", "10.42.55.0/24")]
+    [InlineData("10.42.55.99/32", "10.42.55.99/32")]
+    [InlineData("172.31.44.10/12", "172.16.0.0/12")]
+    [InlineData("172.20.44.10/16", "172.20.0.0/16")]
+    [InlineData("192.168.50.201/24", "192.168.50.0/24")]
+    [InlineData(" 192.168.50.201/24 ", "192.168.50.0/24")]
+    public void TryNormalizePrivateCidr_NormalizesPrivateHostAddress(
+        string input,
+        string expected)
+    {
+        var succeeded = Ipv4Input.TryNormalizePrivateCidr(input, out var actual);
+
+        Assert.True(succeeded);
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("10.1.1.1")]
+    [InlineData("10.1.1.1/")]
+    [InlineData("10.1.1.1/24/1")]
+    [InlineData("010.1.1.1/8")]
+    [InlineData("10.1.1.1 /24")]
+    [InlineData("10.1.1.1/ 24")]
+    [InlineData("10.1.1.1/024")]
+    [InlineData("10.1.1.1/+24")]
+    [InlineData("10.1.1.1/-1")]
+    [InlineData("10.1.1.1/33")]
+    [InlineData("10.1.1.1/7")]
+    [InlineData("172.16.1.1/11")]
+    [InlineData("192.168.1.1/15")]
+    [InlineData("8.8.8.8/32")]
+    [InlineData("127.0.0.1/32")]
+    [InlineData("169.254.1.1/32")]
+    [InlineData("2001:db8::1/128")]
+    public void TryNormalizePrivateCidr_RejectsInvalidOrNonPrivateInput(string? input)
+    {
+        var succeeded = Ipv4Input.TryNormalizePrivateCidr(input, out var actual);
+
+        Assert.False(succeeded);
+        Assert.Equal(string.Empty, actual);
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/8")]
+    [InlineData("10.42.55.0/24")]
+    [InlineData("10.42.55.99/32")]
+    [InlineData("172.16.0.0/12")]
+    [InlineData("172.20.0.0/16")]
+    [InlineData("192.168.50.0/24")]
+    public void IsCanonicalPrivateCidr_AcceptsCanonicalPrivateNetwork(string input)
+    {
+        Assert.True(Ipv4Input.IsCanonicalPrivateCidr(input));
+    }
+
+    [Theory]
+    [InlineData("10.42.55.99/8")]
+    [InlineData("172.31.44.10/12")]
+    [InlineData("192.168.50.201/24")]
+    [InlineData(" 192.168.50.0/24")]
+    [InlineData("192.168.50.0/24 ")]
+    [InlineData("192.168.50.0/024")]
+    [InlineData("8.8.8.0/24")]
+    public void IsCanonicalPrivateCidr_RejectsNonCanonicalOrNonPrivateNetwork(string input)
+    {
+        Assert.False(Ipv4Input.IsCanonicalPrivateCidr(input));
     }
 }

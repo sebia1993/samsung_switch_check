@@ -6,7 +6,7 @@
 |---|---|---|
 | Viewer 로컬 저장소 | DPAPI CurrentUser | 같은 Windows 사용자 세션 또는 계정 탈취 |
 | Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, Viewer 고정 IPv4 `/32` 방화벽, Agent의 동일 IPv4 재검증 | 애플리케이션 사용자 인증 없음 |
-| Agent → 스위치 | Setup에서 선택한 직접 연결 관리망 제한, TCP/23 고정, 한 줄 `show` 정책 | Telnet 평문 노출 |
+| Agent → 스위치 | Setup에서 확정한 RFC1918 관리망 제한, TCP/23 고정, 한 줄 `show` 정책 | Telnet 평문 노출 |
 | Agent 서비스와 데이터 | 전용 서비스 SID, 제한된 서비스·폴더 ACL, 무창 서비스 | 로컬 관리자는 제어 가능 |
 
 HTTPS를 사용하더라도 등록된 Viewer IPv4를 사용하는 클라이언트는 Agent API에 접근할 수
@@ -80,8 +80,8 @@ Setup은 패키지를 변경하기 전에 다음을 확인합니다.
 요청합니다.
 
 v0.10 업데이트는 기존 DataDirectory를 유지하여 Agent ID와 HTTPS 신원을 보존합니다. 대상
-관리망은 현재 Setup에서 선택한 1~2개 망으로, Viewer 방화벽 경계는 현재 입력한 고정 IPv4
-`/32`로 명시적으로 다시 적용합니다.
+관리망은 Setup에서 자동 선택하거나 직접 추가해 확정한 서로 다른 1~2개 망으로, Viewer 방화벽
+경계는 현재 입력한 고정 IPv4 `/32`로 명시적으로 다시 적용합니다.
 
 릴리스는 서명 인증서가 없는 `-poc` 배포물일 수 있습니다. SHA-256은 전송 중 변경을 확인할 수
 있지만 게시자 신원을 증명하지 않습니다. 사내 반입 전에 조직의 백신·EDR·SmartScreen 정책에
@@ -121,22 +121,35 @@ Agent는 운영 설정의 `AllowedViewerIpv4`와 실제 TCP 연결의 원격 주
 ## 6. 스위치 대상 경계
 
 Setup은 Agent PC에서 작동 중인 직접 연결 네트워크 어댑터의 RFC1918 사설 IPv4 주소와 마스크를
-읽어 선택 후보를 만듭니다. 운영자는 스위치 관리에 사용할 망을 1~2개 선택합니다. CIDR을 직접
-입력하거나 임의 대역을 추가하는 UI는 없습니다.
+읽어 선택 후보를 만듭니다. 자동 검색 결과가 기본이며, 승인된 관리망이 목록에 없으면 운영자가
+`IPv4/prefix` 형식으로 직접 추가할 수 있습니다. 호스트 주소를 입력해도 네트워크 주소로
+정규화합니다. 예를 들어 `10.50.0.10/24`는 `10.50.0.0/24`가 됩니다.
+
+직접 추가 값은 strict dotted IPv4와 prefix 형식이어야 하고, 정규화된 네트워크 전체가
+RFC1918 범위 안에 있어야 합니다. 공인망, RFC1918 경계를 벗어나는 넓은 범위, 정규화 후 중복되는
+범위와 자동 선택·직접 추가를 합해 세 번째가 되는 범위는 거부합니다. 최종 허용 목록은 서로
+다른 canonical CIDR 1~2개입니다.
 
 Agent는 매 요청에서 다음 조건을 모두 확인합니다.
 
 - canonical dotted IPv4
-- 선택된 관리망 안에 포함
+- Setup에서 확정한 관리망 안에 포함
 - TCP 포트 23
 - loopback, link-local, multicast 또는 기타 특수 범위가 아님
 
 Viewer UI 검증과 별개로 Agent가 다시 검증하므로 변조된 API 요청도 같은 정책을 통과해야 합니다.
 이는 Agent 실행기의 필수 대상 allowlist이며, Windows 아웃바운드 방화벽 규칙은 아닙니다.
 
-직접 연결된 RFC1918 관리망을 찾지 못하면 설치를 계속하기 전에 PC의 네트워크 구성과 어댑터
-상태를 확인해야 합니다. 보안정책을 우회하기 위해 넓은 가상 어댑터나 임시 라우팅을 추가하지
-마십시오.
+자동 검색에서 RFC1918 관리망을 찾지 못하면 PC의 네트워크 구성과 어댑터 상태를 먼저
+확인합니다. 승인된 라우팅 관리망을 직접 추가할 때도 Agent PC에서 대상까지 실제 TCP/23 경로가
+있는지 확인해야 합니다. 보안정책을 우회하기 위해 넓은 가상 어댑터, 임시 라우팅이나
+승인받지 않은 사설망 범위를 추가하지 마십시오.
+
+기존 운영 설정의 `AllowedTargetCidrs`가 서로 다른 canonical RFC1918 CIDR 1~2개이면 Setup이
+이를 복원합니다. 대상 목록을 안전하게 복원할 수 없으면
+`SETUP_EXISTING_NETWORKS_NOT_LOADED` 경고와 함께 아무 관리망도 미리 선택하지 않으며,
+운영자가 다시 선택하거나 직접 추가해야 합니다. 이 경고만으로 영구 차단하지는 않지만, 전체
+운영 설정 JSON이 손상된 경우에는 별도의 기존 배포 설정 검증이 설치를 차단할 수 있습니다.
 
 ## 7. 명령 정책
 
@@ -203,7 +216,8 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 - Telnet 원문과 `show running-config`
 - 장비 MAC, 시리얼과 고객 식별정보
 
-대표 오류 코드는 `TARGET_NOT_ALLOWED`, `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
+대표 오류 코드는 `SETUP_EXISTING_NETWORKS_NOT_LOADED`, `TARGET_NOT_ALLOWED`,
+`TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
 `QUERY_COMMAND_BLOCKED`, `QUERY_RATE_LIMITED`, `COMMAND_TIMEOUT`,
 `OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`, `AGENT_CONNECTION_REFUSED`,
 `AGENT_VERSION_MISMATCH`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
