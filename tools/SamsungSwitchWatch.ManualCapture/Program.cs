@@ -24,8 +24,14 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        var outputDirectory = args.Length > 0
-            ? Path.GetFullPath(args[0])
+        var previewAgentSetup = args.Length == 0 || args.Any(argument =>
+            string.Equals(argument, "--preview-agent-setup", StringComparison.Ordinal));
+        var previewDashboard = args.Any(argument =>
+            string.Equals(argument, "--preview-dashboard", StringComparison.Ordinal));
+        var outputArgument = args.FirstOrDefault(argument =>
+            !argument.StartsWith("--", StringComparison.Ordinal));
+        var outputDirectory = outputArgument is not null
+            ? Path.GetFullPath(outputArgument)
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "manual-images"));
         Directory.CreateDirectory(outputDirectory);
         DeleteLegacyScreenshots(outputDirectory);
@@ -111,7 +117,7 @@ internal static class Program
                        {
                             Width = 760,
                             Height = 820,
-                           ShowInTaskbar = false,
+                           ShowInTaskbar = previewAgentSetup,
                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 48,
                            Top = 48
@@ -135,38 +141,62 @@ internal static class Program
                 {
                     SamsungSwitchWatch.Agent.Setup.ResultRow.From(
                         new SetupStepResult(
-                             "INPUT_VALID",
-                             "입력 확인",
-                             SetupStepState.Succeeded,
-                             "Viewer IP와 관리망 선택·추가가 올바릅니다.")),
-                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
-                        new SetupStepResult(
-                            "FIREWALL_GATE_READY",
-                            "방화벽 보안",
-                            SetupStepState.Succeeded,
-                            "필수 방화벽 보안 조건은 정상입니다. 다른 허용 규칙은 유지되고 Agent에서 Viewer IP를 추가로 제한합니다.")),
-                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
-                        new SetupStepResult(
-                            "FIREWALL_OVERLAP_PROTECTED",
-                            "방화벽 중복 규칙",
+                            "SETUP_RECOVERY_REQUIRED",
+                            "이전 상태 복구 필요",
                             SetupStepState.Warning,
-                            "TCP/18443을 허용하는 다른 인바운드 방화벽 규칙 1개가 있습니다. 해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")),
-                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
-                        new SetupStepResult(
-                            "FIREWALL_NOT_INSTALLED",
-                            "방화벽 상태",
-                            SetupStepState.Information,
-                            "설치 시 Viewer 전용 방화벽 규칙을 만듭니다."))
+                            "중단된 이전 설치 기록을 안전하게 확인했습니다. 먼저 이전 상태 복구를 실행하세요."))
                 };
+                var recoveryStatusBorder = (Border)setupLifetime.Window.FindName(
+                    "RecoveryStatusBorder");
+                recoveryStatusBorder.Visibility = Visibility.Visible;
+                recoveryStatusBorder.Background =
+                    new SolidColorBrush(Color.FromRgb(255, 251, 235));
+                recoveryStatusBorder.BorderBrush =
+                    new SolidColorBrush(Color.FromRgb(245, 158, 11));
+                var recoveryStatusTitle = (TextBlock)setupLifetime.Window.FindName(
+                    "RecoveryStatusTitle");
+                recoveryStatusTitle.Text = "이전 설치 상태를 먼저 복구하세요";
+                recoveryStatusTitle.Foreground = Brushes.DarkGoldenrod;
+                var recoveryStatusText = (TextBlock)setupLifetime.Window.FindName(
+                    "RecoveryStatusText");
+                recoveryStatusText.Text =
+                    "중단된 이전 설치 기록을 안전하게 확인했습니다.\n" +
+                    "복구 완료 후 설치/업데이트는 자동으로 시작되지 않습니다.";
+                var actionGuidance = (TextBlock)setupLifetime.Window.FindName(
+                    "ActionGuidanceText");
+                actionGuidance.Text =
+                    "1) 이전 상태 복구  2) 복구 완료 확인  3) 설치 / 업데이트";
+                var copyDiagnostics = (Button)setupLifetime.Window.FindName(
+                    "CopyDiagnosticsButton");
+                copyDiagnostics.Visibility = Visibility.Collapsed;
+                var diagnosticsFeedback = (TextBlock)setupLifetime.Window.FindName(
+                    "DiagnosticsCopyFeedbackText");
+                diagnosticsFeedback.Visibility = Visibility.Collapsed;
+                var recoverButton = (Button)setupLifetime.Window.FindName(
+                    "RecoverButton");
+                recoverButton.Visibility = Visibility.Visible;
+                recoverButton.IsEnabled = true;
+                var installButton = (Button)setupLifetime.Window.FindName(
+                    "InstallButton");
+                installButton.IsEnabled = false;
                 var operationState = (TextBlock)setupLifetime.Window.FindName(
                     "OperationStateText");
-                operationState.Text = "경고 1건 · 완료";
+                operationState.Text = "복구 필요";
                 operationState.Foreground = Brushes.DarkGoldenrod;
                 RefreshLayout(setupLifetime.Window);
                 Capture(
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
-                    "이 PC 주소 넣기로 선택한 실제 사설 IPv4, 자동 검색 관리망과 정규화된 직접 추가 관리망을 보여 주는 Agent Setup 화면");
+                    "중단된 이전 설치 기록을 읽기 전용으로 감지해 이전 상태 복구 버튼만 활성화하고 설치 업데이트 버튼은 비활성화한 Agent Setup 화면");
+                if (previewAgentSetup)
+                {
+                    var previewDeadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
+                    while (DateTime.UtcNow < previewDeadline)
+                    {
+                        DrainDispatcher();
+                        Thread.Sleep(20);
+                    }
+                }
             }
 
             using var dashboardLifetime = new WindowLifetime(
@@ -313,10 +343,7 @@ internal static class Program
                     "합성 데모 업링크 포트 Down 장애와 발생 시각을 보여 주는 알림 팝업");
             }
 
-            // An argument is supplied by the manual build. With no argument, keep the
-            // sanitized dashboard visible briefly so Windows UI verification can inspect
-            // the real WPF controls without touching a user's Viewer profile.
-            if (args.Length == 0)
+            if (previewDashboard)
             {
                 var previewDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
                 while (DateTime.UtcNow < previewDeadline)
@@ -397,7 +424,7 @@ internal static class Program
                          (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
                          (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
                          (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
-                         (AgentConnectionProbeStage.Identity, "Agent 0.10.6-poc · API v4 확인")
+                         (AgentConnectionProbeStage.Identity, "Agent 0.10.7-poc · API v4 확인")
                      })
             {
                 progress?.Report(new LocalAgentPreflightUpdate(
@@ -419,11 +446,11 @@ internal static class Program
                 8,
                 65_536)
             {
-                ProductVersion = "0.10.6-poc"
+                ProductVersion = "0.10.7-poc"
             };
             var probeResult = AgentConnectionProbeResult.Success(
                 identity,
-                "Agent 0.10.6-poc · API v4 확인");
+                "Agent 0.10.7-poc · API v4 확인");
             return Task.FromResult(new LocalAgentPreflightResult(
                 true,
                 candidate,

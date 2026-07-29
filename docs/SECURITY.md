@@ -79,6 +79,18 @@ Setup은 패키지를 변경하기 전에 다음을 확인합니다.
 완전히 끝나지 않으면 성공으로 처리하지 않고 안정적인 Setup 오류 코드로 관리자 확인을
 요청합니다.
 
+Setup은 시작 시 미완료 트랜잭션 작업 기록을 읽기 전용으로 검사합니다. 안전하게 복구 가능한
+상태이면 새 설치·업데이트를 차단하고 `이전 상태 복구`만 허용합니다. 복구 성공 뒤에는 설치
+버튼만 다시 활성화하며 설치를 자동으로 시작하지 않습니다. 작업 기록 손상이나 상태 불일치로
+안전성을 증명할 수 없으면 복구와 설치를 모두 차단합니다.
+
+Rollback은 선행 복구가 확인된 단계만 계속 진행합니다. 서비스 중지가 확인되지 않으면 실행
+파일을 바꾸지 않고, 프로그램 복원과 검증이 끝나지 않으면 이전 서비스를 다시 시작하지
+않습니다. 각 방화벽 snapshot은 독립적으로 복원 결과를 남깁니다. 최초 설치·업데이트 실패
+원인과 복구 단계별 실패 원인은 별도로 보존하고, 완전한 복구가 확인된 뒤에만 완료 기록과
+증거 정리를 진행합니다. 작업 기록과 `Agent.__staging_*`, `Agent.__backup_*`,
+`Agent.__failed_*` 폴더를 사용자가 삭제·이동·이름 변경해 이 검사를 우회해서는 안 됩니다.
+
 v0.10 업데이트는 기존 DataDirectory를 유지하여 Agent ID와 HTTPS 신원을 보존합니다. 대상
 관리망은 Setup에서 자동 선택하거나 직접 추가해 확정한 서로 다른 1~2개 망으로, Viewer 방화벽
 경계는 현재 입력한 고정 IPv4 `/32`로 명시적으로 다시 적용합니다.
@@ -236,6 +248,8 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 - 단계별 성공·실패와 소요 시간
 - 서비스, HTTPS listener, 방화벽과 readiness 상태
 - 출력 바이트 수와 잘림 여부
+- Agent Setup 실패 시 UTC 시각, 작업 종류, 최초 실패와 rollback 단계 코드, 작업 기록
+  형식·단계, 필요한 자료의 존재 여부와 서비스 상태
 
 진단에 기록하지 않는 정보:
 
@@ -244,13 +258,22 @@ Viewer가 종료되면 주기 감시도 중단됩니다. Agent는 독립적으�
 - 실행한 명령 문자열
 - Telnet 원문과 `show running-config`
 - 장비 MAC, 시리얼과 고객 식별정보
+- Agent Setup의 실제 IP/CIDR, PC·사용자명, 절대 경로, 트랜잭션 ID, 서비스 계정,
+  방화벽 규칙 원문, 인증서와 설치 명령
 
-대표 오류 코드는 `SETUP_EXISTING_NETWORKS_NOT_LOADED`, `TARGET_NOT_ALLOWED`,
+Agent Setup의 `진단정보 복사`는 실패 화면에서만 표시하고 진단 파일을 만들지 않으며,
+위 허용 범위의 요약만 클립보드에 복사합니다. 대표 오류 코드는
+`SETUP_ROLLBACK_FAILED`, `SETUP_EXISTING_NETWORKS_NOT_LOADED`, `TARGET_NOT_ALLOWED`,
 `TCP_TIMEOUT`, `AUTH_FAILED`, `ENABLE_FAILED`,
 `QUERY_COMMAND_BLOCKED`, `QUERY_RATE_LIMITED`, `COMMAND_TIMEOUT`,
 `OUTPUT_LIMIT_EXCEEDED`, `PROMPT_PARSE_FAILED`, `AGENT_CONNECTION_REFUSED`,
 `AGENT_VERSION_MISMATCH`, `LOCAL_PRIVATE_IPV4_NOT_FOUND`,
 `LOCAL_AGENT_PREFLIGHT_TIMEOUT`입니다. 실패를 로그만 남기고 정상으로 표시하지 않습니다.
+
+자동화·Mock 검증은 rollback 단계 순서, 오류 분리와 민감정보 제외 계약을 확인할 수 있지만,
+Windows SCM, 방화벽 COM, 실제 ACL, EDR 파일 잠금과 전원 중단 조합을 모두 증명하지는
+않습니다. 실제 배포 전 관리자 시험 PC 한 대에서 실패와 복구 흐름을 확인한 뒤 단계적으로
+확대해야 합니다.
 
 ## 11. 알려진 POC 한계와 배포 금지 조건
 

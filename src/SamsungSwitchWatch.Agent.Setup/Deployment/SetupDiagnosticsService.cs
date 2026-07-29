@@ -29,12 +29,13 @@ public sealed class SetupDiagnosticsService(
             if (journalStore.Exists)
             {
                 steps.Add(new SetupStepResult(
-                    "RECOVERY_PENDING",
+                    SetupErrorCodes.RecoveryRequired,
                     "이전 작업 복구",
-                    SetupStepState.Information,
-                    "완료되지 않은 이전 설치가 있습니다. 설치/업데이트를 누르면 먼저 자동 복구합니다."));
-                return SetupOperationResult.Success(
-                    "이전 설치 복구가 필요합니다.",
+                    SetupStepState.Failed,
+                    "완료되지 않은 이전 설치가 있습니다. 먼저 '이전 상태 복구'를 실행하세요."));
+                return SetupOperationResult.Failure(
+                    SetupErrorCodes.RecoveryRequired,
+                    "이전 상태 복구가 완료될 때까지 설치 / 업데이트를 실행할 수 없습니다.",
                     steps);
             }
 

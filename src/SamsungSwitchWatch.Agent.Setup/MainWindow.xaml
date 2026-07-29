@@ -188,6 +188,7 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
                 <Grid Margin="0,0,0,8">
@@ -203,7 +204,25 @@
                                Foreground="{StaticResource MutedTextBrush}"
                                Text="대기" />
                 </Grid>
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <Border Grid.Row="1"
+                        x:Name="RecoveryStatusBorder"
+                        Margin="0,0,0,8"
+                        Padding="10"
+                        CornerRadius="4"
+                        Background="#FFFBEB"
+                        BorderBrush="#F59E0B"
+                        BorderThickness="1"
+                        Visibility="Collapsed">
+                    <StackPanel>
+                        <TextBlock x:Name="RecoveryStatusTitle"
+                                   FontWeight="SemiBold"
+                                   Text="이전 상태 복구 필요" />
+                        <TextBlock x:Name="RecoveryStatusText"
+                                   Margin="0,3,0,0"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                    </StackPanel>
+                </Border>
+                <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
                     <ItemsControl x:Name="ResultItemsControl">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
@@ -236,26 +255,51 @@
             </Grid>
         </Border>
 
-        <DockPanel Grid.Row="4">
-            <Button DockPanel.Dock="Right"
-                    Style="{StaticResource SecondaryButton}"
-                    Margin="8,0,0,0"
-                    Click="CloseButton_Click"
-                    Content="닫기" />
-            <Button DockPanel.Dock="Right"
-                    x:Name="InstallButton"
-                    Style="{StaticResource PrimaryButton}"
-                    Margin="8,0,0,0"
-                    Click="InstallButton_Click"
-                    Content="설치 / 업데이트" />
-            <Button DockPanel.Dock="Right"
-                    x:Name="CheckButton"
-                    Style="{StaticResource SecondaryButton}"
-                    Click="CheckButton_Click"
-                    Content="사전 점검" />
-            <TextBlock VerticalAlignment="Center"
+        <Grid Grid.Row="4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0"
+                       x:Name="ActionGuidanceText"
                        Foreground="{StaticResource MutedTextBrush}"
                        Text="설정 변경은 설치 버튼을 누른 뒤에만 수행됩니다." />
-        </DockPanel>
+            <TextBlock Grid.Row="1"
+                       x:Name="DiagnosticsCopyFeedbackText"
+                       Margin="0,4,0,0"
+                       Foreground="{StaticResource MutedTextBrush}"
+                       Visibility="Collapsed" />
+            <StackPanel Grid.Row="2"
+                        Margin="0,8,0,0"
+                        HorizontalAlignment="Right"
+                        Orientation="Horizontal">
+                <Button x:Name="CopyDiagnosticsButton"
+                        Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,8,0"
+                        Click="CopyDiagnosticsButton_Click"
+                        Content="진단정보 복사"
+                        Visibility="Collapsed" />
+                <Button x:Name="CheckButton"
+                        Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,8,0"
+                        Click="CheckButton_Click"
+                        Content="사전 점검" />
+                <Button x:Name="RecoverButton"
+                        Style="{StaticResource PrimaryButton}"
+                        Margin="0,0,8,0"
+                        Click="RecoverButton_Click"
+                        Content="이전 상태 복구"
+                        Visibility="Collapsed" />
+                <Button x:Name="InstallButton"
+                        Style="{StaticResource PrimaryButton}"
+                        Margin="0,0,8,0"
+                        Click="InstallButton_Click"
+                        Content="설치 / 업데이트" />
+                <Button Style="{StaticResource SecondaryButton}"
+                        Click="CloseButton_Click"
+                        Content="닫기" />
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>

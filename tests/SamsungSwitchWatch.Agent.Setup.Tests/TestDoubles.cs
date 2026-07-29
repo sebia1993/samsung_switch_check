@@ -20,6 +20,8 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public int RollbackMarkerWriteFailuresRemaining { get; set; }
     public int FailedDirectoryCleanupFailuresRemaining { get; set; }
     public int ActivationMoveFailuresRemaining { get; set; }
+    public Func<string, string, bool>? MoveFailurePredicate { get; set; }
+    public int MoveFailuresRemaining { get; set; }
     private int MatchingAccessRequests { get; set; }
 
     public bool FileExists(string path) => _inner.FileExists(path);
@@ -51,6 +53,13 @@ internal sealed class TestFileSystem : ISetupFileSystem
         _inner.CopyFile(source, destination, overwrite);
     public void MoveDirectory(string source, string destination)
     {
+        if (MoveFailuresRemaining > 0 &&
+            MoveFailurePredicate?.Invoke(source, destination) == true)
+        {
+            MoveFailuresRemaining--;
+            throw new IOException("simulated directory move failure");
+        }
+
         if (ActivationMoveFailuresRemaining > 0 &&
             Path.GetFileName(source).Contains(".__staging_", StringComparison.Ordinal))
         {
@@ -181,16 +190,34 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public ServiceSnapshot State { get; private set; } = Clone(initial);
     public List<string> Operations { get; } = [];
     public ServiceSnapshot? InstalledState { get; private set; }
+    public int StopFailuresRemaining { get; set; }
+    public int StopFailureOccurrence { get; set; } = 1;
+    public int RestoreFailuresRemaining { get; set; }
+    public Exception? CaptureException { get; set; }
+    private int StopCallCount { get; set; }
 
     public ServiceSnapshot Capture(string serviceName)
     {
         Operations.Add("capture");
+        if (CaptureException is not null)
+        {
+            throw CaptureException;
+        }
+
         return Clone(State);
     }
 
     public void Stop(string serviceName, TimeSpan timeout)
     {
         Operations.Add("stop");
+        StopCallCount++;
+        if (StopFailuresRemaining > 0 &&
+            StopCallCount >= StopFailureOccurrence)
+        {
+            StopFailuresRemaining--;
+            throw new InvalidOperationException("simulated service stop failure");
+        }
+
         State = State with { Running = false, ProcessId = 0 };
     }
 
@@ -237,6 +264,12 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public void Restore(string serviceName, ServiceSnapshot snapshot)
     {
         Operations.Add("restore");
+        if (RestoreFailuresRemaining > 0)
+        {
+            RestoreFailuresRemaining--;
+            throw new InvalidOperationException("simulated service restore failure");
+        }
+
         State = Clone(snapshot);
     }
 
@@ -257,6 +290,8 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public Func<int, FirewallRuleSnapshot>? AppliedRuleReadback { get; set; }
     public int AppliedRuleCaptureCount { get; private set; }
     public ManualResetEventSlim AppliedRuleCaptured { get; } = new();
+    public HashSet<string> RestoreFailureRuleNames { get; } =
+        new(StringComparer.Ordinal);
     private bool _viewerRuleApplied;
 
     public FirewallRuleSnapshot Capture(string ruleName)
@@ -312,6 +347,12 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public void Restore(FirewallRuleSnapshot snapshot)
     {
         Operations.Add($"restore:{snapshot.Name}");
+        if (RestoreFailureRuleNames.Remove(snapshot.Name))
+        {
+            throw new InvalidOperationException(
+                "simulated firewall restore failure");
+        }
+
         _viewerRuleApplied = false;
         if (snapshot.Name == SetupConstants.FirewallRuleName ||
             !State.Exists)

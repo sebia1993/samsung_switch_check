@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v10-same-pc-preflight-figma-synced",
+  "runId": "ssw-20260729-v11-agent-setup-recovery-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -39,10 +39,14 @@
     "agentSetupFirewallVerificationFailedV9": "49:72",
     "httpsConnectionSamePcPreflightV10": "52:123",
     "agentSetupSamePcHelperV10": "54:363",
+    "agentSetupRecoveryRequiredV11": "58:72",
+    "agentSetupRecoveryCompleteV11": "58:97",
+    "agentSetupRecoveryFailedV11": "58:120",
+    "agentSetupUnsafeRecoveryStateV11": "58:147",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v10-same-pc-preflight",
+    "version": "v11-agent-setup-recovery",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -93,6 +97,20 @@
     "remoteViewerPathVerified": false,
     "remoteDeploymentRequiresViewerIpv4Reapply": true
   },
+  "setupRecoveryFlow": {
+    "pendingJournalIsReadOnlyDetected": true,
+    "automaticRecovery": false,
+    "separateRecoveryAction": "이전 상태 복구",
+    "installDisabledWhilePending": true,
+    "automaticInstallAfterRecovery": false,
+    "primaryFailureSeparated": true,
+    "rollbackStageFailuresSeparated": true,
+    "unsafeStateRequiresAdministrator": true,
+    "diagnosticsClipboardOnly": true,
+    "diagnosticsVisibleOnFailureOnly": true,
+    "diagnosticsSanitized": true,
+    "manualEvidenceDeletionAllowed": false
+  },
   "operatorFlow": {
     "deviceInputOrder": [
       "displayName",
@@ -117,8 +135,18 @@
     "status": "completed",
     "date": "2026-07-22",
     "rootFrame": "24:3",
-    "roleScorecards": ["29:211", "29:212"],
-    "evidenceImageFrames": ["29:228", "29:231", "29:234", "29:237", "29:240", "29:243"],
+    "roleScorecards": [
+      "29:211",
+      "29:212"
+    ],
+    "evidenceImageFrames": [
+      "29:228",
+      "29:231",
+      "29:234",
+      "29:237",
+      "29:240",
+      "29:243"
+    ],
     "prioritySection": "29:250",
     "operatorFlowSection": "29:271"
   },

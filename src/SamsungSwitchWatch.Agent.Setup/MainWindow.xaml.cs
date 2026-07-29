@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
@@ -19,8 +20,13 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _operationCancellation;
     private IReadOnlyList<string> _initialTargetCidrs = [];
     private SetupStepResult? _existingNetworksWarning;
+    private PendingRecoveryInspection _recoveryInspection =
+        PendingRecoveryInspection.None;
+    private SetupOperationResult? _lastFailedOperation;
+    private string _lastOperationName = "none";
     private bool _suppressNetworkSelectionEvent;
     private bool _initialNetworksApplied;
+    private bool _isBusy;
     private bool _closeRequested;
 
     public MainWindow(
@@ -45,8 +51,15 @@ public partial class MainWindow : Window
             InstallButton.ToolTip = "진단 모드에서는 설치를 실행하지 않습니다.";
         }
 
-        Loaded += (_, _) => RefreshNetworks();
+        Loaded += OnLoaded;
         Closing += OnClosing;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        RefreshNetworks();
+        RefreshRecoveryState(
+            preserveFailureDiagnostics: _lastFailedOperation is not null);
     }
 
     internal void InitializeExistingTargetNetworks(
@@ -415,16 +428,151 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RefreshRecoveryState(bool preserveFailureDiagnostics)
+    {
+        PendingRecoveryInspection inspection;
+        try
+        {
+            inspection = _deployment.InspectPendingRecovery();
+        }
+        catch
+        {
+            inspection = new PendingRecoveryInspection(
+                Exists: true,
+                CanRecover: false,
+                SetupErrorCodes.Unexpected,
+                "이전 설치 상태를 확인하지 못했습니다. 설치 파일을 삭제하거나 다시 실행하지 말고 관리자에게 문의하세요.");
+        }
+
+        _recoveryInspection = inspection;
+        ApplyRecoveryState(inspection);
+
+        if (inspection.Exists)
+        {
+            var preserveExistingFailure =
+                preserveFailureDiagnostics &&
+                _lastFailedOperation is { Succeeded: false };
+            var pendingResult =
+                SetupResultPresentation.BuildPendingRecoveryResult(inspection);
+
+            if (!preserveExistingFailure)
+            {
+                _lastFailedOperation = pendingResult;
+                _lastOperationName = "recovery-inspection";
+            }
+
+            if (!inspection.CanRecover || preserveExistingFailure)
+            {
+                ShowDiagnosticsAction();
+            }
+            else
+            {
+                ClearDiagnosticsAction();
+            }
+
+            if (_results.Count == 0)
+            {
+                ShowResultSteps(pendingResult);
+                OperationStateText.Text = inspection.CanRecover
+                    ? "복구 필요"
+                    : $"확인 필요 · {inspection.Code}";
+                OperationStateText.Foreground = inspection.CanRecover
+                    ? Brushes.DarkGoldenrod
+                    : Brushes.Firebrick;
+            }
+        }
+        else if (!preserveFailureDiagnostics)
+        {
+            ClearDiagnosticsAction();
+        }
+
+        UpdateActionAvailability();
+    }
+
+    private void ApplyRecoveryState(PendingRecoveryInspection inspection)
+    {
+        if (!inspection.Exists)
+        {
+            RecoveryStatusBorder.Visibility = Visibility.Collapsed;
+            RecoverButton.Visibility = Visibility.Collapsed;
+            ActionGuidanceText.Text =
+                "설정 변경은 설치 버튼을 누른 뒤에만 수행됩니다.";
+            return;
+        }
+
+        RecoveryStatusBorder.Visibility = Visibility.Visible;
+        RecoverButton.Visibility = Visibility.Visible;
+        if (inspection.CanRecover)
+        {
+            RecoveryStatusBorder.Background =
+                new SolidColorBrush(Color.FromRgb(255, 251, 235));
+            RecoveryStatusBorder.BorderBrush =
+                new SolidColorBrush(Color.FromRgb(245, 158, 11));
+            RecoveryStatusTitle.Foreground = Brushes.DarkGoldenrod;
+            RecoveryStatusTitle.Text = "이전 설치 상태를 먼저 복구하세요";
+            RecoveryStatusText.Text =
+                $"{inspection.Message}\n복구 완료 후 설치/업데이트는 자동으로 시작되지 않습니다.";
+            ActionGuidanceText.Text =
+                "1) 이전 상태 복구  2) 복구 완료 확인  3) 설치 / 업데이트";
+        }
+        else
+        {
+            RecoveryStatusBorder.Background =
+                new SolidColorBrush(Color.FromRgb(254, 242, 242));
+            RecoveryStatusBorder.BorderBrush =
+                new SolidColorBrush(Color.FromRgb(220, 38, 38));
+            RecoveryStatusTitle.Foreground = Brushes.Firebrick;
+            RecoveryStatusTitle.Text = "이전 상태 복구를 진행할 수 없습니다";
+            RecoveryStatusText.Text =
+                $"{inspection.Message}\n코드: {inspection.Code}\n설치 파일을 삭제하지 말고 관리자에게 이 코드를 전달하세요.";
+            ActionGuidanceText.Text =
+                "복구와 설치가 잠겼습니다. 진단정보를 복사해 관리자에게 전달하세요.";
+        }
+    }
+
     private async void CheckButton_Click(object sender, RoutedEventArgs e)
     {
         var request = CreateRequest();
-        await RunOperationAsync(
+        var result = await RunOperationAsync(
+            "preflight",
             "사전 점검 중",
             cancellationToken => _diagnostics.RunAsync(request, cancellationToken));
+        RefreshRecoveryState(
+            preserveFailureDiagnostics: result is { Succeeded: false });
+    }
+
+    private async void RecoverButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_recoveryInspection.Exists || !_recoveryInspection.CanRecover)
+        {
+            RefreshRecoveryState(preserveFailureDiagnostics: true);
+            return;
+        }
+
+        var result = await RunOperationAsync(
+            "recovery",
+            "이전 상태 복구 중",
+            cancellationToken => _deployment.RecoverAsync(cancellationToken));
+        RefreshRecoveryState(
+            preserveFailureDiagnostics: result is { Succeeded: false });
+
+        if (result is { Succeeded: true } && !_recoveryInspection.Exists)
+        {
+            OperationStateText.Text = "복구 완료 · 설치 준비됨";
+            OperationStateText.Foreground = Brushes.SeaGreen;
+            ActionGuidanceText.Text =
+                "복구가 완료되었습니다. 설치 / 업데이트 버튼을 눌러 다음 작업을 시작하세요.";
+        }
     }
 
     private async void InstallButton_Click(object sender, RoutedEventArgs e)
     {
+        RefreshRecoveryState(preserveFailureDiagnostics: true);
+        if (_recoveryInspection.Exists)
+        {
+            return;
+        }
+
         var request = CreateRequest();
         var networks = request.TargetCidrs.Count == 0
             ? "(선택 없음)"
@@ -443,7 +591,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        await RunOperationAsync(
+        var result = await RunOperationAsync(
+            "install",
             "설치 전 점검 중",
             async cancellationToken =>
             {
@@ -455,6 +604,8 @@ public partial class MainWindow : Window
 
                 return await _deployment.DeployAsync(request, cancellationToken);
             });
+        RefreshRecoveryState(
+            preserveFailureDiagnostics: result is { Succeeded: false });
     }
 
     private SetupRequest CreateRequest() =>
@@ -466,12 +617,14 @@ public partial class MainWindow : Window
                 .Distinct(StringComparer.Ordinal)
                 .ToArray());
 
-    private async Task RunOperationAsync(
+    private async Task<SetupOperationResult?> RunOperationAsync(
+        string operationName,
         string runningText,
         Func<CancellationToken, Task<SetupOperationResult>> operation)
     {
         SetBusy(true);
         _results.Clear();
+        DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
         OperationStateText.Text = runningText;
         _operationCancellation = new CancellationTokenSource();
         try
@@ -479,10 +632,7 @@ public partial class MainWindow : Window
             var result = await Task.Run(
                 () => operation(_operationCancellation.Token),
                 _operationCancellation.Token);
-            foreach (var step in result.Steps)
-            {
-                _results.Add(ResultRow.From(step));
-            }
+            ShowResultSteps(result);
 
             var warningCount = result.Steps.Count(step =>
                 step.State == SetupStepState.Warning);
@@ -496,6 +646,19 @@ public partial class MainWindow : Window
                     ? Brushes.SeaGreen
                     : Brushes.DarkGoldenrod
                 : Brushes.Firebrick;
+
+            if (result.Succeeded)
+            {
+                ClearDiagnosticsAction();
+            }
+            else
+            {
+                _lastFailedOperation = result;
+                _lastOperationName = operationName;
+                ShowDiagnosticsAction();
+            }
+
+            return result;
         }
         catch
         {
@@ -503,6 +666,7 @@ public partial class MainWindow : Window
                 SetupErrorCodes.Unexpected,
                 "작업 실패",
                 "화면에서 작업 결과를 처리하지 못했습니다.");
+            return _lastFailedOperation;
         }
         finally
         {
@@ -516,17 +680,32 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ShowSingleFailure(string code, string label, string message)
+    private void ShowResultSteps(SetupOperationResult result)
     {
         _results.Clear();
-        _results.Add(ResultRow.From(
-            new SetupStepResult(code, label, SetupStepState.Failed, message)));
+        foreach (var step in SetupResultPresentation.BuildSteps(result))
+        {
+            _results.Add(ResultRow.From(step));
+        }
+    }
+
+    private void ShowSingleFailure(string code, string label, string message)
+    {
+        var result = SetupOperationResult.Failure(
+            code,
+            message,
+            [new SetupStepResult(code, label, SetupStepState.Failed, message)]);
+        ShowResultSteps(result);
+        _lastFailedOperation = result;
+        _lastOperationName = "ui";
+        ShowDiagnosticsAction();
         OperationStateText.Text = $"실패 · {code}";
         OperationStateText.Foreground = Brushes.Firebrick;
     }
 
     private void SetBusy(bool busy)
     {
+        _isBusy = busy;
         ViewerIpTextBox.IsEnabled = !busy;
         UseThisPcAddressButton.IsEnabled = !busy;
         ViewerAddressCandidatesComboBox.IsEnabled = !busy;
@@ -535,7 +714,75 @@ public partial class MainWindow : Window
         ManualCidrTextBox.IsEnabled = !busy;
         AddManualNetworkButton.IsEnabled = !busy;
         CheckButton.IsEnabled = !busy;
-        InstallButton.IsEnabled = !busy && !_diagnosticsOnly;
+        CopyDiagnosticsButton.IsEnabled = !busy;
+        UpdateActionAvailability();
+    }
+
+    private void UpdateActionAvailability()
+    {
+        var state = SetupRecoveryActionPolicy.Evaluate(
+            _diagnosticsOnly,
+            _isBusy,
+            _recoveryInspection);
+        InstallButton.IsEnabled = state.InstallEnabled;
+        RecoverButton.Visibility =
+            state.RecoverVisible ? Visibility.Visible : Visibility.Collapsed;
+        RecoverButton.IsEnabled = state.RecoverEnabled;
+    }
+
+    private void ShowDiagnosticsAction()
+    {
+        CopyDiagnosticsButton.Visibility = Visibility.Visible;
+        DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
+    }
+
+    private void ClearDiagnosticsAction()
+    {
+        _lastFailedOperation = null;
+        _lastOperationName = "none";
+        CopyDiagnosticsButton.Visibility = Visibility.Collapsed;
+        DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
+    }
+
+    private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastFailedOperation is null || _lastFailedOperation.Succeeded)
+        {
+            return;
+        }
+
+        try
+        {
+            Clipboard.SetText(SetupFailureDiagnosticFormatter.Format(
+                new SetupFailureDiagnosticContext(
+                    ProductVersion(),
+                    DateTimeOffset.UtcNow,
+                    _lastOperationName,
+                    _lastFailedOperation,
+                    _recoveryInspection)));
+            DiagnosticsCopyFeedbackText.Text =
+                "민감정보를 제외한 진단정보를 복사했습니다.";
+            DiagnosticsCopyFeedbackText.Foreground = Brushes.SeaGreen;
+            DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
+        }
+        catch
+        {
+            DiagnosticsCopyFeedbackText.Text =
+                "클립보드에 복사하지 못했습니다. 잠시 후 다시 시도하세요.";
+            DiagnosticsCopyFeedbackText.Foreground = Brushes.Firebrick;
+            DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
+        }
+    }
+
+    private static string ProductVersion()
+    {
+        var assembly = typeof(MainWindow).Assembly;
+        return assembly
+                   .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                   ?.InformationalVersion
+                   .Split('+', 2)[0] ??
+               assembly.GetName().Version?.ToString() ??
+               "unknown";
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
