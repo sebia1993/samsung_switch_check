@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v8-manual-management-network-figma-synced",
+  "runId": "ssw-20260729-v9-firewall-readback-diagnostics-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -36,10 +36,11 @@
     "manualCidrNormalizedV8": "48:72",
     "manualCidrInvalidV8": "48:85",
     "manualCidrMaximumV8": "48:98",
+    "agentSetupFirewallVerificationFailedV9": "49:72",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v8-manual-management-network",
+    "version": "v9-firewall-readback-diagnostics",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -65,6 +66,14 @@
     "externalTcp18443AllowRule": "warning-and-continue",
     "agentAllowedViewerIpv4Required": true,
     "windowsFirewallViewer32RulePreserved": true,
+    "viewerHostAddressEquivalentForms": [
+      "IPv4",
+      "IPv4/32",
+      "IPv4/255.255.255.255"
+    ],
+    "firewallVerificationRetryWindowMilliseconds": 2000,
+    "firewallMismatchDetailsSanitized": true,
+    "firewallFailureRollbackRequired": true,
     "productionLoopbackEndpoints": [
       "/health/live",
       "/health/ready"

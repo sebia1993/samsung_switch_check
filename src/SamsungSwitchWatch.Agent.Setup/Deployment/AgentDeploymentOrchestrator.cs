@@ -12,6 +12,9 @@ public sealed class AgentDeploymentOrchestrator(
 {
     private static readonly SemaphoreSlim ProcessDeploymentGate = new(1, 1);
     private const string RollbackCompletedStage = "rollback-completed";
+    private const int FirewallVerificationRetryCount = 10;
+    private static readonly TimeSpan FirewallVerificationRetryDelay =
+        TimeSpan.FromMilliseconds(200);
 
     public async Task<SetupOperationResult> DeployAsync(
         SetupRequest request,
@@ -269,14 +272,15 @@ public sealed class AgentDeploymentOrchestrator(
                 SetupConstants.FirewallRuleName,
                 SetupConstants.HttpsPort,
                 request.ViewerIpv4);
-            if (!firewallManager.IsExactViewerRule(
-                    SetupConstants.FirewallRuleName,
-                    SetupConstants.HttpsPort,
-                    request.ViewerIpv4))
+            var firewallVerification = await VerifyViewerFirewallRuleAsync(
+                request.ViewerIpv4,
+                cancellationToken);
+            if (!firewallVerification.IsExact)
             {
                 throw new SetupException(
                     SetupErrorCodes.FirewallFailed,
-                    "Viewer 전용 방화벽 규칙을 확인하지 못했습니다.");
+                    "Viewer 전용 방화벽 규칙을 확인하지 못했습니다. " +
+                    $"({firewallVerification.MismatchCode})");
             }
             _ = firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
@@ -439,6 +443,38 @@ public sealed class AgentDeploymentOrchestrator(
             steps.Add(Failed(code, "설치 실패", message));
             return SetupOperationResult.Failure(code, message, steps);
         }
+    }
+
+    private async Task<FirewallRuleVerificationResult> VerifyViewerFirewallRuleAsync(
+        string viewerIpv4,
+        CancellationToken cancellationToken)
+    {
+        FirewallRuleVerificationResult verification = default;
+        for (var attempt = 0;
+             attempt <= FirewallVerificationRetryCount;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = firewallManager.Capture(
+                SetupConstants.FirewallRuleName);
+            verification = FirewallRuleVerifier.Evaluate(
+                snapshot,
+                SetupConstants.HttpsPort,
+                viewerIpv4);
+            if (verification.IsExact)
+            {
+                return verification;
+            }
+
+            if (attempt < FirewallVerificationRetryCount)
+            {
+                await Task.Delay(
+                    FirewallVerificationRetryDelay,
+                    cancellationToken);
+            }
+        }
+
+        return verification;
     }
 
     private string? TryRollback(

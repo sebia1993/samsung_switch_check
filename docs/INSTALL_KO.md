@@ -2,21 +2,21 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.4-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.5-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.4-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.4-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.5-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.5-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.4-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.5-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 업데이트 실패 뒤 `RECOVERY_REQUIRED`가 표시되거나 복구 자료가 남아 있으면 구형
-Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.4-poc` Agent ZIP의 Setup을
+Setup을 실행하거나 임시 폴더를 직접 지우지 말고, 동일한 `0.10.5-poc` Agent ZIP의 Setup을
 다시 실행하십시오.
 
 압축을 풀기 전에 각 ZIP의 SHA-256을 GitHub Release 본문에 표시된 값과 비교하십시오.
@@ -99,6 +99,17 @@ Agent Setup의 `검사`는 설정을 변경하지 않고 다음 단계를 확인
 `FIREWALL_OVERLAP_PROTECTED` 경고를 표시하지만 설치를 중단하지 않습니다. Setup은 그 규칙을
 삭제·비활성화·변경하지 않습니다. `설치/업데이트`를 계속하면 제품 소유 Viewer `/32` 규칙을
 적용하고 Agent도 입력한 Viewer IPv4를 API 요청마다 다시 확인합니다.
+
+Windows 방화벽은 같은 단일 호스트 규칙을 조회할 때 주소를 `IP`, `IP/32` 또는
+`IP/255.255.255.255`로 반환할 수 있습니다. Setup은 세 형식 중 현재 입력한 Viewer IPv4와
+정확히 같은 단일 주소만 동일한 `/32` 경계로 인정합니다. 다른 prefix, 다른 주소, 여러 주소,
+주소 범위, `Any`, `LocalSubnet`과 IPv6는 허용하지 않으며 Enabled·Inbound·Allow·TCP·18443·
+Domain/Private·Edge Traversal 비활성 조건도 모두 그대로 확인합니다.
+
+규칙을 적용한 직후 Windows가 아직 새 값을 반환하지 않을 수 있어 즉시 한 번 확인한 뒤 200ms
+간격으로 최대 2초까지만 재확인합니다. 이 제한 안에 정확한 규칙을 확인하지 못하면 성공으로
+처리하지 않고 `SETUP_FIREWALL_FAILED`와 민감정보가 없는 불일치 코드를 표시한 뒤 기존
+프로그램·서비스·방화벽 상태를 rollback합니다.
 
 다음 조건은 경고가 아니라 설치 중단 사유입니다.
 
@@ -256,6 +267,23 @@ Viewer가 Agent PC의 TCP/18443에 연결하지 못했습니다.
 ### AGENT_VERSION_MISMATCH
 
 Agent와 Viewer가 서로 다른 Release입니다. 두 PC 모두 같은 버전의 공식 ZIP으로 맞춥니다.
+
+### SETUP_FIREWALL_FAILED
+
+Agent Setup이 제품 소유 Viewer 전용 방화벽 규칙을 안전 기준과 일치한다고 확인하지 못했습니다.
+Cause에는 실제 Viewer 주소나 규칙 원문 대신 `FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한
+불일치 코드만 표시됩니다.
+
+1. 오류 창과 불일치 코드를 기록합니다.
+2. Setup이 rollback 완료를 표시했는지 확인합니다.
+3. 같은 Release의 Agent ZIP을 새 로컬 폴더에 다시 압축 해제한 뒤 Setup의 `검사`를 실행합니다.
+4. Windows 방화벽 서비스와 Domain/Private 프로필이 켜져 있는지 확인합니다.
+5. 계속 실패하면 오류 코드만 사내 Windows 관리자에게 전달합니다.
+
+방화벽 규칙을 직접 만들거나 `Any`, `LocalSubnet`, 사설망 전체와 `/31` 이하의 넓은 prefix로
+확대하여 우회하지 마십시오. 제품 규칙의 원격 주소가 같은 Viewer IPv4의 `IP`,
+`IP/32`, `IP/255.255.255.255`로 보이는 차이는 정상적인 단일 호스트 표기 차이이며 Setup이
+자동으로 처리합니다.
 
 ### SETUP_EXISTING_NETWORKS_NOT_LOADED
 

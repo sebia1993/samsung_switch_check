@@ -254,10 +254,24 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public SetupException? SecurityGateException { get; set; }
     public FirewallSecurityAssessment SecurityAssessment { get; set; } =
         FirewallSecurityAssessment.Safe;
+    public Func<int, FirewallRuleSnapshot>? AppliedRuleReadback { get; set; }
+    public int AppliedRuleCaptureCount { get; private set; }
+    private bool _viewerRuleApplied;
 
     public FirewallRuleSnapshot Capture(string ruleName)
     {
         Operations.Add($"capture:{ruleName}");
+        if (_viewerRuleApplied &&
+            string.Equals(
+                ruleName,
+                SetupConstants.FirewallRuleName,
+                StringComparison.Ordinal) &&
+            AppliedRuleReadback is not null)
+        {
+            AppliedRuleCaptureCount++;
+            State = AppliedRuleReadback(AppliedRuleCaptureCount);
+        }
+
         return string.Equals(State.Name, ruleName, StringComparison.Ordinal)
             ? State
             : FirewallRuleSnapshot.Missing(ruleName);
@@ -266,6 +280,8 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public void ApplyViewerRule(string ruleName, int port, string viewerIpv4)
     {
         Operations.Add("apply");
+        _viewerRuleApplied = true;
+        AppliedRuleCaptureCount = 0;
         State = new FirewallRuleSnapshot(
             true,
             ruleName,
@@ -294,6 +310,7 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     public void Restore(FirewallRuleSnapshot snapshot)
     {
         Operations.Add($"restore:{snapshot.Name}");
+        _viewerRuleApplied = false;
         if (snapshot.Name == SetupConstants.FirewallRuleName ||
             !State.Exists)
         {
@@ -302,11 +319,10 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     }
 
     public bool IsExactViewerRule(string ruleName, int port, string viewerIpv4) =>
-        State.Exists &&
-        State.Name == ruleName &&
-        State.LocalPorts == port.ToString() &&
-        State.RemoteAddresses == $"{viewerIpv4}/32" &&
-        State.Profiles == 3;
+        FirewallRuleVerifier.Evaluate(
+            Capture(ruleName),
+            port,
+            viewerIpv4).IsExact;
 
     public FirewallSecurityAssessment AssertSecurityGate(
         int port,

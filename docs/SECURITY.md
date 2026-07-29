@@ -104,6 +104,24 @@ Public 프로필은 허용하지 않습니다. Viewer IPv4는 CIDR 또는 대역
 입력하며 Setup이 `/32` 규칙을 만듭니다. Viewer 주소가 DHCP로 바뀌면 연결이 거부되므로 고정
 주소 또는 조직에서 관리하는 예약 주소를 사용해야 합니다.
 
+Windows 방화벽 COM API의 조회 표현은 생성 요청 문자열과 다를 수 있습니다. 같은 단일
+호스트는 다음 세 형식만 동등하게 인정합니다.
+
+```text
+ViewerIPv4
+ViewerIPv4/32
+ViewerIPv4/255.255.255.255
+```
+
+이 호환 처리는 범위를 넓히지 않습니다. 주소가 다르거나 `/0`~`/31`, 여러 주소, 범위,
+`Any`, `LocalSubnet`, IPv6이면 거부합니다. 원격 주소 외에도 Enabled, Inbound, Allow, TCP,
+LocalPort 18443, Domain+Private만, Edge Traversal 비활성을 모두 만족해야 합니다.
+
+적용 직후 Windows의 규칙 조회 반영이 늦을 수 있으므로 즉시 확인 후 200ms 간격으로 최대
+2초까지만 다시 확인합니다. 계속 불일치하면 Setup은 `SETUP_FIREWALL_FAILED`와
+`FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한 필드별 코드를 표시하고 설치 전 snapshot으로
+rollback합니다. 오류 메시지에는 Viewer IPv4, 방화벽 원문 또는 다른 규칙 주소를 넣지 않습니다.
+
 Agent는 운영 설정의 `AllowedViewerIpv4`와 실제 TCP 연결의 원격 주소를 정확히 비교합니다.
 일치하지 않거나 원격 주소를 확인할 수 없으면 모든 Agent API를
 `403 / AGENT_CLIENT_NOT_ALLOWED`로 거부합니다. `X-Forwarded-For` 같은 전달 헤더는 신뢰하지

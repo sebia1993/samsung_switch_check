@@ -8,6 +8,7 @@
 - Current automatic HTTPS Agent connection dialog: node `36:2`
 - Current Agent Setup manual management-network screen: node `46:72`
 - Agent Setup manual CIDR states: normalized `48:72`, invalid `48:85`, maximum `48:98`
+- Agent Setup firewall verification failure state: node `49:72`
 - Mini window: 400x260 offline/recovery frame, node `14:127`
 - Popup state strip: node `15:129`
 - Operational and security state gallery: node `15:148`
@@ -77,6 +78,15 @@ The existing `설치 / 업데이트` flow creates the product-owned Viewer `/32`
 rule and configures the Agent to allow only the fixed Viewer IPv4 at the
 remote-work API boundary. Local `/health/live` and `/health/ready` checks remain
 the only loopback exception, and no separate auto-fix button is added.
+
+Node `49:72` is the v9 failure-state source of truth for
+`SETUP_FIREWALL_FAILED`. Windows may return the same single Viewer host as a
+bare IPv4, `/32`, or `/255.255.255.255`; those three forms are treated as
+equivalent while broader, multiple, ranged, or different addresses remain
+blocked. Setup retries readback for at most two seconds, reports only a stable
+safe mismatch category such as `FIREWALL_REMOTE_ADDRESS_MISMATCH`, and restores
+the pre-install state if verification still fails. The operator is explicitly
+warned not to broaden the firewall scope manually.
 
 Node `33:205` keeps the three-column operational dashboard while adding clear
 entry points for Agent connection and device management. It explicitly states

@@ -53,8 +53,11 @@ Agent와 Viewer 버전은 달라도 되는 구성이 아닙니다. 반드시 같
 
 - [ ] `SamsungSwitchWatchAgent-Https` 인바운드 규칙이 TCP/18443에 적용됨
 - [ ] 원격 주소가 입력한 Viewer IPv4의 정확한 `/32`임
+- [ ] 같은 Viewer IPv4의 `IP`, `IP/32`, `IP/255.255.255.255` 조회 표현만 동등하게 판정됨
+- [ ] 다른 prefix, 주소 목록·범위, `Any`, `LocalSubnet`과 IPv6는 동등하게 판정되지 않음
 - [ ] Domain·Private 프로필에만 규칙이 적용됨
 - [ ] Public 프로필에는 제품 규칙이 적용되지 않음
+- [ ] Enabled·Inbound·Allow·TCP·18443·Edge Traversal 비활성 조건 중 하나라도 다르면 실패함
 - [ ] 등록한 Viewer PC에서 Agent HTTPS/18443 연결이 성공함
 - [ ] 다른 시험 PC의 Agent API 요청이 `AGENT_CLIENT_NOT_ALLOWED`로 거부됨
 - [ ] 다른 프로그램 소유 TCP/18443 허용 규칙이 있으면 Setup이
@@ -190,6 +193,9 @@ Viewer가 종료되면 감시도 중단되는 구조가 현장 운영 요구와 
 - [ ] 업데이트 후 HTTPS 신원이 유지되어 Viewer 재신뢰 입력이 없음
 - [ ] 기존 유효 실행 한도 설정이 보존됨
 - [ ] 현재 입력한 Viewer IPv4가 정확한 `/32` 방화벽 규칙으로 적용됨
+- [ ] 방화벽 적용이 늦게 보이는 시험에서 Setup이 200ms 간격, 최대 2초 안에서만 재확인함
+- [ ] 2초 안에도 규칙이 불일치하면 설치가 실패하고 이전 방화벽 snapshot이 복구됨
+- [ ] 실패 Cause에는 실제 IP나 규칙 원문 없이 안전한 방화벽 불일치 코드만 표시됨
 - [ ] 현재 입력한 Viewer IPv4가 Agent `AllowedViewerIpv4`에도 적용됨
 - [ ] 현재 선택하거나 직접 추가한 서로 다른 관리망 1~2개가 대상 허용 목록으로 적용됨
 - [ ] 기존 설정의 유효한 canonical RFC1918 관리망 1~2개가 Setup 목록에 복원됨

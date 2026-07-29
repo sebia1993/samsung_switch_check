@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.4-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.5-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.4-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.4-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.5-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.5-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -84,11 +84,19 @@ Viewer의 연결 진단은 다음 순서로 표시됩니다.
 실제 Agent PC 주소를 입력했는지 확인합니다. 스위치 IP나 Viewer PC 주소를 Agent 주소
 입력란에 넣지 않습니다.
 
+Windows가 단일 호스트 방화벽 주소를 `/32` 대신 `/255.255.255.255`로 반환해도 Setup은
+같은 Viewer IPv4인지 의미 기준으로 확인합니다. 적용 직후 Windows 반영 지연은 최대 2초까지만
+재확인하며, 그 뒤에도 방향·동작·프로토콜·포트·주소·프로필·Edge Traversal 중 하나가 다르면
+`SETUP_FIREWALL_FAILED`와 민감정보가 없는 불일치 코드를 표시하고 설치 전 상태로 복구합니다.
+이 오류를 피하려고 규칙을 `Any`, `LocalSubnet` 또는 넓은 대역으로 수동 변경하지 마십시오.
+
 ## 보안 경계
 
 - Viewer→Agent는 HTTPS/TCP 18443을 사용합니다.
 - Agent Setup은 입력한 고정 Viewer IPv4만 Windows 방화벽에서 `/32`로 허용하고, Agent도
   같은 주소를 모든 API 요청에서 다시 확인합니다.
+- 방화벽 조회 결과는 같은 IPv4의 `IP`, `IP/32`, `IP/255.255.255.255`만 동일한 단일
+  호스트로 인정합니다. 다른 prefix, 주소 목록·범위와 특수 범위는 거부합니다.
 - Agent→스위치는 Setup에서 선택하거나 직접 추가한 관리망의 IPv4와 Telnet/TCP 23만
   허용합니다. 직접 입력한 호스트 주소는 canonical 네트워크 주소로 정규화되고, 공인망과
   중복 범위는 거부됩니다.
@@ -106,7 +114,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.4-poc
+.\scripts\build-release.ps1 -Version 0.10.5-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -123,5 +131,5 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.10.4-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.4_POC_KO.md)
+- [0.10.5-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.5_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)
