@@ -38,11 +38,11 @@
                                    Text="HTTPS 포트 18443을 자동 사용합니다. 주소에 https://나 포트를 붙이지 마세요."/>
 
                         <Button x:Name="LocalPreflightButton" Margin="0,12,0,0" MinHeight="38"
-                                HorizontalAlignment="Left" MinWidth="166"
+                                HorizontalAlignment="Left" MinWidth="238"
                                 Style="{StaticResource SecondaryButton}"
-                                Content="이 PC에서 사전 테스트"
+                                Content="Agent와 Viewer가 같은 PC일 때 테스트"
                                 Click="LocalPreflight_Click"
-                                AutomationProperties.Name="이 PC에서 Agent 연결 사전 테스트"
+                                AutomationProperties.Name="Agent와 Viewer가 같은 PC일 때 테스트"
                                 AutomationProperties.HelpText="Agent와 Viewer를 같은 PC에 설치한 경우 이 PC의 사설 IPv4로 Agent 연결을 확인합니다."/>
                         <TextBlock Margin="0,6,0,0" FontSize="12" TextWrapping="Wrap"
                                    Foreground="{StaticResource MutedTextBrush}"
@@ -130,6 +130,11 @@
                 <Button x:Name="RetrustButton" MinWidth="132" Margin="0,0,8,0"
                         Style="{StaticResource SecondaryButton}" Content="이 Agent로 다시 연결"
                         Visibility="Collapsed" Click="Retrust_Click"/>
+                <Button x:Name="DiagnosticSaveButton" MinWidth="126" Margin="0,0,8,0"
+                        Style="{StaticResource SecondaryButton}" Content="익명 진단 저장"
+                        Visibility="Collapsed" Click="DiagnosticSave_Click"
+                        AutomationProperties.Name="익명 진단 저장"
+                        AutomationProperties.HelpText="주소, 계정, 경로 및 장비 출력이 제외된 연결 진단 TXT를 직접 저장합니다."/>
                 <Button x:Name="CancelButton" Width="86" Style="{StaticResource SecondaryButton}"
                         Content="취소" IsCancel="True"/>
                 <Button x:Name="SaveButton" MinWidth="138" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}"

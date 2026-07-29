@@ -26,7 +26,7 @@ public sealed class ViewerSettingsTests
 
         Assert.Equal("https://localhost:18443", clean.AgentUri);
         Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason));
-        Assert.Contains("이 PC에서 사전 테스트", reason, StringComparison.Ordinal);
+        Assert.Contains("Agent와 Viewer가 같은 PC일 때 테스트", reason, StringComparison.Ordinal);
         Assert.True(ViewerSettingsSanitizer.IsLoopbackAgentUri(clean.AgentUri));
         ViewerSettingsSanitizer.SplitAgentUri(clean.AgentUri, out var address, out _);
         Assert.Equal("localhost", address);
@@ -130,7 +130,7 @@ public sealed class ViewerSettingsTests
             "18443",
             out _,
             out var reason));
-        Assert.Contains("이 PC에서 사전 테스트", reason, StringComparison.Ordinal);
+        Assert.Contains("Agent와 Viewer가 같은 PC일 때 테스트", reason, StringComparison.Ordinal);
     }
 
     [Fact]

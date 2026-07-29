@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.7-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.8-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.7-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.7-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -40,8 +40,9 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 1. Agent ZIP을 로컬 임시 폴더에 완전히 압축 해제합니다.
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행하고 UAC를 한 번 승인합니다.
-3. 원격 Viewer를 설치할 PC의 고정 IPv4 한 개를 입력합니다. 동일 PC 사전 테스트라면
-   `이 PC 주소 넣기`를 눌러 Agent PC의 실제 사설 IPv4를 사용합니다.
+3. `허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님`에 원격 Viewer PC의 주소 한 개를
+   입력합니다. 같은 PC 시험이라면 `같은 PC 시험용 주소`를 눌러 Agent PC의 실제 사설 IPv4를
+   사용합니다.
 4. 자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 사설망을
    `IPv4/prefix`로 직접 추가하며, 자동 선택과 직접 추가를 합해 1~2개만 사용합니다.
 5. `검사`에서 서비스·HTTPS/18443·방화벽 상태를 확인한 뒤 `설치/업데이트`를 실행합니다.
@@ -57,6 +58,11 @@ Setup이 이전 설치·업데이트의 미완료 작업 기록을 발견하면 
 `.__staging_*`, `.__backup_*`, `.__failed_*` 폴더나 작업 기록을 수동으로 삭제·이동·이름
 변경하지 마십시오.
 
+검사·설치·복구가 성공 또는 실패로 끝나면 `익명 진단 저장`으로
+`SSW_FIELD_DIAGNOSTIC/1` UTF-8 BOM TXT를 수동 저장할 수 있습니다. 파일은 제품·Windows
+버전, 안전한 단계·결과·오류·조치 코드와 제한된 단계별 소요 시간만 포함합니다. IP/CIDR,
+PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽·예외 원문, 명령과 장비 출력은 제외됩니다.
+
 설치 후 `SamsungSwitchWatchAgent` 서비스가 자동 시작됩니다. 일반 사용자의 바탕 화면,
 작업 표시줄과 트레이에는 Agent 창이 나타나지 않습니다. 로컬 관리자는 Windows 관리
 정책상 서비스를 중지할 수 있으므로 관리자 계정 자체를 통제해야 합니다.
@@ -71,7 +77,8 @@ Setup이 이전 설치·업데이트의 미완료 작업 기록을 발견하면 
 1. Viewer ZIP을 항상 사용할 로컬 폴더에 완전히 압축 해제합니다.
 2. `SamsungSwitchWatch.Viewer.exe`를 실행합니다.
 3. Agent PC의 IPv4 또는 사내 DNS 이름을 입력하고 연결 진단을 완료합니다. Agent와 Viewer를
-   같은 PC에서 먼저 시험할 때는 `이 PC에서 사전 테스트`를 직접 눌러 실제 사설 IPv4를 찾습니다.
+   같은 PC에서 먼저 시험할 때는 `Agent와 Viewer가 같은 PC일 때 테스트`를 직접 눌러 실제
+   사설 IPv4를 찾습니다.
 4. 장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW와 선택적 enable PW를 등록합니다.
 5. 접속 시험 후 `show port status`, `show syslog tail num 100` 또는 장비에서 지원하는
    읽기 전용 명령을 실행합니다.
@@ -85,6 +92,10 @@ Agent의 공개 신원을 내부적으로 자동 저장하고, 같은 주소의 
 원격 Viewer PC에서 Agent PC로 가는 방화벽·라우팅 경로는 검증되지 않으므로, 실제 배치 전에는
 Agent Setup에 원격 Viewer의 고정 IPv4를 다시 입력하고 원격 Viewer에서 연결을 확인해야 합니다.
 `localhost`, `localhost.`와 `127.x.x.x`는 동일 PC 시험에서도 Agent 주소로 사용하지 않습니다.
+
+연결 검사가 끝나면 성공 또는 실패와 관계없이 `익명 진단 저장`을 사용할 수 있습니다. 이
+TXT는 일반/같은-PC 모드, 주소·DNS·TCP·HTTPS·Identity 단계 상태와 제한된 소요 시간, 후보
+수와 확인된 Agent/API 버전만 남기며 입력 주소·DNS 이름과 장비 정보는 저장하지 않습니다.
 
 상세 절차와 연결 실패 단계는 [설치 및 운영 안내](docs/INSTALL_KO.md)를 확인하십시오.
 
@@ -133,7 +144,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.7-poc
+.\scripts\build-release.ps1 -Version 0.10.8-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -150,5 +161,5 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.10.7-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.7_POC_KO.md)
+- [0.10.8-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.8_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)

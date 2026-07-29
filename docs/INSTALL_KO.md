@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.7-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.8-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.7-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.7-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.7-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.8-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.7-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.8-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -61,8 +61,9 @@ Viewer에는 고정 주소를 사용하고, Agent PC에서 해당 관리망까�
 1. Agent ZIP을 Agent PC의 로컬 임시 폴더에 압축 해제합니다.
 2. `SamsungSwitchWatch.Agent.Setup.exe`를 실행합니다.
 3. Windows UAC에서 관리자 권한을 승인합니다.
-4. 원격 Viewer PC의 고정 IPv4를 입력합니다. Agent와 Viewer를 같은 PC에서 먼저 시험할
-   때만 `이 PC 주소 넣기`를 눌러 표시된 실제 사설 IPv4를 사용합니다.
+4. `허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님`에 원격 Viewer PC의 주소를 입력합니다.
+   Agent와 Viewer를 같은 PC에서 먼저 시험할 때만 `같은 PC 시험용 주소`를 눌러 표시된 실제
+   사설 IPv4를 사용합니다.
 5. 자동 검색된 목록에서 스위치 관리망을 선택합니다. 목록에 없으면 승인된 관리망을
    `IPv4/prefix`로 직접 추가합니다. 자동 선택과 직접 추가의 합계는 1~2개입니다.
 6. `검사`를 눌러 입력값과 현재 서비스·포트·방화벽 상태를 확인합니다.
@@ -141,6 +142,14 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
   하나의 `SETUP_ROLLBACK_FAILED`만 반복 표시되는 것으로 원인을 판단하지 마십시오.
 - 실패 화면에만 나타나는 `진단정보 복사`는 제품 버전, UTC 시각, 작업 종류, 안전한 오류 코드,
   작업 기록 형식·단계, 필요한 파일의 존재 여부와 서비스 상태만 클립보드에 복사합니다.
+- 검사·설치·복구가 끝나면 성공 여부와 관계없이 `익명 진단 저장`을 눌러 사내에서 외부로
+  전달 가능한 진단 TXT를 수동 저장할 수 있습니다. 자동으로 파일을 만들지 않습니다.
+
+익명 진단 파일은 `SSW_FIELD_DIAGNOSTIC/1`로 시작하는 UTF-8 BOM 텍스트입니다. 제품·Windows
+버전, 작업 결과, 실패 단계, 안전한 오류·권장 조치 코드와 단계별 제한 시간만 포함하며 실제
+IP/CIDR, PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예외 원문, 명령과 장비
+출력은 포함하지 않습니다. 저장에 실패하면 `DIAGNOSTIC_WRITE_FAILED`가 표시되며 성공한
+것으로 처리하지 않습니다.
 
 복구 대기 또는 실패 상태에서는 `%ProgramFiles%\SamsungSwitchWatch` 아래의
 `Agent.__staging_*`, `Agent.__backup_*`, `Agent.__failed_*` 폴더와
@@ -224,9 +233,9 @@ Viewer 데이터는 `%LOCALAPPDATA%\SamsungSwitchWatch`에 저장됩니다.
 
 Agent와 Viewer를 한 PC에 함께 설치해 반입 전에 확인할 수 있습니다.
 
-1. Agent Setup에서 `이 PC 주소 넣기`를 눌러 실제 RFC1918 사설 IPv4를 선택합니다.
+1. Agent Setup에서 `같은 PC 시험용 주소`를 눌러 실제 RFC1918 사설 IPv4를 선택합니다.
 2. 검사와 설치/업데이트를 완료합니다.
-3. Viewer의 `Agent 연결`에서 `이 PC에서 사전 테스트`를 직접 누릅니다.
+3. Viewer의 `Agent 연결`에서 `Agent와 Viewer가 같은 PC일 때 테스트`를 직접 누릅니다.
 4. 성공하면 찾은 Agent 주소를 저장합니다.
 
 이 테스트는 자동으로 시작되지 않습니다. 사설 IPv4 후보를 최대 6개, 후보당 최대 7초,
@@ -247,6 +256,11 @@ Agent와 Viewer를 한 PC에 함께 설치해 반입 전에 확인할 수 있습
 | HTTPS | 암호화와 Agent 공개 신원 | Agent 재설치 여부, 보안 프로그램 |
 | API | Agent identity와 준비 상태 | Agent Setup의 검사 결과 |
 | 버전 | Agent·Viewer 제품 버전 | 같은 Release ZIP 사용 |
+
+연결 검사가 성공 또는 실패로 끝나면 `익명 진단 저장`으로 단계별 상태와 제한된 소요 시간을
+저장할 수 있습니다. 파일은 사용자가 선택한 위치에만 생성되며 입력한 Agent 주소, DNS 이름,
+IP/CIDR, PC·사용자명, 계정, 인증서 정보, 경로, 예외 원문과 장비 명령/출력은 포함하지
+않습니다. 사내에서 오류를 재현하기 어려울 때 이 TXT와 화면에 표시된 오류 코드를 전달합니다.
 
 인증서 SHA-256 지문이나 페어링 토큰을 사용자가 입력하지 않습니다. 최초 정상 연결에서 Viewer가
 Agent 공개 신원을 내부적으로 자동 저장합니다. 같은 주소의 신원이 바뀌면 중간자 공격 또는

@@ -72,6 +72,9 @@ $requireElevatedAclFixture = $env:GITHUB_ACTIONS -eq 'true'
 & (Join-Path $PSScriptRoot 'test-agent-directory-acl.ps1') `
     -RequireElevatedAclFixture:$requireElevatedAclFixture
 
+Write-SswStep '현장 진단 재현 계약 검사'
+& (Join-Path $PSScriptRoot 'test-field-diagnostic-replay.ps1')
+
 Write-SswStep 'GitHub 릴리스 워크플로 계약 검사'
 & (Join-Path $PSScriptRoot 'test-release-workflow-contract.ps1')
 

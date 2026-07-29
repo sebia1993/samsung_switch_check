@@ -127,7 +127,7 @@ public static class ViewerSettingsSanitizer
     public const int DefaultAgentPort = 18443;
     public const string LoopbackAgentAddressReason =
         "localhost 또는 127.0.0.1은 Viewer 연결에 사용할 수 없습니다. "
-        + "'이 PC에서 사전 테스트'를 눌러 이 PC의 실제 사설 IPv4를 찾으세요.";
+        + "'Agent와 Viewer가 같은 PC일 때 테스트'를 눌러 이 PC의 실제 사설 IPv4를 찾으세요.";
 
     public static ViewerSettings Sanitize(ViewerSettings? input)
     {

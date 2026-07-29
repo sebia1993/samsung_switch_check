@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v11-agent-setup-recovery-figma-synced",
+  "runId": "ssw-20260729-v12-sanitized-field-diagnostic-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -43,10 +43,12 @@
     "agentSetupRecoveryCompleteV11": "58:97",
     "agentSetupRecoveryFailedV11": "58:120",
     "agentSetupUnsafeRecoveryStateV11": "58:147",
+    "agentSetupSanitizedDiagnosticV12": "60:340",
+    "httpsConnectionSanitizedDiagnosticV12": "62:99",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v11-agent-setup-recovery",
+    "version": "v12-sanitized-field-diagnostic",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -56,7 +58,8 @@
     "manualOutputPersistence": "memory-only",
     "monitoringOwner": "viewer",
     "fingerprintInput": false,
-    "pairingTokenInput": false
+    "pairingTokenInput": false,
+    "fieldDiagnosticPersistence": "manual-save-only"
   },
   "managementNetworkFlow": {
     "automaticDiscovery": true,
@@ -88,8 +91,8 @@
   },
   "samePcPreflightFlow": {
     "automaticExecution": false,
-    "viewerAction": "이 PC에서 사전 테스트",
-    "agentSetupAction": "이 PC 주소 넣기",
+    "viewerAction": "Agent와 Viewer가 같은 PC일 때 테스트",
+    "agentSetupAction": "같은 PC 시험용 주소",
     "loopbackAccepted": false,
     "privateIpv4Required": true,
     "agentApiVerified": true,
@@ -110,6 +113,19 @@
     "diagnosticsVisibleOnFailureOnly": true,
     "diagnosticsSanitized": true,
     "manualEvidenceDeletionAllowed": false
+  },
+  "fieldDiagnosticFlow": {
+    "schema": "SSW_FIELD_DIAGNOSTIC/1",
+    "automaticSave": false,
+    "availableAfterCompletedCheck": true,
+    "agentSetupNode": "60:340",
+    "viewerConnectionNode": "62:99",
+    "utf8Bom": true,
+    "redactsNetworkIdentifiers": true,
+    "redactsIdentityAndCredentials": true,
+    "redactsPathsAndRawExceptions": true,
+    "includesStableCodesAndStageTimings": true,
+    "switchCommandOutputIncluded": false
   },
   "operatorFlow": {
     "deviceInputOrder": [

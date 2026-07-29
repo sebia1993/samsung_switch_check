@@ -7,6 +7,8 @@
 - Current device-command dashboard: node `37:333`
 - Current HTTPS Agent connection and same-PC preflight dialog: node `52:123`
 - Current Agent Setup same-PC address helper screen: node `54:363`
+- Current Agent Setup sanitized field-diagnostic screen: node `60:340`
+- Current Viewer connection sanitized field-diagnostic screen: node `62:99`
 - Previous HTTPS Agent connection dialog: node `36:2`
 - Previous Agent Setup manual management-network screen: node `46:72`
 - Agent Setup manual CIDR states: normalized `48:72`, invalid `48:85`, maximum `48:98`
@@ -60,8 +62,8 @@ pairing-token, `SSW1:` pairing, and Bearer-token flows. Node `52:123` preserves
 that simplified Agent address and fixed HTTPS port `18443`; access control
 belongs to the management network and Windows Firewall rules.
 
-Node `52:123` is the current v10 connection source of truth. The operator must
-explicitly press `이 PC에서 사전 테스트`; the Viewer never starts this check
+Node `52:123` established the v10 connection layout. The current operator must
+explicitly press `Agent와 Viewer가 같은 PC일 때 테스트`; the Viewer never starts this check
 automatically. It searches only real private IPv4 addresses on the current PC,
 not `localhost` or `127/8`, and separately reports these three scopes:
 
@@ -85,8 +87,8 @@ third unique network is attempted. Existing one or two canonical
 be restored safely, Setup shows `SETUP_EXISTING_NETWORKS_NOT_LOADED`, preloads
 no network, and asks the operator to select or add the approved networks again.
 
-Node `54:363` supersedes node `46:72` for the initial Viewer-address step while
-preserving that management-network behavior. `이 PC 주소 넣기` fills a single
+Node `54:363` established the initial Viewer-address step while preserving that
+management-network behavior. The current `같은 PC 시험용 주소` action fills a single
 detected private IPv4 immediately or lets the operator select among multiple
 private IPv4 candidates. If no suitable address exists, Setup shows actionable
 feedback instead of inventing a loopback address. Before remote deployment, the
@@ -137,6 +139,31 @@ interrupted Agent Setup recovery.
 The four frames cover recovery required (`58:72`), recovery completed
 (`58:97`), retryable recovery failure with diagnostic-copy feedback
 (`58:120`), and unsafe recovery state (`58:147`).
+
+## v12 sanitized field diagnostic flow
+
+Nodes `60:340` and `62:99` are the source of truth for manually saved field
+diagnostics.
+
+1. Agent Setup and Viewer never save a diagnostic automatically.
+2. `익명 진단 저장` appears only after a check has completed, whether it
+   succeeded or failed.
+3. The file uses the versioned `SSW_FIELD_DIAGNOSTIC/1` text contract and
+   UTF-8 with BOM so it opens correctly on Korean Windows.
+4. Stable stage, result and error codes plus bounded stage timings are
+   retained. IP/CIDR, PC and user names, credentials, certificate details,
+   paths, raw firewall data, exception text and switch command output are
+   excluded.
+5. `같은 PC 시험용 주소` and
+   `Agent와 Viewer가 같은 PC일 때 테스트` make the local test boundary
+   explicit. A same-PC success still does not prove the remote Viewer route or
+   switch access.
+6. Existing failure-only clipboard diagnostics remain available in Agent
+   Setup. The new TXT action does not replace them.
+
+Node `60:340` covers the Agent Setup completed-check state and node `62:99`
+covers the Viewer connection-check state. Both preserve the established
+compact WPF layout and Noto Sans KR Figma typography.
 
 ## Historical references
 
