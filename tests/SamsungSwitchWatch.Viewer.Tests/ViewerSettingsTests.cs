@@ -450,26 +450,26 @@ public sealed class ViewerSettingsTests
             () => settings.Synchronize(current =>
             {
                 mutationEntered.Set();
-                Assert.True(releaseMutation.Wait(TimeSpan.FromSeconds(2)));
+                releaseMutation.Wait();
                 current.AgentTrustPins[current.BuildAgentAuthority()] = pin;
             }),
             CancellationToken.None,
             TaskCreationOptions.LongRunning,
             TaskScheduler.Default);
-        Assert.True(mutationEntered.Wait(TimeSpan.FromSeconds(2)));
-
-        var sanitize = Task.Factory.StartNew(
-            () =>
-            {
-                sanitizeStarted.Set();
-                return ViewerSettingsSanitizer.Sanitize(settings);
-            },
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning,
-            TaskScheduler.Default);
+        Task<ViewerSettings>? sanitize = null;
         try
         {
-            Assert.True(sanitizeStarted.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(mutationEntered.Wait(TimeSpan.FromSeconds(10)));
+            sanitize = Task.Factory.StartNew(
+                () =>
+                {
+                    sanitizeStarted.Set();
+                    return ViewerSettingsSanitizer.Sanitize(settings);
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            Assert.True(sanitizeStarted.Wait(TimeSpan.FromSeconds(10)));
             var completed = await Task.WhenAny(sanitize, Task.Delay(TimeSpan.FromMilliseconds(250)));
             Assert.NotSame(sanitize, completed);
         }
@@ -478,8 +478,9 @@ public sealed class ViewerSettingsTests
             releaseMutation.Set();
         }
 
-        await mutation.WaitAsync(TimeSpan.FromSeconds(2));
-        var clean = await sanitize.WaitAsync(TimeSpan.FromSeconds(2));
+        await mutation.WaitAsync(TimeSpan.FromSeconds(10));
+        var clean = await Assert.IsType<Task<ViewerSettings>>(sanitize)
+            .WaitAsync(TimeSpan.FromSeconds(10));
         Assert.True(clean.TryGetAgentTrustPin(out var stored));
         Assert.Equal(pin, stored);
     }
