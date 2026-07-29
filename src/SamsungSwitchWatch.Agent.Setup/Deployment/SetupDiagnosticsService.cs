@@ -39,7 +39,10 @@ public sealed class SetupDiagnosticsService(
             }
 
             ValidateInput(request);
-            steps.Add(Success("INPUT_VALID", "입력 확인", "Viewer IP와 관리망 선택이 올바릅니다."));
+            steps.Add(Success(
+                "INPUT_VALID",
+                "입력 확인",
+                "Viewer IP와 관리망 선택·추가가 올바릅니다."));
 
             var package = packageValidator.Validate(paths.PackageDirectory);
             steps.Add(Success(
@@ -162,30 +165,12 @@ public sealed class SetupDiagnosticsService(
         {
             throw new SetupException(
                 SetupErrorCodes.NetworkSelectionInvalid,
-                "스위치가 연결된 사설 관리망을 1~2개 선택하세요.");
+                "스위치가 연결된 사설 관리망을 1~2개 선택하거나 추가하세요.");
         }
     }
 
-    private static bool IsCanonicalPrivateCidr(string value)
-    {
-        var pieces = value.Split('/');
-        if (pieces.Length != 2 ||
-            !Ipv4Input.TryParseStrict(pieces[0], out var network) ||
-            !int.TryParse(pieces[1], out var prefix) ||
-            prefix is < 8 or > 32 ||
-            !Ipv4Input.IsPrivateNetwork(network, prefix))
-        {
-            return false;
-        }
-
-        var bytes = network.GetAddressBytes();
-        var numeric = ((uint)bytes[0] << 24) |
-                      ((uint)bytes[1] << 16) |
-                      ((uint)bytes[2] << 8) |
-                      bytes[3];
-        var mask = prefix == 0 ? 0 : uint.MaxValue << (32 - prefix);
-        return (numeric & mask) == numeric;
-    }
+    private static bool IsCanonicalPrivateCidr(string value) =>
+        Ipv4Input.IsCanonicalPrivateCidr(value);
 
     private static SetupStepResult Success(string code, string label, string message) =>
         new(code, label, SetupStepState.Succeeded, message);

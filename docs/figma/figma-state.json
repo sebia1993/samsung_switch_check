@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v7-firewall-viewer-ip-guard-figma-synced",
+  "runId": "ssw-20260729-v8-manual-management-network-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -32,10 +32,14 @@
     "agentSetupFirewallWarningV7": "42:340",
     "agentSetupExternalRuleWarningV7": "42:367",
     "agentSetupViewerIpGuardV7": "42:371",
+    "agentSetupManualManagementNetworkV8": "46:72",
+    "manualCidrNormalizedV8": "48:72",
+    "manualCidrInvalidV8": "48:85",
+    "manualCidrMaximumV8": "48:98",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v7-firewall-viewer-ip-guard",
+    "version": "v8-manual-management-network",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -46,6 +50,15 @@
     "monitoringOwner": "viewer",
     "fingerprintInput": false,
     "pairingTokenInput": false
+  },
+  "managementNetworkFlow": {
+    "automaticDiscovery": true,
+    "manualPrivateIpv4CidrInput": true,
+    "networkAddressNormalization": true,
+    "maximumUniqueNetworks": 2,
+    "existingAllowedTargetCidrsReloaded": true,
+    "manualEntryDraftPersisted": false,
+    "publicNetworkAccepted": false
   },
   "agentSetupSecurityFlow": {
     "externalFirewallRulesModified": false,

@@ -118,19 +118,26 @@ internal static class Program
                        }))
             {
                 ShowAndLayout(setupLifetime.Window);
-                var viewerIpInput = FindVisualChildren<TextBox>(setupLifetime.Window)
-                    .First();
+                var viewerIpInput = (TextBox)setupLifetime.Window.FindName(
+                    "ViewerIpTextBox");
                 viewerIpInput.Text = "10.20.30.25";
+                var manualCidrInput = (TextBox)setupLifetime.Window.FindName(
+                    "ManualCidrTextBox");
+                manualCidrInput.Text = "172.20.40.25/24";
+                var addManualNetwork = (Button)setupLifetime.Window.FindName(
+                    "AddManualNetworkButton");
+                addManualNetwork.RaiseEvent(
+                    new RoutedEventArgs(Button.ClickEvent));
                 var resultItems = (ItemsControl)setupLifetime.Window.FindName(
                     "ResultItemsControl");
                 resultItems.ItemsSource = new[]
                 {
                     SamsungSwitchWatch.Agent.Setup.ResultRow.From(
                         new SetupStepResult(
-                            "INPUT_VALID",
-                            "입력 확인",
-                            SetupStepState.Succeeded,
-                            "Viewer IP와 관리망 선택이 올바릅니다.")),
+                             "INPUT_VALID",
+                             "입력 확인",
+                             SetupStepState.Succeeded,
+                             "Viewer IP와 관리망 선택·추가가 올바릅니다.")),
                     SamsungSwitchWatch.Agent.Setup.ResultRow.From(
                         new SetupStepResult(
                             "FIREWALL_GATE_READY",
@@ -158,7 +165,7 @@ internal static class Program
                 Capture(
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
-                    "외부 TCP 18443 규칙을 보존하고 Viewer IPv4를 Agent 원격 업무 API에서 제한하는 Agent Setup 경고 화면");
+                    "자동 검색 관리망과 정규화된 직접 추가 관리망, 외부 TCP 18443 규칙 보존 경고를 함께 보여 주는 Agent Setup 화면");
             }
 
             using var dashboardLifetime = new WindowLifetime(

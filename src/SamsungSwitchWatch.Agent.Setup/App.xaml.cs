@@ -18,6 +18,8 @@ public partial class App : Application
         var administrator = new WindowsAdministratorChecker();
         var package = new AgentPackageValidator(fileSystem);
         var networks = new WindowsNetworkDiscovery();
+        var existingTargetNetworks =
+            new ExistingTargetNetworkLoader(fileSystem, paths).Load();
         var diagnostics = new SetupDiagnosticsService(
             package,
             fileSystem,
@@ -38,7 +40,12 @@ public partial class App : Application
 
         var diagnosticsOnly = e.Args.Any(argument =>
             string.Equals(argument, "--diagnostics", StringComparison.OrdinalIgnoreCase));
-        MainWindow = new MainWindow(networks, diagnostics, deployment, diagnosticsOnly);
-        MainWindow.Show();
+        var mainWindow =
+            new MainWindow(networks, diagnostics, deployment, diagnosticsOnly);
+        mainWindow.InitializeExistingTargetNetworks(
+            existingTargetNetworks.TargetCidrs,
+            existingTargetNetworks.Warning);
+        MainWindow = mainWindow;
+        mainWindow.Show();
     }
 }

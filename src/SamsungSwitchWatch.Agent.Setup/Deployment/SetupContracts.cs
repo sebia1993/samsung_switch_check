@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 
 namespace SamsungSwitchWatch.Agent.Setup.Deployment;
@@ -23,6 +24,7 @@ public static class SetupErrorCodes
     public const string PackageHashMismatch = "SETUP_PACKAGE_HASH_MISMATCH";
     public const string ViewerIpInvalid = "SETUP_VIEWER_IP_INVALID";
     public const string NetworkSelectionInvalid = "SETUP_NETWORK_SELECTION_INVALID";
+    public const string ExistingNetworksNotLoaded = "SETUP_EXISTING_NETWORKS_NOT_LOADED";
     public const string AdministratorRequired = "SETUP_ADMINISTRATOR_REQUIRED";
     public const string PathInvalid = "SETUP_PATH_INVALID";
     public const string PathUntrusted = "SETUP_PATH_UNTRUSTED";
@@ -365,4 +367,63 @@ public static class Ipv4Input
                bytes[1] == 168 &&
                prefixLength >= 16;
     }
+
+    internal static bool TryNormalizePrivateCidr(
+        string? value,
+        out string canonicalCidr)
+    {
+        canonicalCidr = string.Empty;
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var trimmed = value.Trim();
+        var pieces = trimmed.Split('/');
+        if (pieces.Length != 2 ||
+            pieces[0].Length == 0 ||
+            pieces[0] != pieces[0].Trim() ||
+            pieces[1].Length == 0 ||
+            pieces[1] != pieces[1].Trim() ||
+            pieces[1].Length > 1 && pieces[1][0] == '0' ||
+            pieces[1].Any(character => character is < '0' or > '9') ||
+            !TryParseStrict(pieces[0], out var address) ||
+            !int.TryParse(
+                pieces[1],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var prefixLength) ||
+            prefixLength is < 0 or > 32)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        var numeric = ((uint)bytes[0] << 24) |
+                      ((uint)bytes[1] << 16) |
+                      ((uint)bytes[2] << 8) |
+                      bytes[3];
+        var mask = prefixLength == 0
+            ? 0
+            : uint.MaxValue << (32 - prefixLength);
+        var normalized = numeric & mask;
+        var network = new IPAddress(
+        [
+            (byte)(normalized >> 24),
+            (byte)(normalized >> 16),
+            (byte)(normalized >> 8),
+            (byte)normalized
+        ]);
+        if (!IsPrivateNetwork(network, prefixLength))
+        {
+            return false;
+        }
+
+        canonicalCidr = $"{network}/{prefixLength}";
+        return true;
+    }
+
+    internal static bool IsCanonicalPrivateCidr(string? value) =>
+        TryNormalizePrivateCidr(value, out var canonicalCidr) &&
+        string.Equals(value, canonicalCidr, StringComparison.Ordinal);
 }

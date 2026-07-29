@@ -5,7 +5,7 @@
         Width="760"
         Height="700"
         MinWidth="680"
-        MinHeight="620"
+        MinHeight="660"
         WindowStartupLocation="CenterScreen">
     <Grid Margin="24">
         <Grid.RowDefinitions>
@@ -62,40 +62,91 @@
                 </Grid>
                 <TextBlock Margin="0,4,0,10"
                            Foreground="{StaticResource MutedTextBrush}"
-                           Text="Agent PC에 직접 연결된 사설 IPv4 관리망을 1~2개 선택하세요." />
-                <ItemsControl x:Name="NetworkItemsControl">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Border BorderBrush="{StaticResource BorderBrush}"
-                                    BorderThickness="0,1,0,0"
-                                    Padding="4,9">
-                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                          Checked="NetworkSelectionChanged"
-                                          Unchecked="NetworkSelectionChanged">
-                                    <StackPanel>
-                                        <TextBlock>
-                                            <Run Text="{Binding InterfaceName, Mode=OneWay}" FontWeight="SemiBold" />
-                                            <Run Text="  " />
-                                            <Run Text="{Binding Cidr, Mode=OneWay}" />
-                                        </TextBlock>
-                                        <TextBlock FontSize="11"
-                                                   Foreground="{StaticResource MutedTextBrush}">
-                                            <Run Text="이 PC 주소: " />
-                                            <Run Text="{Binding Address, Mode=OneWay}" />
-                                            <Run Text=" · " />
-                                            <Run Text="{Binding Description, Mode=OneWay}" />
-                                        </TextBlock>
-                                    </StackPanel>
-                                </CheckBox>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                           Text="자동 검색 결과를 선택하거나 승인된 사설 IPv4 CIDR을 직접 추가하세요. 합계 최대 2개입니다." />
+                <ScrollViewer MaxHeight="96"
+                              VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="NetworkItemsControl">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="{StaticResource BorderBrush}"
+                                        BorderThickness="0,1,0,0"
+                                        Padding="4,6">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0"
+                                                  IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  Checked="NetworkSelectionChanged"
+                                                  Unchecked="NetworkSelectionChanged">
+                                            <TextBlock Text="{Binding DisplayText, Mode=OneWay}" />
+                                        </CheckBox>
+                                        <Button Grid.Column="1"
+                                                Margin="8,0,0,0"
+                                                Padding="10,5"
+                                                VerticalAlignment="Center"
+                                                Click="RemoveManualNetworkButton_Click"
+                                                Content="삭제">
+                                            <Button.Style>
+                                                <Style TargetType="Button"
+                                                       BasedOn="{StaticResource SecondaryButton}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding CanRemove}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
                 <TextBlock x:Name="NoNetworksText"
                            Margin="4,8,4,0"
                            Foreground="#B45309"
                            Visibility="Collapsed"
-                           Text="선택할 수 있는 직접 연결 사설 IPv4 관리망을 찾지 못했습니다." />
+                           Text="자동 검색된 관리망이 없습니다. 아래에서 승인된 관리망을 직접 추가하세요." />
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="112" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource MutedTextBrush}"
+                               Text="관리망 직접 추가" />
+                    <TextBox Grid.Column="1"
+                             x:Name="ManualCidrTextBox"
+                             Height="34"
+                             Padding="10,6"
+                             VerticalContentAlignment="Center"
+                             KeyDown="ManualCidrTextBox_KeyDown"
+                             ToolTip="예: 10.50.0.10/24" />
+                    <Button Grid.Column="2"
+                            x:Name="AddManualNetworkButton"
+                            Style="{StaticResource SecondaryButton}"
+                            Margin="8,0,0,0"
+                            Padding="14,6"
+                            MinWidth="72"
+                            Click="AddManualNetworkButton_Click"
+                            Content="추가" />
+                </Grid>
+                <TextBlock x:Name="ManualNetworkFeedbackText"
+                           Margin="4,5,4,0"
+                           FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           Text="입력한 주소는 네트워크 주소로 자동 정규화됩니다. 예: 10.50.0.10/24 → 10.50.0.0/24" />
+                <TextBlock x:Name="ExistingNetworksWarningText"
+                           Margin="4,5,4,0"
+                           FontSize="11"
+                           Foreground="#B45309"
+                           Visibility="Collapsed" />
             </StackPanel>
         </Border>
 
