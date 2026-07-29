@@ -256,6 +256,7 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
         FirewallSecurityAssessment.Safe;
     public Func<int, FirewallRuleSnapshot>? AppliedRuleReadback { get; set; }
     public int AppliedRuleCaptureCount { get; private set; }
+    public ManualResetEventSlim AppliedRuleCaptured { get; } = new();
     private bool _viewerRuleApplied;
 
     public FirewallRuleSnapshot Capture(string ruleName)
@@ -269,6 +270,7 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
             AppliedRuleReadback is not null)
         {
             AppliedRuleCaptureCount++;
+            AppliedRuleCaptured.Set();
             State = AppliedRuleReadback(AppliedRuleCaptureCount);
         }
 
