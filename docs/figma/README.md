@@ -191,6 +191,27 @@ Node `60:340` covers the Agent Setup completed-check state and node `62:99`
 covers the Viewer connection-check state. Both preserve the established
 compact WPF layout and Noto Sans KR Figma typography.
 
+## v14 failure-only support-code flow
+
+Nodes `58:120` and `62:99` now include the failure context in which the
+short support code is used. Component source frames `68:340` and `69:341`
+define the Agent Setup and Viewer variants.
+
+1. The label is exactly `지원 코드 · 이 코드만 전달하세요`.
+2. The value uses `SWD1-XXXX-XXXX-XXXX-XXXX` and is a selectable, read-only
+   text field. No new copy button is introduced.
+3. The panel exists only after a failed Agent Setup operation or failed Viewer
+   connection check. Running, success, a new attempt, or edited connection
+   input clears the stale value.
+4. The code is generated and validated offline. It is not a secret,
+   authentication token, pairing token, certificate fingerprint, or access
+   approval.
+5. CRC detects common transcription errors; it does not provide encryption,
+   signing, or identity proof.
+6. Agent Setup keeps its existing failure-only clipboard diagnostic, and both
+   products keep the manually saved `SSW_FIELD_DIAGNOSTIC/1` TXT. The short
+   code does not replace either diagnostic path.
+
 ## Historical references
 
 - Previous simplified dashboard v5: node `25:138`

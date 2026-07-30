@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using SamsungSwitchWatch.Support;
 using SamsungSwitchWatch.Viewer.Models;
 using SamsungSwitchWatch.Viewer.Services;
 
@@ -105,6 +106,76 @@ public sealed class ViewerFieldDiagnosticTests
         Assert.DoesNotContain(result.Detail, text, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SupportCode_EncodesOnlySanitizedFailureSnapshot()
+    {
+        var result = AgentConnectionProbeResult.Failure(
+            AgentConnectionProbeStage.Tcp,
+            "AGENT_CONNECTION_REFUSED",
+            @"DOMAIN\operator password=hunter2 10.20.30.40") with
+        {
+            StageSnapshots =
+                [
+                    new(
+                        AgentConnectionProbeStage.Address,
+                        AgentConnectionProbeState.Succeeded,
+                        10),
+                    new(
+                        AgentConnectionProbeStage.Dns,
+                        AgentConnectionProbeState.Succeeded,
+                        20),
+                    new(
+                        AgentConnectionProbeStage.Tcp,
+                        AgentConnectionProbeState.Failed,
+                        30)
+                ]
+        };
+        var snapshot = ViewerFieldDiagnostic.Create(
+            "SAME_PC",
+            result,
+            candidateCount: 2,
+            generatedUtc: DateTimeOffset.UnixEpoch,
+            productVersion: "0.10.10-poc",
+            windowsBuild: "22631",
+            architecture: "x64");
+
+        var code = ViewerFieldDiagnostic.CreateSupportCode(snapshot);
+
+        Assert.Equal(24, code.Length);
+        Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
+        Assert.Equal(
+            "AGENT_CONNECTION_REFUSED",
+            decoded!.Common.ResultCodeName);
+        Assert.Equal(Swd1ViewerMode.SamePc, decoded.Viewer!.Value.Mode);
+        Assert.Equal(
+            Swd1ViewerFailedStage.Tcp,
+            decoded.Viewer.Value.FailedStage);
+        Assert.Equal(2, decoded.Viewer.Value.CandidateCount);
+        Assert.Equal(
+            Swd1ViewerStageState.Failed,
+            decoded.Viewer.Value.Stages.Tcp);
+        Assert.DoesNotContain("operator", code, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("hunter2", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("10.20.30.40", code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SupportCode_RejectsSuccessfulSnapshot()
+    {
+        var snapshot = ViewerFieldDiagnostic.Create(
+            "NORMAL",
+            AgentConnectionProbeResult.Success(
+                Identity("0.10.10-poc"),
+                "done"),
+            1,
+            productVersion: "0.10.10-poc",
+            windowsBuild: "22631",
+            architecture: "x64");
+
+        Assert.Throws<ArgumentException>(
+            () => ViewerFieldDiagnostic.CreateSupportCode(snapshot));
+    }
+
     [Theory]
     [InlineData("AGENT_IDENTITY_CHANGED", "HTTPS")]
     [InlineData("AGENT_PROTOCOL_MISMATCH", "HTTPS")]
@@ -142,6 +213,8 @@ public sealed class ViewerFieldDiagnosticTests
             windowsBuild: "22631",
             architecture: "x64");
         var text = ViewerFieldDiagnostic.Format(snapshot);
+        var supportCode =
+            ViewerFieldDiagnostic.CreateSupportCode(snapshot);
 
         Assert.Equal("FAILED", snapshot.Result);
         Assert.Equal(expectedStage, snapshot.FailedStage);
@@ -151,6 +224,22 @@ public sealed class ViewerFieldDiagnosticTests
         Assert.Contains("IdentityDurationMs=15\r\n", text, StringComparison.Ordinal);
         Assert.Contains("AgentProductVersion=0.11.0-poc\r\n", text, StringComparison.Ordinal);
         Assert.Contains("ApiVersion=4\r\n", text, StringComparison.Ordinal);
+        Assert.True(
+            Swd1SupportCode.TryDecode(
+                supportCode,
+                out var decoded));
+        Assert.Equal(errorCode, decoded!.Common.ResultCodeName);
+        Assert.Equal(
+            expectedStage,
+            decoded.Viewer!.Value.FailedStage
+                .ToString()
+                .ToUpperInvariant());
+        Assert.Equal(Swd1ViewerMode.SamePc, decoded.Viewer.Value.Mode);
+        Assert.Equal("0.11.0", decoded.Viewer.Value.AgentVersion.ToString());
+        Assert.Equal(4, decoded.Viewer.Value.ApiVersion);
+        Assert.Equal(
+            Swd1ViewerStageState.Succeeded,
+            decoded.Viewer.Value.Stages.Identity);
         if (errorCode == "VIEWER_SETTINGS_WRITE_FAILED")
         {
             Assert.Equal("CHECK_VIEWER_STORAGE", snapshot.RecommendedActionCode);

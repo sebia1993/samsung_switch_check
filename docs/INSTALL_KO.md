@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.9-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.10-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.10-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.10-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.9-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.10-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.9-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.10-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -158,6 +158,12 @@ IP/CIDR, PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 �
 출력은 포함하지 않습니다. 저장에 실패하면 `DIAGNOSTIC_WRITE_FAILED`가 표시되며 성공한
 것으로 처리하지 않습니다.
 
+실패 화면의 `지원 코드 · 이 코드만 전달하세요` 아래에는
+`SWD1-XXXX-XXXX-XXXX-XXXX` 형식의 짧은 코드가 표시됩니다. 별도 버튼 없이 코드를 마우스나
+키보드로 선택한 뒤 `Ctrl+C`로 복사해 전화·메신저 지원에 전달합니다. 코드는 오프라인으로
+생성되며 계정·주소·경로·명령·출력 원문을 포함하지 않습니다. CRC는 입력 오타 확인용일 뿐
+인증·페어링·암호화 기능이 아니므로 코드로 접속을 승인하거나 신원을 확인하지 마십시오.
+
 복구 대기 또는 실패 상태에서는 `%ProgramFiles%\SamsungSwitchWatch` 아래의
 `Agent.__staging_*`, `Agent.__backup_*`, `Agent.__failed_*` 폴더와
 `%ProgramData%\SamsungSwitchWatch-Operations`의 작업 기록을 수동으로 삭제·이동·이름
@@ -268,6 +274,10 @@ Agent와 Viewer를 한 PC에 함께 설치해 반입 전에 확인할 수 있습
 저장할 수 있습니다. 파일은 사용자가 선택한 위치에만 생성되며 입력한 Agent 주소, DNS 이름,
 IP/CIDR, PC·사용자명, 계정, 인증서 정보, 경로, 예외 원문과 장비 명령/출력은 포함하지
 않습니다. 사내에서 오류를 재현하기 어려울 때 이 TXT와 화면에 표시된 오류 코드를 전달합니다.
+
+연결 실패 때만 단계 목록 아래에 짧은 SWD1 지원 코드가 표시됩니다. 코드를 선택해
+`Ctrl+C`로 복사할 수 있으며 성공, 새 연결 확인 또는 Agent 주소 변경 시 이전 코드는
+사라집니다. 긴 원인 분석이 필요하면 기존 `익명 진단 저장` TXT를 별도로 사용합니다.
 
 인증서 SHA-256 지문이나 페어링 토큰을 사용자가 입력하지 않습니다. 최초 정상 연결에서 Viewer가
 Agent 공개 신원을 내부적으로 자동 저장합니다. 같은 주소의 신원이 바뀌면 중간자 공격 또는

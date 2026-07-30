@@ -1,4 +1,5 @@
 using SamsungSwitchWatch.Agent.Setup.Deployment;
+using SamsungSwitchWatch.Support;
 
 namespace SamsungSwitchWatch.Agent.Setup.Tests;
 
@@ -630,6 +631,91 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("Service=RUNNING_READY", text);
         Assert.Contains("LocalTcp18443=PASS", text);
         Assert.Contains("Readiness=PASS", text);
+    }
+
+    [Fact]
+    public void SupportCode_UsesFreshRecoveryAndFirewallMismatchState()
+    {
+        var steps = new SetupStepRecorder();
+        steps.AddSafeDecisionCode(FirewallRuleMismatchCodes.RemoteAddress);
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.FirewallFailed,
+            "firewall",
+            SetupStepState.Failed,
+            "private detail"));
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.FirewallFailed,
+            "private detail",
+            steps) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            RollbackFailureCodes =
+                [SetupErrorCodes.RollbackStagingCleanupFailed]
+        };
+        var freshRecovery = new PendingRecoveryInspection(
+            true,
+            false,
+            SetupErrorCodes.RollbackFailed,
+            "private detail")
+        {
+            ServiceState = "stopped",
+            RollbackFailureCodes =
+                [SetupErrorCodes.RollbackJournalCleanupFailed]
+        };
+
+        var code = SetupFieldDiagnosticFormatter.CreateSupportCode(
+            new SetupFieldDiagnosticContext(
+                "0.10.10-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "recovery-inspection",
+                TimeSpan.Zero,
+                result,
+                freshRecovery));
+
+        Assert.Equal(24, code.Length);
+        Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
+        Assert.Equal("RECOVERY", decoded!.Common.OperationName);
+        Assert.Equal(
+            Swd1AgentRollbackFlags.StagingCleanup |
+            Swd1AgentRollbackFlags.JournalCleanup,
+            decoded.Agent!.Value.RollbackFlags);
+        Assert.Equal(
+            Swd1AgentFirewallFlags.RemoteAddress,
+            decoded.Agent.Value.FirewallFlags);
+        Assert.Equal(
+            Swd1AgentJournalState.PendingBlocked,
+            decoded.Agent.Value.JournalState);
+        Assert.Equal(
+            Swd1AgentServiceState.Stopped,
+            decoded.Agent.Value.ServiceState);
+    }
+
+    [Fact]
+    public void SupportCode_RejectsSuccessfulOperation()
+    {
+        var result = SetupOperationResult.Success(
+            "done",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.Ok,
+                    "done",
+                    SetupStepState.Succeeded,
+                    "done")
+            ]);
+        var context = new SetupFieldDiagnosticContext(
+            "0.10.10-poc",
+            DateTimeOffset.UnixEpoch,
+            "10.0.26100.0",
+            "X64",
+            "preflight",
+            TimeSpan.Zero,
+            result,
+            PendingRecoveryInspection.None);
+
+        Assert.Throws<ArgumentException>(
+            () => SetupFieldDiagnosticFormatter.CreateSupportCode(context));
     }
 
     [Fact]

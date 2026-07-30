@@ -80,6 +80,33 @@
                                 <TextBlock x:Name="IdentityProbeText" Margin="0,5,0,0"
                                            Text="○ 5. Agent API와 버전"
                                            AutomationProperties.LiveSetting="Polite"/>
+                                <Border x:Name="SupportCodePanel"
+                                        Margin="0,12,0,0"
+                                        Padding="10,8"
+                                        Background="#FFFBEB"
+                                        BorderBrush="#D97706"
+                                        BorderThickness="1"
+                                        CornerRadius="6"
+                                        Visibility="Collapsed"
+                                        AutomationProperties.Name="지원 코드">
+                                    <StackPanel>
+                                        <TextBlock Text="지원 코드 · 이 코드만 전달하세요"
+                                                   FontSize="11"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="#B45309"/>
+                                        <TextBox x:Name="SupportCodeTextBox"
+                                                 Margin="0,2,0,0"
+                                                 Padding="0"
+                                                 BorderThickness="0"
+                                                 Background="Transparent"
+                                                 FontFamily="Consolas"
+                                                 FontSize="12"
+                                                 IsReadOnly="True"
+                                                 IsReadOnlyCaretVisible="True"
+                                                 Text=""
+                                                 AutomationProperties.Name="지원 코드 값"/>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </Border>
 

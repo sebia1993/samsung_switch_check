@@ -2,6 +2,7 @@ using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
 using SamsungSwitchWatch.Viewer.Views;
 using SamsungSwitchWatch.Viewer.Models;
+using SamsungSwitchWatch.Support;
 using System.IO;
 using System.Windows;
 using System.Windows.Automation;
@@ -100,6 +101,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Collapsed,
                     connection.DiagnosticSaveButton.Visibility);
+                AssertHiddenSupportCode(connection);
                 Assert.Equal(0, localPreflight.CallCount);
                 Assert.True(connection.LocalPreflightButton.IsVisible);
                 Assert.True(connection.SaveButton.IsVisible);
@@ -147,6 +149,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     identityMismatchConnection.DiagnosticSaveButton.Visibility);
+                AssertVisibleSupportCode(identityMismatchConnection);
 
                 identityMismatchConnection.DemoModeCheckBox.IsChecked = true;
                 identityMismatchConnection.UpdateLayout();
@@ -158,6 +161,7 @@ public sealed class WpfSmokeTests
                     System.Windows.Visibility.Collapsed,
                     identityMismatchConnection.ConnectionProgressPanel.Visibility);
                 Assert.Empty(identityMismatchConnection.ValidationText.Text);
+                AssertHiddenSupportCode(identityMismatchConnection);
                 identityMismatchConnection.Close();
                 var appliedCount = 0;
                 var successfulConnection = new ConnectionSettingsWindow(
@@ -184,6 +188,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     successfulConnection.DiagnosticSaveButton.Visibility);
+                AssertHiddenSupportCode(successfulConnection);
                 Assert.True(successfulConnection.DiagnosticSaveButton.IsEnabled);
                 Assert.False(successfulConnection.SaveButton.IsEnabled);
                 Assert.Equal("저장 완료", successfulConnection.SaveButton.Content);
@@ -206,6 +211,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     samePcConnection.DiagnosticSaveButton.Visibility);
+                AssertHiddenSupportCode(samePcConnection);
                 Assert.True(samePcConnection.DiagnosticSaveButton.IsEnabled);
                 Assert.True(samePcConnection.SaveButton.IsEnabled);
                 samePcConnection.Close();
@@ -236,6 +242,7 @@ public sealed class WpfSmokeTests
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     tofuApplyFailureConnection.DiagnosticSaveButton.Visibility);
+                AssertVisibleSupportCode(tofuApplyFailureConnection);
                 Assert.Equal(
                     System.Windows.Visibility.Visible,
                     tofuApplyFailureConnection.RetrustButton.Visibility);
@@ -273,6 +280,7 @@ public sealed class WpfSmokeTests
                     "VIEWER_SETTINGS_WRITE_FAILED",
                     settingsSaveFailureConnection.ValidationText.Text,
                     StringComparison.Ordinal);
+                AssertVisibleSupportCode(settingsSaveFailureConnection);
                 Assert.True(settingsSaveFailureConnection.SaveButton.IsEnabled);
                 settingsSaveFailureConnection.Close();
                 var devices = new DeviceManagementWindow(viewModel);
@@ -964,6 +972,29 @@ public sealed class WpfSmokeTests
         var setter = Assert.Single(style.Setters.OfType<System.Windows.Setter>(),
             item => item.Property == AutomationProperties.NameProperty);
         return Assert.IsType<System.Windows.Data.Binding>(setter.Value).Path.Path;
+    }
+
+    private static void AssertVisibleSupportCode(
+        ConnectionSettingsWindow window)
+    {
+        Assert.Equal(
+            System.Windows.Visibility.Visible,
+            window.SupportCodePanel.Visibility);
+        Assert.Equal(24, window.SupportCodeTextBox.Text.Length);
+        Assert.True(
+            Swd1SupportCode.TryDecode(
+                window.SupportCodeTextBox.Text,
+                out var decoded));
+        Assert.Equal(Swd1Component.Viewer, decoded!.Common.Component);
+    }
+
+    private static void AssertHiddenSupportCode(
+        ConnectionSettingsWindow window)
+    {
+        Assert.Equal(
+            System.Windows.Visibility.Collapsed,
+            window.SupportCodePanel.Visibility);
+        Assert.Empty(window.SupportCodeTextBox.Text);
     }
 
     private sealed class CountingLocalAgentPreflight : ILocalAgentPreflight

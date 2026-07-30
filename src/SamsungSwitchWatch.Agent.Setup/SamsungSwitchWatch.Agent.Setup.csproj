@@ -13,4 +13,9 @@
     <AssemblyName>SamsungSwitchWatch.Agent.Setup</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\Swd1SupportCode.cs"
+             Link="Shared\Swd1SupportCode.cs" />
+  </ItemGroup>
+
 </Project>

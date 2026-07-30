@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.9 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.10 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.9-poc"
+VERSION = "0.10.10-poc"
 DOCUMENT_DATE = "2026-07-30"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -803,6 +803,17 @@ Viewer PC                 Agent PC                    Samsung Switch
     )
     add_callout(
         doc,
+        "짧은 SWD1 지원 코드",
+        "실패하면 '지원 코드 · 이 코드만 전달하세요' 아래 "
+        "SWD1-XXXX-XXXX-XXXX-XXXX 형식의 읽기 전용 코드가 표시됩니다. 별도 복사 버튼은 "
+        "없으며 코드만 선택해 Ctrl+C로 복사합니다. 전화나 메신저로 짧은 장애 분류를 전달할 "
+        "때 사용하세요. 이 코드는 오프라인에서 생성되고 CRC로 입력 오타를 확인하지만 비밀값, "
+        "인증·페어링 토큰 또는 인증서 지문이 아닙니다. 새 작업과 성공 화면에서는 이전 코드가 "
+        "지워집니다.",
+        "warning",
+    )
+    add_callout(
+        doc,
         "기존 TCP/18443 허용 규칙 경고",
         "다른 프로그램이 만든 인바운드 허용 규칙이 있으면 "
         "FIREWALL_OVERLAP_PROTECTED 경고를 표시하지만 해당 규칙은 변경하지 않고 설치를 "
@@ -948,10 +959,18 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_image(
         doc,
         images_dir / "02-agent-connection.png",
-        width=2.9,
+        width=3.5,
         title="Agent 연결 창",
         alt_text="같은 PC 테스트 결과, 익명 진단 저장과 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
         caption="그림 3. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
+    )
+    add_image(
+        doc,
+        images_dir / "02-agent-connection-failed.png",
+        width=3.5,
+        title="Agent 연결 실패와 지원 코드",
+        alt_text="TCP 18443 연결 거부 단계와 선택 가능한 SWD1 지원 코드를 함께 표시하는 Viewer Agent 연결 실패 창",
+        caption="그림 4. Viewer Agent 연결 실패와 짧은 SWD1 지원 코드",
     )
     add_bullets(
         doc,
@@ -987,6 +1006,16 @@ Viewer PC IPv4 예     : 10.20.30.25
         "진단을 저장한 다음 닫습니다.",
         "info",
     )
+    add_callout(
+        doc,
+        "세 가지 진단을 구분하세요",
+        "SWD1은 Agent Setup 또는 Viewer 연결 실패를 전화·메신저로 짧게 전달하는 코드입니다. "
+        "Agent Setup의 '진단정보 복사'는 실패 전용 긴 비식별 요약을 클립보드에 복사하고, "
+        "'익명 진단 저장'은 작업이나 연결 검사가 끝난 뒤 SSW_FIELD_DIAGNOSTIC/1 상세 TXT를 "
+        "사용자가 선택해 저장합니다. SWD1은 기존 진단을 대체하지 않으며 접속 권한을 부여하지 "
+        "않습니다.",
+        "warning",
+    )
     add_heading(
         doc,
         "장비와 계정 등록",
@@ -1000,7 +1029,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=5.5,
         title="장비 관리 창",
         alt_text="장비명, 모델, IPv4, 계정 ID, 로그인 비밀번호, enable 비밀번호와 감시 설정을 입력하는 창",
-        caption="그림 4. Viewer가 보관하는 장비 및 계정 입력 화면",
+        caption="그림 5. Viewer가 보관하는 장비 및 계정 입력 화면",
     )
     add_table(
         doc,
@@ -1035,7 +1064,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=4.35,
         title="장비 명령 실행 화면",
         alt_text="show port status를 입력하고 데모 스위치의 익명화된 결과를 확인하는 장비 명령 탭",
-        caption="그림 5. 한 줄 show 명령 실행과 메모리 내 결과 확인",
+        caption="그림 6. 한 줄 show 명령 실행과 메모리 내 결과 확인",
     )
     add_table(
         doc,
@@ -1135,7 +1164,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=5.2,
         title="Viewer 대시보드",
         alt_text="장비 목록, 선택 장비 상태, 최근 이벤트와 Viewer 감시 상태를 보여 주는 대시보드",
-        caption="그림 6. Viewer 중심 대시보드 전체 화면",
+        caption="그림 7. Viewer 중심 대시보드 전체 화면",
     )
     add_table(
         doc,
@@ -1170,7 +1199,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=3.25,
         title="항상 위 미니 창",
         alt_text="정상, 경고, 장애 수와 최근 문제를 보여 주는 작은 항상 위 창",
-        caption="그림 7. 반복 운영용 미니 창",
+        caption="그림 8. 반복 운영용 미니 창",
     )
     add_image(
         doc,
@@ -1178,7 +1207,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=3.45,
         title="장애 알림 팝업",
         alt_text="데모 업링크 포트 Down 장애와 발생 시각을 보여 주는 알림 팝업",
-        caption="그림 8. 새 장애 알림 팝업",
+        caption="그림 9. 새 장애 알림 팝업",
     )
     add_bullets(
         doc,
