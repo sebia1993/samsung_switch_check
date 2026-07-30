@@ -15,6 +15,9 @@ public sealed class AgentDeploymentOrchestrator(
     private const int EvidenceCleanupMaxAttempts = 3;
     private static readonly TimeSpan EvidenceCleanupRetryDelay =
         TimeSpan.FromMilliseconds(250);
+    private const int RollbackMoveMaxAttempts = 5;
+    private static readonly TimeSpan RollbackMoveRetryDelay =
+        TimeSpan.FromMilliseconds(250);
     private const int FirewallVerificationRetryCount = 10;
     private static readonly TimeSpan FirewallVerificationRetryDelay =
         TimeSpan.FromMilliseconds(200);
@@ -207,7 +210,9 @@ public sealed class AgentDeploymentOrchestrator(
             {
                 PrimaryFailureCode = inspection.PrimaryFailureCode,
                 PrimaryFailureMessage = inspection.PrimaryFailureMessage,
-                RollbackFailureCodes = rollbackFailureCodes
+                RollbackFailureCodes = rollbackFailureCodes,
+                AgentHealthCode = inspection.AgentHealthCode,
+                AgentRestartObserved = inspection.AgentRestartObserved
             };
         }
         catch
@@ -240,7 +245,9 @@ public sealed class AgentDeploymentOrchestrator(
             {
                 PrimaryFailureCode = inspection.PrimaryFailureCode,
                 PrimaryFailureMessage = inspection.PrimaryFailureMessage,
-                RollbackFailureCodes = inspection.RollbackFailureCodes
+                RollbackFailureCodes = inspection.RollbackFailureCodes,
+                AgentHealthCode = inspection.AgentHealthCode,
+                AgentRestartObserved = inspection.AgentRestartObserved
             };
         }
         finally
@@ -270,6 +277,7 @@ public sealed class AgentDeploymentOrchestrator(
         ServiceSnapshot? previousService = null;
         FirewallRuleSnapshot? previousHttpsFirewall = null;
         FirewallRuleSnapshot? previousHttpFirewall = null;
+        AgentHealthProbeResult? agentHealth = null;
         var journalStore = new DeploymentJournalStore(fileSystem, paths);
         DeploymentJournal? journal = null;
 
@@ -398,7 +406,10 @@ public sealed class AgentDeploymentOrchestrator(
                 MutationStarted = true
             };
             journalStore.Write(journal);
-            if (previousService.Exists && previousService.Running)
+            // Stop every existing service state, including START_PENDING and
+            // STOP_PENDING. Capture.Running is deliberately strict and those
+            // pending states can still own a live process/file handle.
+            if (previousService.Exists)
             {
                 serviceManager.Stop(SetupConstants.ServiceName, TimeSpan.FromSeconds(20));
             }
@@ -434,7 +445,10 @@ public sealed class AgentDeploymentOrchestrator(
                 SetupConstants.ServiceDisplayName,
                 serviceBinaryPath,
                 $@"NT SERVICE\{SetupConstants.ServiceName}");
-            serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
+            // A recovery restart during readiness can replace the service PID
+            // and race the rollback file moves. Recovery is restored/enabled
+            // only after this version has passed the bounded readiness gate.
+            serviceManager.DisableRecovery(SetupConstants.ServiceName);
             if (!dataDirectoryExistedBefore)
             {
                 dataDirectoryCreated = true;
@@ -491,24 +505,34 @@ public sealed class AgentDeploymentOrchestrator(
             serviceManager.Start(SetupConstants.ServiceName, TimeSpan.FromSeconds(30));
             journal = journal with { Stage = "service-started" };
             journalStore.Write(journal);
-            var startedService = serviceManager.Capture(SetupConstants.ServiceName);
-            var ready = await healthProbe.WaitUntilReadyAsync(
+            agentHealth = await healthProbe.WaitUntilReadyAsync(
                 new Uri("https://127.0.0.1:18443/health/ready"),
                 package.Version,
-                startedService.ProcessId,
+                () => serviceManager.Capture(SetupConstants.ServiceName),
                 TimeSpan.FromSeconds(60),
                 cancellationToken);
-            if (!ready)
+            steps.AddSafeDecisionCode(AgentHealthDecisionCode(agentHealth.Value.Code));
+            journal = journal with
+            {
+                AgentHealthCode = agentHealth.Value.Code.ToString(),
+                AgentRestartObserved = agentHealth.Value.RestartObserved
+            };
+            if (!agentHealth.Value.Ready)
             {
                 throw new SetupException(
                     SetupErrorCodes.HealthFailed,
-                    "Agent 서비스가 제한 시간 안에 준비 상태가 되지 않았습니다.");
+                    "Agent 서비스가 제한 시간 안에 준비 상태가 되지 않았습니다. " +
+                    $"진단 단계: {AgentHealthDisplayName(agentHealth.Value.Code)}");
             }
 
             steps.Add(Succeeded(
                 "AGENT_READY",
                 "Agent 확인",
-                "Agent 서비스가 정상적으로 실행되고 있습니다."));
+                agentHealth.Value.RestartObserved
+                    ? "Agent 서비스가 시작 중 다시 실행된 뒤 정상 준비 상태가 되었습니다."
+                    : "Agent 서비스가 정상적으로 실행되고 있습니다."));
+
+            serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
 
             // Health success is the transaction commit boundary. Backup cleanup
             // must never turn a working installation into a rollback attempt
@@ -573,7 +597,11 @@ public sealed class AgentDeploymentOrchestrator(
 
             return SetupOperationResult.Success(
                 "Agent 설치 또는 업데이트가 완료되었습니다.",
-                steps);
+                steps) with
+            {
+                AgentHealthCode = agentHealth.Value.Code.ToString(),
+                AgentRestartObserved = agentHealth.Value.RestartObserved
+            };
         }
         catch (OperationCanceledException)
         {
@@ -604,7 +632,8 @@ public sealed class AgentDeploymentOrchestrator(
                 primaryMessage,
                 rollback,
                 "설치 취소",
-                steps);
+                steps,
+                agentHealth);
         }
         catch (SetupException exception)
         {
@@ -633,7 +662,8 @@ public sealed class AgentDeploymentOrchestrator(
                 exception.Message,
                 rollback,
                 "설치 실패",
-                steps);
+                steps,
+                agentHealth);
         }
         catch (Exception)
         {
@@ -665,7 +695,8 @@ public sealed class AgentDeploymentOrchestrator(
                 primaryMessage,
                 rollback,
                 "설치 실패",
-                steps);
+                steps,
+                agentHealth);
         }
     }
 
@@ -780,7 +811,7 @@ public sealed class AgentDeploymentOrchestrator(
             try
             {
                 var current = serviceManager.Capture(SetupConstants.ServiceName);
-                if (current.Exists && current.Running)
+                if (current.Exists)
                 {
                     serviceManager.Stop(
                         SetupConstants.ServiceName,
@@ -831,7 +862,10 @@ public sealed class AgentDeploymentOrchestrator(
                         throw new InvalidOperationException();
                     }
 
-                    fileSystem.MoveDirectory(paths.InstallDirectory, failedDirectory);
+                    await MoveDirectoryForRollbackAsync(
+                        paths.InstallDirectory,
+                        failedDirectory,
+                        cleanupCancellationToken);
                     installExists = false;
                     failedExists = true;
                     fileSystem.EnsureDirectoryAccess(
@@ -852,9 +886,10 @@ public sealed class AgentDeploymentOrchestrator(
                             throw new InvalidOperationException();
                         }
 
-                        fileSystem.MoveDirectory(
+                        await MoveDirectoryForRollbackAsync(
                             backupDirectory,
-                            paths.InstallDirectory);
+                            paths.InstallDirectory,
+                            cleanupCancellationToken);
                         installExists = true;
                         backupExists = false;
                     }
@@ -1164,7 +1199,8 @@ public sealed class AgentDeploymentOrchestrator(
         string primaryMessage,
         RollbackOutcome rollback,
         string label,
-        SetupStepRecorder steps)
+        SetupStepRecorder steps,
+        AgentHealthProbeResult? agentHealth)
     {
         var finalCode = rollback.Succeeded
             ? primaryCode
@@ -1180,8 +1216,65 @@ public sealed class AgentDeploymentOrchestrator(
         {
             PrimaryFailureCode = primaryCode,
             PrimaryFailureMessage = primaryMessage,
-            RollbackFailureCodes = rollback.FailureCodes
+            RollbackFailureCodes = rollback.FailureCodes,
+            AgentHealthCode = agentHealth?.Code.ToString(),
+            AgentRestartObserved = agentHealth?.RestartObserved ?? false
         };
+    }
+
+    private async Task MoveDirectoryForRollbackAsync(
+        string source,
+        string destination,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= RollbackMoveMaxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceExists = fileSystem.DirectoryExists(source);
+            var destinationExists = fileSystem.DirectoryExists(destination);
+
+            // A prior move may have completed even if Windows reported an
+            // error while closing a handle. Accept only the exact completed
+            // topology; every ambiguous state fails closed.
+            if (!sourceExists && destinationExists)
+            {
+                return;
+            }
+            if (!sourceExists || destinationExists)
+            {
+                throw new InvalidOperationException(
+                    "Rollback directory topology is ambiguous.");
+            }
+
+            try
+            {
+                fileSystem.MoveDirectory(source, destination);
+            }
+            catch (Exception exception)
+                when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == RollbackMoveMaxAttempts)
+                {
+                    throw;
+                }
+
+                await Task.Delay(
+                    RollbackMoveRetryDelay,
+                    cancellationToken);
+                continue;
+            }
+
+            if (!fileSystem.DirectoryExists(source) &&
+                fileSystem.DirectoryExists(destination))
+            {
+                return;
+            }
+
+            throw new InvalidOperationException(
+                "Rollback directory move did not reach the expected state.");
+        }
+
+        throw new IOException("Rollback directory move attempts were exhausted.");
     }
 
     private static void AddRollbackFailure(
@@ -1220,7 +1313,12 @@ public sealed class AgentDeploymentOrchestrator(
             {
                 PrimaryFailureCode = primaryFailureCode,
                 PrimaryFailureMessage = primaryFailureMessage,
-                RollbackFailureCodes = failureCodes.ToArray()
+                RollbackFailureCodes = failureCodes.ToArray(),
+                AgentHealthCode =
+                    current.AgentHealthCode ?? journal.AgentHealthCode,
+                AgentRestartObserved =
+                    current.AgentRestartObserved ||
+                    journal.AgentRestartObserved
             });
         }
         catch
@@ -1902,6 +2000,8 @@ public sealed class AgentDeploymentOrchestrator(
             PrimaryFailureCode = pending.PrimaryFailureCode,
             PrimaryFailureMessage = pending.PrimaryFailureMessage,
             RollbackFailureCodes = pending.RollbackFailureCodes,
+            AgentHealthCode = pending.AgentHealthCode,
+            AgentRestartObserved = pending.AgentRestartObserved,
             ServiceState = GetServiceState(currentService),
             InstallDirectoryExists =
                 fileSystem.DirectoryExists(paths.InstallDirectory),
@@ -1948,6 +2048,8 @@ public sealed class AgentDeploymentOrchestrator(
             PrimaryFailureCode = pending?.PrimaryFailureCode,
             PrimaryFailureMessage = pending?.PrimaryFailureMessage,
             RollbackFailureCodes = pending?.RollbackFailureCodes ?? [],
+            AgentHealthCode = pending?.AgentHealthCode,
+            AgentRestartObserved = pending?.AgentRestartObserved ?? false,
             ServiceState = service is null
                 ? "unknown"
                 : GetServiceState(service),
@@ -1977,6 +2079,44 @@ public sealed class AgentDeploymentOrchestrator(
             : service.Running
                 ? "running"
                 : "stopped";
+
+    internal static string AgentHealthDecisionCode(AgentHealthProbeCode code) =>
+        $"AGENT_HEALTH_{code switch
+        {
+            AgentHealthProbeCode.Ready => "READY",
+            AgentHealthProbeCode.ServiceUnavailable => "SERVICE_UNAVAILABLE",
+            AgentHealthProbeCode.ServiceInspectionFailed => "SERVICE_INSPECTION_FAILED",
+            AgentHealthProbeCode.TcpNotListening => "TCP_NOT_LISTENING",
+            AgentHealthProbeCode.TcpOwnedByOtherProcess => "TCP_FOREIGN_OWNER",
+            AgentHealthProbeCode.TcpOwnershipQueryFailed => "TCP_QUERY_FAILED",
+            AgentHealthProbeCode.HttpsRequestFailed => "HTTPS_REQUEST_FAILED",
+            AgentHealthProbeCode.HttpStatusInvalid => "HTTP_STATUS_INVALID",
+            AgentHealthProbeCode.PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+            AgentHealthProbeCode.PayloadInvalid => "PAYLOAD_INVALID",
+            AgentHealthProbeCode.ApiVersionMismatch => "API_VERSION_MISMATCH",
+            AgentHealthProbeCode.ProtocolMismatch => "PROTOCOL_MISMATCH",
+            AgentHealthProbeCode.ProductVersionMismatch => "PRODUCT_VERSION_MISMATCH",
+            _ => "DEADLINE_EXCEEDED"
+        }}";
+
+    internal static string AgentHealthDisplayName(AgentHealthProbeCode code) =>
+        code switch
+        {
+            AgentHealthProbeCode.Ready => "준비 완료",
+            AgentHealthProbeCode.ServiceUnavailable => "서비스 실행 상태",
+            AgentHealthProbeCode.ServiceInspectionFailed => "서비스 상태 확인",
+            AgentHealthProbeCode.TcpNotListening => "로컬 TCP/18443 수신",
+            AgentHealthProbeCode.TcpOwnedByOtherProcess => "TCP/18443 소유 프로세스",
+            AgentHealthProbeCode.TcpOwnershipQueryFailed => "TCP 수신 상태 확인",
+            AgentHealthProbeCode.HttpsRequestFailed => "로컬 HTTPS 응답",
+            AgentHealthProbeCode.HttpStatusInvalid => "HTTP 상태 코드",
+            AgentHealthProbeCode.PayloadTooLarge => "준비 응답 크기",
+            AgentHealthProbeCode.PayloadInvalid => "준비 응답 형식",
+            AgentHealthProbeCode.ApiVersionMismatch => "Agent API 버전",
+            AgentHealthProbeCode.ProtocolMismatch => "Agent 통신 프로토콜",
+            AgentHealthProbeCode.ProductVersionMismatch => "Agent 제품 버전",
+            _ => "준비 확인 제한 시간"
+        };
 
     private static void ValidatePendingJournalState(DeploymentJournal pending)
     {

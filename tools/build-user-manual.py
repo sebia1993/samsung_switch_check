@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.10 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.11 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.10-poc"
+VERSION = "0.10.11-poc"
 DOCUMENT_DATE = "2026-07-30"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -859,6 +859,9 @@ Viewer PC IPv4 예     : 10.20.30.25
         "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램·방화벽 변경 중 "
         "현재 작업이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 다음 실행에서 완료되지 않은 "
         "journal이 남아 있으면 자동 복구하지 않고 별도의 '이전 상태 복구' 작업을 요구합니다. "
+        "새 서비스의 자동 재시작은 readiness 성공 뒤에만 적용하고, 검사 중에는 현재 서비스 "
+        "PID와 TCP/18443 소유를 매번 다시 확인합니다. rollback 전에는 관찰한 서비스 프로세스 "
+        "종료를 확인하고 프로그램 폴더의 일시적 잠금만 최대 5회 제한적으로 재시도합니다. "
         "staging·backup·failed·journal 정리가 잠시 실패하면 정확히 검증된 대상만 최대 3회 "
         "시도하고 실패한 시도 사이 250ms 대기한 뒤 삭제 결과를 확인합니다. "
         "복구까지 실패하면 최초 설치 실패 코드를 별도로 유지하고 SETUP_ROLLBACK_FAILED와 "
@@ -870,7 +873,8 @@ Viewer PC IPv4 예     : 10.20.30.25
         "실패할 때만 진단정보 복사",
         "설치 또는 복구가 실패한 경우에만 '진단정보 복사' 버튼이 나타납니다. 복사 내용에는 "
         "프로그램 버전, UTC 시각, 작업 종류, 최초 실패 코드, ROLLBACK_* 코드, journal 단계와 "
-        "파일·서비스 존재 여부만 포함됩니다. 실제 IP/CIDR, PC·사용자 이름, 절대 경로, 계정, "
+        "파일·서비스 존재 여부, 안전한 readiness 하위 원인만 포함됩니다. 실제 서비스 PID, "
+        "IP/CIDR, PC·사용자 이름, 절대 경로, 계정, "
         "비밀번호, 인증서, 방화벽 규칙 원문과 장비 명령·출력은 포함하지 않으며 별도 로그 파일로 "
         "저장하지 않습니다.",
         "info",
@@ -1285,7 +1289,7 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
             ("SETUP_FIREWALL_FAILED", "안전한 불일치 코드 기록 → rollback 완료 확인 → 방화벽 서비스·Domain/Private·그룹 정책"),
-            ("SETUP_HEALTH_FAILED", "서비스 실행 → 로컬 HTTPS/18443 → Agent 설정과 Windows 이벤트"),
+            ("SETUP_HEALTH_FAILED", "화면의 AgentHealthCode로 서비스·TCP/18443·HTTPS·응답·API/제품 버전 단계 확인 → 같은 설치 반복 대신 Windows 이벤트·EDR 확인"),
             ("SETUP_RECOVERY_REQUIRED", "설치/업데이트를 누르지 말고 '이전 상태 복구' 실행 → 복구 완료 확인 → 설치/업데이트를 별도로 시작"),
             ("SETUP_ROLLBACK_FAILED", "'진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계 확인 → 증거 폴더를 그대로 보존 → Windows 관리자에게 전달"),
             ("ROLLBACK_STATE_MISMATCH", "복구 기록과 현재 설치 상태가 다름. 복구·설치 재시도와 파일 수동 정리를 중지"),

@@ -218,6 +218,8 @@ public sealed record SetupOperationResult(
     public string? PrimaryFailureCode { get; init; }
     public string? PrimaryFailureMessage { get; init; }
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+    public string? AgentHealthCode { get; init; }
+    public bool AgentRestartObserved { get; init; }
     internal SetupOperationDiagnosticMetadata? DiagnosticMetadata { get; init; }
 
     public static SetupOperationResult Failure(
@@ -251,6 +253,8 @@ public sealed record PendingRecoveryInspection(
     public string? PrimaryFailureCode { get; init; }
     public string? PrimaryFailureMessage { get; init; }
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+    public string? AgentHealthCode { get; init; }
+    public bool AgentRestartObserved { get; init; }
     public IReadOnlyList<string> FailureCodes => RollbackFailureCodes;
     public string ServiceState { get; init; } = "unknown";
     public bool EvidenceStateKnown { get; init; } = true;
@@ -411,6 +415,7 @@ public interface IServiceManager
         string binaryPath,
         string accountName);
     void ConfigureRecovery(string serviceName);
+    void DisableRecovery(string serviceName);
     void Start(string serviceName, TimeSpan timeout);
     void Restore(string serviceName, ServiceSnapshot snapshot);
 }
@@ -429,12 +434,53 @@ public interface IFirewallManager
 
 public interface IAgentHealthProbe
 {
-    Task<bool> WaitUntilReadyAsync(
+    Task<AgentHealthProbeResult> WaitUntilReadyAsync(
         Uri endpoint,
         string? expectedProductVersion,
-        int expectedProcessId,
+        Func<ServiceSnapshot> currentServiceSnapshot,
         TimeSpan timeout,
         CancellationToken cancellationToken);
+}
+
+public enum AgentHealthProbeCode : byte
+{
+    Ready = 0,
+    ServiceUnavailable = 1,
+    ServiceInspectionFailed = 2,
+    TcpNotListening = 3,
+    TcpOwnedByOtherProcess = 4,
+    TcpOwnershipQueryFailed = 5,
+    HttpsRequestFailed = 6,
+    HttpStatusInvalid = 7,
+    PayloadTooLarge = 8,
+    PayloadInvalid = 9,
+    ApiVersionMismatch = 10,
+    ProtocolMismatch = 11,
+    ProductVersionMismatch = 12,
+    DeadlineExceeded = 13
+}
+
+public readonly record struct AgentHealthProbeResult(
+    bool Ready,
+    AgentHealthProbeCode Code,
+    bool RestartObserved)
+{
+    public static AgentHealthProbeResult Success(bool restartObserved) =>
+        new(true, AgentHealthProbeCode.Ready, restartObserved);
+
+    public static AgentHealthProbeResult Failure(
+        AgentHealthProbeCode code,
+        bool restartObserved)
+    {
+        if (code == AgentHealthProbeCode.Ready)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(code),
+                "A failed Agent health probe cannot use the Ready code.");
+        }
+
+        return new AgentHealthProbeResult(false, code, restartObserved);
+    }
 }
 
 public interface IAdministratorChecker

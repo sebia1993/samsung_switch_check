@@ -179,6 +179,24 @@ public enum Swd1CheckState : byte
     Unknown = 3
 }
 
+public enum Swd1AgentHealthCode : byte
+{
+    NotRecorded = 0,
+    ServiceUnavailable = 1,
+    ServiceInspectionFailed = 2,
+    TcpNotListening = 3,
+    TcpOwnedByOtherProcess = 4,
+    TcpOwnershipQueryFailed = 5,
+    HttpsRequestFailed = 6,
+    HttpStatusInvalid = 7,
+    PayloadTooLarge = 8,
+    PayloadInvalid = 9,
+    ApiVersionMismatch = 10,
+    ProtocolMismatch = 11,
+    ProductVersionMismatch = 12,
+    DeadlineExceeded = 13
+}
+
 [Flags]
 public enum Swd1AgentFirewallFlags : ushort
 {
@@ -202,7 +220,16 @@ public readonly record struct Swd1AgentTail(
     Swd1CheckState Readiness,
     Swd1CheckState PackageValidation,
     Swd1AgentFirewallFlags FirewallFlags,
-    byte Reserved = 0);
+    byte Reserved = 0)
+{
+    // The four bits were reserved in SWD1/1. Values 0-13 now carry a safe,
+    // non-sensitive readiness failure category while preserving every
+    // previously issued code (all earlier producers wrote zero).
+    public Swd1AgentHealthCode HealthCode =>
+        Enum.IsDefined(typeof(Swd1AgentHealthCode), Reserved)
+            ? (Swd1AgentHealthCode)Reserved
+            : Swd1AgentHealthCode.NotRecorded;
+}
 
 public enum Swd1ViewerMode : byte
 {

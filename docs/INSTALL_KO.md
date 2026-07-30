@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.10-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.11-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.10-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.10-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.11-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.11-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.10-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.11-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.10-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.11-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -144,6 +144,12 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
   결과를 확인한 뒤 설치 또는 업데이트를 별도로 실행합니다.
 - 복구가 실패하면 최초 설치·업데이트 실패 원인과 복구 단계별 원인을 구분해 표시합니다.
   하나의 `SETUP_ROLLBACK_FAILED`만 반복 표시되는 것으로 원인을 판단하지 마십시오.
+- `SETUP_HEALTH_FAILED`에는 서비스, TCP/18443, HTTPS, 응답 형식과 버전 중 마지막으로
+  확인하지 못한 안전한 `AgentHealthCode`가 함께 표시됩니다. 실제 PID, IP, 경로와 예외 원문은
+  포함하지 않습니다.
+- rollback 프로그램 폴더 이동은 일시적 파일 잠금에 한해 최대 5회 제한적으로 다시
+  시도합니다. 계속 잠겨 있거나 원본·대상 상태가 모호하면 이전 서비스를 다시 시작하지 않고
+  작업 기록을 보존합니다.
 - `ROLLBACK_EVIDENCE_CLEANUP_FAILED` 범주에 해당하는 정리 실패는 화면 상단의
   `SETUP_ROLLBACK_FAILED`와 staging·backup·failed·journal 대상별 전용 코드로 구분해
   표시합니다. 실제 경로나 파일명은 진단에 넣지 않습니다.
@@ -170,6 +176,12 @@ IP/CIDR, PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 �
 변경하지 마십시오. 제품이 보존한 복구 근거가 사라지면 안전한 복구 여부를 판단할 수 없습니다.
 안전하지 않거나 손상된 상태는 `진단정보 복사` 결과를 사내 Windows 관리자에게 전달하고,
 승인된 현장 절차로 확인해야 합니다.
+
+복구 완료 메시지가 나타났다면 같은 실패 화면에서 설치를 자동으로 다시 시작하지 않습니다.
+Setup을 닫지 않아도 되지만, 상태가 `복구 필요 없음`으로 바뀌고 설치 버튼이 다시 활성화됐는지
+확인한 뒤 `0.10.11-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. 같은 health
+분류가 반복되면 재설치를 계속 반복하지 말고 SWD1 코드 또는 `진단정보 복사` 결과를
+전달하십시오.
 
 ### 업데이트
 
