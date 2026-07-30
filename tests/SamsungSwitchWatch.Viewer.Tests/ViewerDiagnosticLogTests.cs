@@ -216,6 +216,43 @@ public sealed class ViewerDiagnosticLogTests
     }
 
     [Fact]
+    public void DiagnosticLog_AcceptsClientDisposeStageAndStableCodes()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var log = new ViewerDiagnosticLog(folder);
+            log.Write(
+                "client-dispose",
+                "VIEWER_CLIENT_DISPOSE_TIMEOUT");
+            log.Write(
+                "client-dispose",
+                "VIEWER_CLIENT_DISPOSE_FAILED");
+
+            var lines = File.ReadAllLines(log.CurrentPath);
+            Assert.Equal(2, lines.Length);
+            using var timeout = JsonDocument.Parse(lines[0]);
+            using var failure = JsonDocument.Parse(lines[1]);
+            Assert.Equal(
+                "client-dispose",
+                timeout.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "VIEWER_CLIENT_DISPOSE_TIMEOUT",
+                timeout.RootElement.GetProperty("errorCode").GetString());
+            Assert.Equal(
+                "client-dispose",
+                failure.RootElement.GetProperty("stage").GetString());
+            Assert.Equal(
+                "VIEWER_CLIENT_DISPOSE_FAILED",
+                failure.RootElement.GetProperty("errorCode").GetString());
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
     public void DiagnosticLog_PreservesDeviceStoreLifecycleStagesWithoutSensitiveContext()
     {
         var folder = TemporaryFolder();

@@ -122,10 +122,12 @@ function New-SswAgentSetupDiagnostic {
         [Parameter(Mandatory = $true)]
         [string]$ErrorCode,
         [Parameter(Mandatory = $true)]
-        [string]$FailedStage
+        [string]$FailedStage,
+        [ValidateSet('Legacy', 'Health', 'Current')]
+        [string]$SchemaVariant = 'Legacy'
     )
 
-    return @(
+    $lines = @(
         'SSW_FIELD_DIAGNOSTIC/1',
         'Component=AGENT_SETUP',
         'ProductVersion=0.10.8-poc',
@@ -135,7 +137,17 @@ function New-SswAgentSetupDiagnostic {
         'Operation=INSTALL',
         'Result=FAILURE',
         ('FailedStage=' + $FailedStage),
-        ('ErrorCode=' + $ErrorCode),
+        ('ErrorCode=' + $ErrorCode)
+    )
+    if ($SchemaVariant -ceq 'Current') {
+        $lines += @(
+            ('PrimaryFailureCode=' + $ErrorCode),
+            'FailureCategory=CLASSIFIED',
+            'FailureStageDurationMs=unknown'
+        )
+    }
+
+    $lines += @(
         'RecommendedActionCode=CHECK_FIREWALL_POLICY',
         'OperationDurationMs=1200',
         'PackageValidation=PASS',
@@ -143,13 +155,23 @@ function New-SswAgentSetupDiagnostic {
         'Service=NOT_INSTALLED',
         ('FirewallDecisionCodes=' + $ErrorCode),
         'LocalTcp18443=NOT_RUN',
-        'Readiness=NOT_RUN',
+        'Readiness=NOT_RUN'
+    )
+    if ($SchemaVariant -cin @('Health', 'Current')) {
+        $lines += @(
+            'AgentHealthCode=NOT_RUN',
+            'AgentRestartObserved=FALSE'
+        )
+    }
+
+    $lines += @(
         'StageCount=1',
         ('Stage.01.Code=' + $ErrorCode),
         'Stage.01.Status=FAILURE',
         'Stage.01.DurationMs=100',
         'Stage.01.ElapsedMs=1200'
-    ) -join "`r`n"
+    )
+    return $lines -join "`r`n"
 }
 
 function Invoke-SswReplay {
@@ -227,6 +249,48 @@ try {
         -Message 'Valid Agent Setup input must succeed.'
     Assert-SswEqual -Expected $agentScenario -Actual $agentResult.Output `
         -Message 'Agent Setup diagnostic selected the wrong existing fake scenario.'
+
+    $agentHealthFixture = Write-SswFixture `
+        -Name 'agent-health-valid.txt' `
+        -Bom $true `
+        -Content (
+            New-SswAgentSetupDiagnostic `
+                -ErrorCode 'SETUP_FIREWALL_FAILED' `
+                -FailedStage 'FIREWALL' `
+                -SchemaVariant 'Health'
+        )
+    $agentHealthResult = Invoke-SswReplay -FixturePath $agentHealthFixture
+    Assert-SswEqual -Expected 0 -Actual $agentHealthResult.ExitCode `
+        -Message 'Agent Setup v1 health-extension input must succeed.'
+    Assert-SswEqual -Expected $agentScenario -Actual $agentHealthResult.Output `
+        -Message 'Agent Setup health extension selected the wrong fake scenario.'
+
+    $agentCurrentDiagnostic = New-SswAgentSetupDiagnostic `
+        -ErrorCode 'SETUP_FIREWALL_FAILED' `
+        -FailedStage 'FIREWALL' `
+        -SchemaVariant 'Current'
+    $agentCurrentFixture = Write-SswFixture `
+        -Name 'agent-current-valid.txt' `
+        -Bom $true `
+        -Content $agentCurrentDiagnostic
+    $agentCurrentResult = Invoke-SswReplay -FixturePath $agentCurrentFixture
+    Assert-SswEqual -Expected 0 -Actual $agentCurrentResult.ExitCode `
+        -Message 'Current Agent Setup v1 input must succeed.'
+    Assert-SswEqual -Expected $agentScenario -Actual $agentCurrentResult.Output `
+        -Message 'Current Agent Setup diagnostic selected the wrong fake scenario.'
+
+    Assert-SswEqual `
+        -Expected 23 `
+        -Actual ([Regex]::Split(
+            (New-SswAgentSetupDiagnostic `
+                -ErrorCode 'SETUP_FIREWALL_FAILED' `
+                -FailedStage 'FIREWALL'),
+            '\r\n').Count) `
+        -Message 'Legacy Agent Setup v1 fixture schema changed unexpectedly.'
+    Assert-SswEqual `
+        -Expected 28 `
+        -Actual ([Regex]::Split($agentCurrentDiagnostic, '\r\n').Count) `
+        -Message 'Current Agent Setup v1 fixture schema changed unexpectedly.'
 
     $settingsScenario =
         'ViewerSettingsTests.SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow'
@@ -357,6 +421,10 @@ try {
     $validAgent = New-SswAgentSetupDiagnostic `
         -ErrorCode 'SETUP_FIREWALL_FAILED' `
         -FailedStage 'FIREWALL'
+    $validCurrentAgent = New-SswAgentSetupDiagnostic `
+        -ErrorCode 'SETUP_FIREWALL_FAILED' `
+        -FailedStage 'FIREWALL' `
+        -SchemaVariant 'Current'
     $schemaPayloads = @(
         ($validViewer -replace "`r`nFailedStage=TCP", ''),
         ($validViewer + "`r`nErrorCode=AGENT_TIMEOUT"),
@@ -364,7 +432,16 @@ try {
         ($validViewer -replace 'ProductVersion=0.10.8-poc', 'ProductVersion=viewer-host'),
         ($validViewer -replace 'AgentProductVersion=UNKNOWN', 'AgentProductVersion=monitor-pc'),
         ($validAgent -replace 'ProductVersion=0.10.8-poc', 'ProductVersion=agent-host'),
-        ($validAgent -replace "`r`nStage.01.ElapsedMs=1200", '')
+        ($validAgent -replace "`r`nStage.01.ElapsedMs=1200", ''),
+        ($validCurrentAgent -replace "`r`nPrimaryFailureCode=SETUP_FIREWALL_FAILED", ''),
+        ($validCurrentAgent -replace "`r`nAgentRestartObserved=FALSE", ''),
+        ($validCurrentAgent + "`r`nNote=SAFE_VALUE"),
+        ($validAgent -replace
+            "`r`nRecommendedActionCode=CHECK_FIREWALL_POLICY",
+            (
+                "`r`nPrimaryFailureCode=SETUP_FIREWALL_FAILED" +
+                "`r`nRecommendedActionCode=CHECK_FIREWALL_POLICY"
+            ))
     )
     $schemaIndex = 0
     foreach ($payload in $schemaPayloads) {

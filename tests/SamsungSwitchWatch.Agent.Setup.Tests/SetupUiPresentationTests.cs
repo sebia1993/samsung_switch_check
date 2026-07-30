@@ -431,6 +431,9 @@ public sealed class SetupUiPresentationTests
         Assert.Contains(
             $"PrimaryFailureCode={SetupErrorCodes.ServiceFailed}",
             text);
+        Assert.Contains("FailedStage=RECOVERY", text);
+        Assert.Contains("FailureCategory=CLASSIFIED", text);
+        Assert.Contains("FailureStageDurationMs=unknown", text);
         Assert.Contains(
             SetupErrorCodes.RollbackFileRestoreFailed,
             text);
@@ -568,6 +571,11 @@ public sealed class SetupUiPresentationTests
             $"ErrorCode={SetupErrorCodes.FirewallFailed}",
             text);
         Assert.Contains(
+            $"PrimaryFailureCode={SetupErrorCodes.FirewallFailed}",
+            text);
+        Assert.Contains("FailureCategory=CLASSIFIED", text);
+        Assert.Contains("FailureStageDurationMs=unknown", text);
+        Assert.Contains(
             "RecommendedActionCode=CHECK_FIREWALL_POLICY",
             text);
         Assert.Contains("OperationDurationMs=321", text);
@@ -594,6 +602,108 @@ public sealed class SetupUiPresentationTests
         Assert.DoesNotContain("secret-password", text);
         Assert.DoesNotContain("raw exception", text);
         Assert.DoesNotContain("device output", text);
+    }
+
+    [Fact]
+    public void UnexpectedFailureDiagnosticsPreserveOnlySafeStageCategoryAndDuration()
+    {
+        var steps = new SetupStepRecorder();
+        steps.MarkActiveStage(SetupFailureStage.ServiceStart);
+        steps.RecordUnexpectedFailure(
+            new UnauthorizedAccessException(
+                @"sensitive DOMAIN\operator C:\ProgramData"));
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.Unexpected,
+            "install",
+            SetupStepState.Failed,
+            "safe"));
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.Unexpected,
+            "safe",
+            steps);
+        var recovery = PendingRecoveryInspection.None;
+
+        var copied = SetupFailureDiagnosticFormatter.Format(
+            new SetupFailureDiagnosticContext(
+                "0.10.12-poc",
+                DateTimeOffset.UnixEpoch,
+                "install",
+                result,
+                recovery));
+        var field = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.12-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.Zero,
+                result,
+                recovery));
+
+        foreach (var text in new[] { copied, field })
+        {
+            Assert.Contains("FailedStage=SERVICE_START", text);
+            Assert.Contains("FailureCategory=ACCESS_DENIED", text);
+            Assert.Matches(@"FailureStageDurationMs=\d+", text);
+            Assert.DoesNotContain("sensitive", text);
+            Assert.DoesNotContain("DOMAIN", text);
+            Assert.DoesNotContain(@"C:\", text);
+            Assert.DoesNotContain("operator", text);
+        }
+    }
+
+    [Fact]
+    public void FieldDiagnostic_UsesFinalRollbackResultForFailedStage()
+    {
+        var steps = new SetupStepRecorder();
+        steps.MarkActiveStage(SetupFailureStage.ServiceStart);
+        steps.RecordUnexpectedFailure(
+            new UnauthorizedAccessException("safe"));
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.RollbackFailed,
+            "safe",
+            steps) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.HealthFailed,
+            RollbackFailureCodes =
+                [SetupErrorCodes.RollbackFileRestoreFailed]
+        };
+
+        var fieldText = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.12-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.Zero,
+                result,
+                PendingRecoveryInspection.None));
+        var failureText = SetupFailureDiagnosticFormatter.Format(
+            new SetupFailureDiagnosticContext(
+                "0.10.12-poc",
+                DateTimeOffset.UnixEpoch,
+                "install",
+                result,
+                PendingRecoveryInspection.None));
+
+        foreach (var text in new[] { fieldText, failureText })
+        {
+            Assert.Contains("FailedStage=RECOVERY", text);
+            Assert.Contains(
+                $"PrimaryFailureCode={SetupErrorCodes.HealthFailed}",
+                text);
+            Assert.Contains("FailureCategory=CLASSIFIED", text);
+            Assert.Contains("FailureStageDurationMs=unknown", text);
+        }
+
+        Assert.Contains(
+            $"ErrorCode={SetupErrorCodes.RollbackFailed}",
+            fieldText);
+        Assert.Contains(
+            $"ResultCode={SetupErrorCodes.RollbackFailed}",
+            failureText);
     }
 
     [Fact]
@@ -627,6 +737,9 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("Result=SUCCESS", text);
         Assert.Contains("FailedStage=NONE", text);
         Assert.Contains("ErrorCode=OK", text);
+        Assert.Contains("PrimaryFailureCode=NONE", text);
+        Assert.Contains("FailureCategory=NOT_RUN", text);
+        Assert.Contains("FailureStageDurationMs=unknown", text);
         Assert.Contains("RecommendedActionCode=NONE", text);
         Assert.Contains("PackageValidation=PASS", text);
         Assert.Contains("RecoveryJournal=NONE", text);

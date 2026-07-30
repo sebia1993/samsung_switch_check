@@ -293,7 +293,7 @@ internal sealed class FakeAdministratorChecker(bool isAdministrator = true)
 
 internal sealed class FakeMachineDeploymentLock : IMachineDeploymentLock
 {
-    public SetupException? AcquireException { get; set; }
+    public Exception? AcquireException { get; set; }
     public int AcquireCount { get; private set; }
     public int ReleaseCount { get; private set; }
 
@@ -332,6 +332,7 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public int StopFailureOccurrence { get; set; } = 1;
     public int RestoreFailuresRemaining { get; set; }
     public Exception? CaptureException { get; set; }
+    public Exception? StartException { get; set; }
     private int StopCallCount { get; set; }
 
     public void SetState(ServiceSnapshot state) =>
@@ -414,6 +415,11 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public void Start(string serviceName, TimeSpan timeout)
     {
         Operations.Add("start");
+        if (StartException is not null)
+        {
+            throw StartException;
+        }
+
         State = State with { Running = true };
         State = State with { ProcessId = 4321 };
     }
@@ -540,7 +546,9 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
 
 internal sealed class FakeHealthProbe(
     bool ready,
-    Action? beforeResult = null) : IAgentHealthProbe
+    Action? beforeResult = null,
+    AgentHealthProbeCode failureCode =
+        AgentHealthProbeCode.DeadlineExceeded) : IAgentHealthProbe
 {
     public Task<AgentHealthProbeResult> WaitUntilReadyAsync(
         Uri endpoint,
@@ -555,7 +563,7 @@ internal sealed class FakeHealthProbe(
             ready
                 ? AgentHealthProbeResult.Success(restartObserved: false)
                 : AgentHealthProbeResult.Failure(
-                    AgentHealthProbeCode.DeadlineExceeded,
+                    failureCode,
                     restartObserved: false));
     }
 }

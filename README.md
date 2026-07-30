@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.11-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.12-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.11-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.11-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.12-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -64,12 +64,15 @@ staging·backup·failed·journal 중 어느 안전 단계에서 실패했는지
 `.__staging_*`, `.__backup_*`, `.__failed_*` 폴더나 작업 기록을 수동으로 삭제·이동·이름
 변경하지 마십시오.
 
-`0.10.11-poc`는 설치 중 자동 서비스 재시작을 readiness 성공 뒤로 미루고, SCM 재확인으로
-재시작 작업이 제거됐는지 검증한 뒤 현재 서비스 PID로 TCP/18443과 HTTPS 준비 상태를 확인합니다.
-rollback 전에는 관찰한 서비스 프로세스 종료를
-확인하고 일시적 프로그램 폴더 잠금만 최대 5회 제한적으로 재시도합니다. 실패 진단은
-`AgentHealthCode`로 서비스·TCP·HTTPS·응답·버전 단계를 구분하지만 실제 PID나 경로는
-기록하지 않습니다.
+`0.10.12-poc`의 Setup 사전 점검은 구형 Agent의 최소 `/health/ready` 응답도 API v4 준비
+상태로 확인하되, 실제 설치·업데이트 완료 판정에서는 새 패키지의 HTTPS 프로토콜과 정확한
+제품 버전을 계속 엄격하게 확인합니다. 예상하지 못한 Setup 실패는 안전한 단계·범주와 제한된
+소요 시간으로만 진단하고 실제 PID, 경로와 예외 원문은 기록하지 않습니다.
+
+Viewer는 Agent 연결 교체·종료 중 진행 중인 요청을 안전하게 취소·정리하고, 자동 수집 전과
+다른 작업 때문에 수집이 미뤄진 장비를 정상으로 단정하지 않습니다. 연결이 끊기면 현재 상태와
+마지막으로 확인한 상태를 구분해 표시합니다. 릴리스 검증은 패키지 계약뿐 아니라 압축을 푼
+Viewer·Mock Agent·Agent Setup 실행 파일의 제한된 smoke 검사도 포함합니다.
 
 검사·설치·복구가 성공 또는 실패로 끝나면 `익명 진단 저장`으로
 `SSW_FIELD_DIAGNOSTIC/1` UTF-8 BOM TXT를 수동 저장할 수 있습니다. 파일은 제품·Windows
@@ -164,11 +167,15 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.11-poc
+.\scripts\build-release.ps1 -Version 0.10.12-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
 검증으로 표현하지 않습니다.
+
+자동 검증은 실제 삼성 스위치의 펌웨어별 명령·출력, 사내 EDR/백신 정책, 원격 PC 사이의
+방화벽·라우팅과 관리자 권한이 필요한 전체 Agent 설치 과정을 증명하지 않습니다. 이 항목들은
+공식 두 ZIP을 사용해 승인된 사내 시험 PC에서 단계적으로 확인해야 합니다.
 
 PowerShell/CMD 설치·제거·진단 스크립트는 개발과 레거시 복구를 위해 저장소에만 유지하며
 공개 ZIP에는 포함하지 않습니다. GitHub Release의 사용자 정의 Assets는 Agent ZIP과 Viewer
@@ -178,8 +185,9 @@ ZIP 정확히 두 개입니다.
 
 - [설치 및 운영 안내](docs/INSTALL_KO.md)
 - [구조 설명](docs/ARCHITECTURE.md)
+- [v0.10.12 프로젝트 진단 및 개선 계획](docs/PROJECT_DIAGNOSIS_0.10.12_KO.md)
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.10.11-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.11_POC_KO.md)
+- [0.10.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.12_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)

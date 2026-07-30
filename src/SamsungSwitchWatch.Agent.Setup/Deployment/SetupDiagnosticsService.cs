@@ -17,6 +17,7 @@ public sealed class SetupDiagnosticsService(
         AgentHealthProbeResult? agentHealth = null;
         try
         {
+            steps.MarkActiveStage(SetupFailureStage.Administrator);
             if (!administratorChecker.IsAdministrator())
             {
                 throw new SetupException(
@@ -26,6 +27,7 @@ public sealed class SetupDiagnosticsService(
 
             steps.Add(Success("ADMINISTRATOR_OK", "권한 확인", "관리자 권한으로 실행 중입니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.RecoveryJournal);
             var journalStore = new DeploymentJournalStore(fileSystem, paths);
             if (journalStore.Exists)
             {
@@ -40,18 +42,21 @@ public sealed class SetupDiagnosticsService(
                     steps);
             }
 
+            steps.MarkActiveStage(SetupFailureStage.Input);
             ValidateInput(request);
             steps.Add(Success(
                 "INPUT_VALID",
                 "입력 확인",
                 "Viewer IP와 관리망 선택·추가가 올바릅니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.PackageValidation);
             var package = packageValidator.Validate(paths.PackageDirectory);
             steps.Add(Success(
                 "PACKAGE_VALID",
                 "패키지 확인",
                 $"Agent {package.Version} 파일 무결성이 정상입니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.FileSystem);
             var service = serviceManager.Capture(SetupConstants.ServiceName);
             fileSystem.ValidateDeploymentPaths(paths, service, []);
             if (!fileSystem.CanCreateUnder(paths.InstallDirectory) ||
@@ -66,6 +71,7 @@ public sealed class SetupDiagnosticsService(
                 "PATHS_READY",
                 "경로 사전 확인",
                 "설치·데이터 경로 형식과 상위 폴더를 확인했습니다. 실제 쓰기 권한과 EDR 허용 여부는 설치 중 확인합니다."));
+            steps.MarkActiveStage(SetupFailureStage.Firewall);
             var firewallAssessment = firewallManager.AssertSecurityGate(
                 SetupConstants.HttpsPort,
                 paths.AgentExecutablePath);
@@ -108,6 +114,7 @@ public sealed class SetupDiagnosticsService(
 
             if (service.Running)
             {
+                steps.MarkActiveStage(SetupFailureStage.Readiness);
                 agentHealth = await healthProbe.WaitUntilReadyAsync(
                     new Uri("https://127.0.0.1:18443/health/ready"),
                     expectedProductVersion: null,
@@ -150,8 +157,9 @@ public sealed class SetupDiagnosticsService(
             steps.Add(Failure(exception.Code, "사전 점검", exception.Message));
             return SetupOperationResult.Failure(exception.Code, exception.Message, steps);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            steps.RecordUnexpectedFailure(exception);
             steps.Add(Failure(
                 SetupErrorCodes.Unexpected,
                 "사전 점검",

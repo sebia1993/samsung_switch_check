@@ -444,14 +444,14 @@ public sealed class ViewerMonitoringIntegrationTests
     }
 
     [Fact]
-    public async Task AgentSwitch_DuringCapabilityFallback_NeverUsesReplacementForOldRequest()
+    public async Task AgentSwitch_DuringCapabilityFallback_KeepsNewSessionAwaitingFreshResult()
     {
         var folder = TemporaryFolder();
         try
         {
             var devices = CreateVerifiedDevices(folder, 1);
             var oldClient = new AgentSwitchRaceClient();
-            var replacementClient = new RecordingClient();
+            var replacementClient = new BlockingMonitoringClient();
             var viewModel = new DashboardViewModel(
                 new ViewerSettings { DemoMode = true },
                 new ViewerSettingsStore(Path.Combine(folder, "settings.json")),
@@ -466,17 +466,34 @@ public sealed class ViewerMonitoringIntegrationTests
                 await viewModel.SwitchClientAsync(new ViewerSettings { DemoMode = true })
                     .WaitAsync(TimeSpan.FromSeconds(5));
 
+                Assert.Equal(
+                    "Initializing",
+                    Assert.Single(viewModel.Devices).CollectionState);
                 oldClient.ReleaseOutputEnumeration.TrySetResult();
-                await viewModel.RunMonitoringCycleAsync()
-                    .WaitAsync(TimeSpan.FromSeconds(5));
+                var replacementCycle = viewModel.RunMonitoringCycleAsync();
+                await replacementClient.FirstMonitorStarted.Task.WaitAsync(
+                    TimeSpan.FromSeconds(5));
 
-                var replacementRequests = replacementClient.ExecuteRequests.ToArray();
-                Assert.NotEmpty(replacementRequests);
-                Assert.All(replacementRequests, request => Assert.Equal(2, request.Commands.Count));
+                var awaiting = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Loading, awaiting.Health);
+                Assert.Equal("Initializing", awaiting.CollectionState);
+                Assert.Equal(1, replacementClient.ExecuteCount);
+                Assert.All(
+                    replacementClient.ExecuteRequests,
+                    request => Assert.Equal(2, request.Commands.Count));
+
+                replacementClient.ReleaseMonitor.TrySetResult();
+                await replacementCycle.WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+                Assert.Equal(
+                    DeviceHealth.Normal,
+                    Assert.Single(viewModel.Devices).Health);
             }
             finally
             {
                 oldClient.ReleaseOutputEnumeration.TrySetResult();
+                replacementClient.ReleaseMonitor.TrySetResult();
                 await viewModel.DisposeAsync();
             }
         }
@@ -522,6 +539,233 @@ public sealed class ViewerMonitoringIntegrationTests
             {
                 client.ReleaseMonitor.TrySetResult();
                 await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task AutomaticMonitoring_ShowsAwaitingUntilFirstCollectionCompletes()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var client = new BlockingMonitoringClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var awaiting = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Loading, awaiting.Health);
+                Assert.Equal("Initializing", awaiting.CollectionState);
+                Assert.Equal("첫 주기 감시 결과 대기", awaiting.Summary);
+                Assert.Equal(0, viewModel.NormalCount);
+                Assert.Equal(1, viewModel.LoadingCount);
+                Assert.Equal("장비 상태 확인 대기 1대", viewModel.MiniCurrentStatusText);
+
+                client.ReleaseMonitor.TrySetResult();
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+
+                var current = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Normal, current.Health);
+                Assert.Equal(1, viewModel.NormalCount);
+                Assert.Equal(0, viewModel.LoadingCount);
+                Assert.Contains(
+                    current.Metrics,
+                    metric =>
+                        metric.Label == "현재 수집"
+                        && metric.Value == "최신 결과 반영"
+                        && metric.Health == DeviceHealth.Normal);
+            }
+            finally
+            {
+                client.ReleaseMonitor.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task ManualQueryHoldingDeviceGate_DefersCollectionUntilFollowingCycle()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var client = new ManualHoldingClient();
+            var viewModel = CreateViewModel(folder, devices, client);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+
+                var before = Assert.Single(viewModel.Devices);
+                var lastSuccessfulCollection = before.LastCheckedAt;
+                var eventCount = viewModel.RecentEvents.Count;
+                var monitorCount = client.MonitorCount;
+
+                viewModel.SelectedDevice = before;
+                viewModel.ReadOnlyQueryCommand = "show version";
+                viewModel.ExecuteReadOnlyQueryCommand.Execute(null);
+                await client.ManualStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+                await viewModel.RunMonitoringCycleAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+
+                var deferred = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Loading, deferred.Health);
+                Assert.Equal("Deferred", deferred.CollectionState);
+                Assert.Equal("수집 보류 · 장비 작업 진행 중", deferred.Summary);
+                Assert.Equal(lastSuccessfulCollection, deferred.LastCheckedAt);
+                Assert.Equal(monitorCount, client.MonitorCount);
+                Assert.Equal(eventCount, viewModel.RecentEvents.Count);
+                Assert.Equal(0, viewModel.NormalCount);
+                Assert.Equal(1, viewModel.LoadingCount);
+
+                client.ReleaseManual.TrySetResult();
+                await WaitUntilAsync(() => !viewModel.IsReadOnlyQueryRunning);
+                await viewModel.RunMonitoringCycleAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+
+                var current = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Normal, current.Health);
+                Assert.True(current.LastCheckedAt > lastSuccessfulCollection);
+                Assert.Equal(monitorCount + 1, client.MonitorCount);
+                Assert.Equal(0, viewModel.LoadingCount);
+            }
+            finally
+            {
+                client.ReleaseManual.TrySetResult();
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task TransientBusy_DefersWithoutCreatingPersistentFailure()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var monitoringStore = new ViewerMonitoringStore(
+                Path.Combine(folder, "monitor.json"));
+            var client = new TransientBusyMonitoringClient();
+            var viewModel = CreateViewModel(
+                folder,
+                devices,
+                client,
+                monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await client.FirstMonitorCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+                var eventCount = viewModel.RecentEvents.Count;
+
+                await viewModel.RunMonitoringCycleAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+
+                var deferred = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Loading, deferred.Health);
+                Assert.Equal("Deferred", deferred.CollectionState);
+                Assert.Null(monitoringStore.GetActiveFailureCode(deferred.Id));
+                Assert.Equal(eventCount, viewModel.RecentEvents.Count);
+
+                await viewModel.RunMonitoringCycleAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).CollectionState == "Monitoring");
+
+                Assert.Equal(
+                    DeviceHealth.Normal,
+                    Assert.Single(viewModel.Devices).Health);
+                Assert.Null(
+                    monitoringStore.GetActiveFailureCode(
+                        Assert.Single(viewModel.Devices).Id));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task RestartWithPersistedCapabilities_AwaitsNewSessionCollection()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var monitoringPath = Path.Combine(folder, "monitor.json");
+            var firstClient = new RecordingClient();
+            var firstViewModel = CreateViewModel(
+                folder,
+                devices,
+                firstClient,
+                new ViewerMonitoringStore(monitoringPath));
+            await firstViewModel.InitializeAsync();
+            await WaitUntilAsync(() =>
+                Assert.Single(firstViewModel.Devices).CollectionState == "Monitoring");
+            await firstViewModel.DisposeAsync();
+
+            var restartedClient = new BlockingMonitoringClient();
+            var restartedViewModel = CreateViewModel(
+                folder,
+                devices,
+                restartedClient,
+                new ViewerMonitoringStore(monitoringPath));
+            try
+            {
+                await restartedViewModel.InitializeAsync();
+                await restartedClient.FirstMonitorStarted.Task.WaitAsync(
+                    TimeSpan.FromSeconds(5));
+
+                var awaiting = Assert.Single(restartedViewModel.Devices);
+                Assert.NotEmpty(awaiting.Capabilities);
+                Assert.All(
+                    awaiting.Capabilities,
+                    capability => Assert.Equal("Ready", capability.State));
+                Assert.Equal(DeviceHealth.Loading, awaiting.Health);
+                Assert.Equal("Initializing", awaiting.CollectionState);
+
+                restartedClient.ReleaseMonitor.TrySetResult();
+                await WaitUntilAsync(() =>
+                    Assert.Single(restartedViewModel.Devices).CollectionState
+                    == "Monitoring");
+                Assert.Equal(
+                    DeviceHealth.Normal,
+                    Assert.Single(restartedViewModel.Devices).Health);
+            }
+            finally
+            {
+                restartedClient.ReleaseMonitor.TrySetResult();
+                await restartedViewModel.DisposeAsync();
             }
         }
         finally
@@ -2083,6 +2327,7 @@ public sealed class ViewerMonitoringIntegrationTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseMonitor { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ConcurrentQueue<TelnetExecuteRequestDto> ExecuteRequests { get; } = new();
         public int ExecuteCount => Volatile.Read(ref _executeCount);
         public int MaxConcurrent => Volatile.Read(ref _maxConcurrent);
 
@@ -2107,6 +2352,7 @@ public sealed class ViewerMonitoringIntegrationTests
             TelnetExecuteRequestDto request,
             CancellationToken cancellationToken)
         {
+            ExecuteRequests.Enqueue(request);
             Interlocked.Increment(ref _executeCount);
             var active = Interlocked.Increment(ref _active);
             UpdateMaximum(ref _maxConcurrent, active);
@@ -2129,6 +2375,98 @@ public sealed class ViewerMonitoringIntegrationTests
             {
                 Interlocked.Decrement(ref _active);
             }
+        }
+    }
+
+    private sealed class ManualHoldingClient : StatelessClientBase
+    {
+        private readonly DateTimeOffset _collectionClock =
+            DateTimeOffset.UtcNow.AddMinutes(-10);
+        private int _monitorCount;
+
+        public TaskCompletionSource FirstMonitorCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ManualStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseManual { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int MonitorCount => Volatile.Read(ref _monitorCount);
+
+        public override async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            if (request.Purpose == "manual")
+            {
+                ManualStarted.TrySetResult();
+                await ReleaseManual.Task.WaitAsync(cancellationToken);
+                return Result(request.RequestId,
+                [
+                    new(
+                        request.Commands[0],
+                        "manual-output",
+                        false,
+                        DateTimeOffset.UtcNow)
+                ]);
+            }
+
+            var monitorCount = Interlocked.Increment(ref _monitorCount);
+            var completedUtc = _collectionClock.AddMinutes(monitorCount);
+            var outputs = request.Commands
+                .Select(command => new TelnetCommandOutputDto(
+                    command,
+                    command.Contains("log", StringComparison.OrdinalIgnoreCase)
+                    || command.Contains("sylog", StringComparison.OrdinalIgnoreCase)
+                        ? Syslog((1, "link state stable"))
+                        : PortStatus(("1", "Up")),
+                    false,
+                    completedUtc))
+                .ToArray();
+            var result = new TelnetExecutionResultDto(
+                4,
+                request.RequestId,
+                true,
+                "privileged",
+                "#",
+                completedUtc.AddMilliseconds(-1),
+                completedUtc,
+                1,
+                outputs);
+            if (monitorCount == 1)
+            {
+                FirstMonitorCompleted.TrySetResult();
+            }
+
+            return result;
+        }
+    }
+
+    private sealed class TransientBusyMonitoringClient : StatelessClientBase
+    {
+        private int _monitorCount;
+
+        public TaskCompletionSource FirstMonitorCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            var monitorCount = Interlocked.Increment(ref _monitorCount);
+            if (monitorCount == 2)
+            {
+                throw new AgentClientException(
+                    "DEVICE_BUSY",
+                    AgentConnectionState.Stale);
+            }
+
+            var result = Result(request.RequestId, NormalOutputs(request));
+            if (monitorCount == 1)
+            {
+                FirstMonitorCompleted.TrySetResult();
+            }
+
+            return Task.FromResult(result);
         }
     }
 

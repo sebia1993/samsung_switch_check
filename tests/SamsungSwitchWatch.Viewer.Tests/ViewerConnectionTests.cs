@@ -305,6 +305,142 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
+    public async Task DisposeAsync_CancelsInFlightQueryBeforeDisposingSharedResources()
+    {
+        using var certificate = CreateCertificate();
+        var settings = new ViewerSettings
+        {
+            DemoMode = false,
+            AgentUri = "https://agent.example.test:18443"
+        };
+        var validator = CreateValidatedCertificateValidator(settings, certificate);
+        var control = new RecordingHandler(
+            _ => JsonResponse(HttpStatusCode.OK, IdentityJson(certificate)));
+        var query = new CancellationBlockingHandler(holdAfterCancellation: true);
+        var client = new HttpAgentClient(settings, control, query, validator);
+        var states = new ConcurrentQueue<AgentConnectionState>();
+        client.ConnectionStateChanged += (_, state) => states.Enqueue(state);
+
+        await client.StartAsync(CancellationToken.None);
+        while (states.TryDequeue(out _))
+        {
+        }
+
+        var queryTask = client.TestTelnetAsync(Target(), CancellationToken.None);
+        await query.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var disposeTask = client.DisposeAsync().AsTask();
+        try
+        {
+            await query.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(disposeTask.IsCompleted);
+            Assert.Equal(0, control.DisposeCount);
+            Assert.Equal(0, query.DisposeCount);
+        }
+        finally
+        {
+            query.ReleaseAfterCancellation.TrySetResult(true);
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queryTask);
+        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, control.DisposeCount);
+        Assert.Equal(1, query.DisposeCount);
+        Assert.DoesNotContain(AgentConnectionState.Offline, states);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_ReturnsBeforeSynchronousCancellationCallbackCompletes()
+    {
+        using var certificate = CreateCertificate();
+        var settings = new ViewerSettings
+        {
+            DemoMode = false,
+            AgentUri = "https://agent.example.test:18443"
+        };
+        var validator = CreateValidatedCertificateValidator(settings, certificate);
+        var control = new RecordingHandler(
+            _ => JsonResponse(HttpStatusCode.OK, IdentityJson(certificate)));
+        var query = new BlockingCancellationCallbackHandler();
+        var client = new HttpAgentClient(settings, control, query, validator);
+
+        await client.StartAsync(CancellationToken.None);
+        var queryTask = client.TestTelnetAsync(Target(), CancellationToken.None);
+        await query.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task? disposeTask = null;
+        try
+        {
+            var disposeInvocation = Task.Run<Task>(
+                () => client.DisposeAsync().AsTask());
+            disposeTask = await disposeInvocation.WaitAsync(TimeSpan.FromSeconds(2));
+            await query.CancellationCallbackStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.False(disposeTask.IsCompleted);
+            Assert.Equal(0, control.DisposeCount);
+            Assert.Equal(0, query.DisposeCount);
+        }
+        finally
+        {
+            query.ReleaseCancellationCallback.TrySetResult(true);
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queryTask);
+        await disposeTask!.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1, control.DisposeCount);
+        Assert.Equal(1, query.DisposeCount);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CancelsActiveAndQueuedIdentityRequestsWithoutDisposingStartGateEarly()
+    {
+        using var certificate = CreateCertificate();
+        var settings = new ViewerSettings
+        {
+            DemoMode = false,
+            AgentUri = "https://agent.example.test:18443"
+        };
+        var validator = CreateValidatedCertificateValidator(settings, certificate);
+        var control = new CancellationBlockingHandler();
+        var query = new RecordingHandler(
+            _ => JsonResponse(HttpStatusCode.OK, TelnetResultJson("test-1", [])));
+        var client = new HttpAgentClient(settings, control, query, validator);
+
+        var activeStart = client.StartAsync(CancellationToken.None);
+        await control.RequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var queuedStart = client.StartAsync(CancellationToken.None);
+        Assert.False(queuedStart.IsCompleted);
+
+        var disposeTask = client.DisposeAsync().AsTask();
+
+        await control.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => activeStart);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queuedStart);
+        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, control.RequestCount);
+        Assert.Equal(1, control.DisposeCount);
+        Assert.Equal(1, query.DisposeCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentDisposeAsync_DisposesHandlersOnceAndRejectsNewRequests()
+    {
+        using var certificate = CreateCertificate();
+        var fixture = CreateClientFixture(certificate);
+
+        var disposeTasks = Enumerable.Range(0, 8)
+            .Select(_ => fixture.Client.DisposeAsync().AsTask())
+            .ToArray();
+        await Task.WhenAll(disposeTasks);
+
+        Assert.Equal(1, fixture.ControlHandler.DisposeCount);
+        Assert.Equal(1, fixture.QueryHandler.DisposeCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => fixture.Client.StartAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task QueryTransportFailure_NextRequestRevalidatesIdentityOnce()
     {
         using var certificate = CreateCertificate();
@@ -770,6 +906,19 @@ public sealed class ViewerConnectionTests
             query);
     }
 
+    private static CertificatePinValidator CreateValidatedCertificateValidator(
+        ViewerSettings settings,
+        X509Certificate2 certificate)
+    {
+        var validator = new CertificatePinValidator(settings);
+        Assert.True(validator.Validate(
+            new HttpRequestMessage(HttpMethod.Get, settings.AgentUri),
+            certificate,
+            null,
+            SslPolicyErrors.None));
+        return validator;
+    }
+
     private static HttpResponseMessage JsonResponse(HttpStatusCode statusCode, string json) => new(statusCode)
     {
         Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -841,8 +990,10 @@ public sealed class ViewerConnectionTests
         private readonly ConcurrentQueue<(HttpMethod Method, string PathAndQuery)> _requests = [];
         private readonly ConcurrentQueue<string> _userAgents = [];
         private int _requestCount;
+        private int _disposeCount;
 
         public int RequestCount => Volatile.Read(ref _requestCount);
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
         public IReadOnlyList<(HttpMethod Method, string PathAndQuery)> Requests =>
             _requests.ToArray();
         public IReadOnlyList<string> UserAgents => _userAgents.ToArray();
@@ -855,6 +1006,106 @@ public sealed class ViewerConnectionTests
             _requests.Enqueue((request.Method, request.RequestUri?.PathAndQuery ?? string.Empty));
             _userAgents.Enqueue(request.Headers.UserAgent.ToString());
             return Task.FromResult(responseFactory(request));
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Interlocked.Increment(ref _disposeCount);
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class CancellationBlockingHandler(
+        bool holdAfterCancellation = false) : HttpMessageHandler
+    {
+        private int _requestCount;
+        private int _disposeCount;
+
+        public TaskCompletionSource<bool> RequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> CancellationObserved { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseAfterCancellation { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int RequestCount => Volatile.Read(ref _requestCount);
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requestCount);
+            RequestStarted.TrySetResult(true);
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new InvalidOperationException("The synthetic request must be cancelled.");
+            }
+            catch (OperationCanceledException)
+            {
+                CancellationObserved.TrySetResult(true);
+                if (holdAfterCancellation)
+                {
+                    await ReleaseAfterCancellation.Task.ConfigureAwait(false);
+                }
+
+                throw;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Interlocked.Increment(ref _disposeCount);
+            }
+
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class BlockingCancellationCallbackHandler : HttpMessageHandler
+    {
+        private int _disposeCount;
+
+        public TaskCompletionSource<bool> RequestStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> CancellationCallbackStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseCancellationCallback { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int DisposeCount => Volatile.Read(ref _disposeCount);
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<HttpResponseMessage>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(
+                () =>
+                {
+                    CancellationCallbackStarted.TrySetResult(true);
+                    ReleaseCancellationCallback.Task.GetAwaiter().GetResult();
+                    completion.TrySetCanceled(cancellationToken);
+                });
+
+            RequestStarted.TrySetResult(true);
+            return await completion.Task.ConfigureAwait(false);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Interlocked.Increment(ref _disposeCount);
+            }
+
+            base.Dispose(disposing);
         }
     }
 }

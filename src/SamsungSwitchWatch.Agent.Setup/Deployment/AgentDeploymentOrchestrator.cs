@@ -31,6 +31,7 @@ public sealed class AgentDeploymentOrchestrator(
         IDisposable? machineLease = null;
         try
         {
+            steps.MarkActiveStage(SetupFailureStage.OperationLock);
             await ProcessDeploymentGate.WaitAsync(cancellationToken);
             processGateEntered = true;
             machineLease = machineDeploymentLock.Acquire();
@@ -56,6 +57,18 @@ public sealed class AgentDeploymentOrchestrator(
             return SetupOperationResult.Failure(
                 exception.Code,
                 exception.Message,
+                steps);
+        }
+        catch (Exception exception)
+        {
+            steps.RecordUnexpectedFailure(exception);
+            steps.Add(Failed(
+                SetupErrorCodes.Unexpected,
+                "설치",
+                "예상하지 못한 Windows 오류로 설치를 완료하지 못했습니다."));
+            return SetupOperationResult.Failure(
+                SetupErrorCodes.Unexpected,
+                "예상하지 못한 Windows 오류로 설치를 완료하지 못했습니다.",
                 steps);
         }
         finally
@@ -120,9 +133,11 @@ public sealed class AgentDeploymentOrchestrator(
         IDisposable? machineLease = null;
         try
         {
+            steps.MarkActiveStage(SetupFailureStage.OperationLock);
             await ProcessDeploymentGate.WaitAsync(cancellationToken);
             processGateEntered = true;
             machineLease = machineDeploymentLock.Acquire();
+            steps.MarkActiveStage(SetupFailureStage.Administrator);
             if (!administratorChecker.IsAdministrator())
             {
                 throw new SetupException(
@@ -130,6 +145,7 @@ public sealed class AgentDeploymentOrchestrator(
                     "Agent 복구에는 관리자 권한이 필요합니다.");
             }
 
+            steps.MarkActiveStage(SetupFailureStage.RecoveryJournal);
             var journalStore = new DeploymentJournalStore(fileSystem, paths);
             if (!journalStore.Exists)
             {
@@ -142,6 +158,7 @@ public sealed class AgentDeploymentOrchestrator(
                     steps);
             }
 
+            steps.MarkActiveStage(SetupFailureStage.Recovery);
             await RecoverPendingTransactionAsync(
                 journalStore,
                 steps,
@@ -215,8 +232,9 @@ public sealed class AgentDeploymentOrchestrator(
                 AgentRestartObserved = inspection.AgentRestartObserved
             };
         }
-        catch
+        catch (Exception exception)
         {
+            steps.RecordUnexpectedFailure(exception);
             steps.Add(Failed(
                 SetupErrorCodes.Unexpected,
                 "이전 상태 복구",
@@ -283,6 +301,7 @@ public sealed class AgentDeploymentOrchestrator(
 
         try
         {
+            steps.MarkActiveStage(SetupFailureStage.Administrator);
             if (!administratorChecker.IsAdministrator())
             {
                 throw new SetupException(
@@ -290,6 +309,7 @@ public sealed class AgentDeploymentOrchestrator(
                     "Agent 서비스 설치에는 관리자 권한이 필요합니다.");
             }
 
+            steps.MarkActiveStage(SetupFailureStage.RecoveryJournal);
             if (journalStore.Exists)
             {
                 throw new SetupException(
@@ -297,7 +317,9 @@ public sealed class AgentDeploymentOrchestrator(
                     "이전 설치 작업이 완료되지 않았습니다. 먼저 이전 상태 복구를 실행하세요.");
             }
 
+            steps.MarkActiveStage(SetupFailureStage.Input);
             SetupDiagnosticsService.ValidateInput(request);
+            steps.MarkActiveStage(SetupFailureStage.PackageValidation);
             var package = packageValidator.Validate(paths.PackageDirectory);
             steps.Add(Succeeded(
                 "PACKAGE_VALID",
@@ -309,6 +331,7 @@ public sealed class AgentDeploymentOrchestrator(
             backupDirectory = $"{paths.InstallDirectory}.__backup_{transactionId}";
             failedDirectory = $"{paths.InstallDirectory}.__failed_{transactionId}";
 
+            steps.MarkActiveStage(SetupFailureStage.FileSystem);
             previousService = serviceManager.Capture(SetupConstants.ServiceName);
             ValidateExistingServiceContract(previousService);
             dataDirectoryExistedBefore =
@@ -325,6 +348,7 @@ public sealed class AgentDeploymentOrchestrator(
                     "Program Files 또는 ProgramData 설치 경로를 사용할 수 없습니다.");
             }
 
+            steps.MarkActiveStage(SetupFailureStage.Firewall);
             previousHttpsFirewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
             previousHttpFirewall = firewallManager.Capture(SetupConstants.LegacyFirewallRuleName);
             var firewallAssessment = firewallManager.AssertSecurityGate(
@@ -352,6 +376,7 @@ public sealed class AgentDeploymentOrchestrator(
                 previousHttpFirewall);
             currentTransactionOwned = true;
 
+            steps.MarkActiveStage(SetupFailureStage.Configuration);
             var existingConfiguration = fileSystem.FileExists(paths.ProductionConfigurationPath)
                 ? fileSystem.ReadAllText(paths.ProductionConfigurationPath)
                 : null;
@@ -361,6 +386,7 @@ public sealed class AgentDeploymentOrchestrator(
                 request.ViewerIpv4,
                 existingConfiguration);
 
+            steps.MarkActiveStage(SetupFailureStage.FileStaging);
             fileSystem.CreateDirectory(Path.GetDirectoryName(paths.InstallDirectory)!);
             fileSystem.CreateDirectory(stagingDirectory);
             fileSystem.EnsureDirectoryAccess(
@@ -400,6 +426,7 @@ public sealed class AgentDeploymentOrchestrator(
 
             cancellationToken.ThrowIfCancellationRequested();
             mutationStarted = true;
+            steps.MarkActiveStage(SetupFailureStage.ServiceStop);
             journal = journal with
             {
                 Stage = "service-stop-pending",
@@ -414,6 +441,7 @@ public sealed class AgentDeploymentOrchestrator(
                 serviceManager.Stop(SetupConstants.ServiceName, TimeSpan.FromSeconds(20));
             }
 
+            steps.MarkActiveStage(SetupFailureStage.FileActivation);
             if (fileSystem.DirectoryExists(paths.InstallDirectory))
             {
                 installMovedToBackup = true;
@@ -439,6 +467,7 @@ public sealed class AgentDeploymentOrchestrator(
             journalStore.Write(journal);
             fileSystem.MoveDirectory(stagingDirectory, paths.InstallDirectory);
 
+            steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
             var serviceBinaryPath = $"\"{paths.AgentExecutablePath}\" --service";
             serviceManager.InstallOrUpdate(
                 SetupConstants.ServiceName,
@@ -474,6 +503,7 @@ public sealed class AgentDeploymentOrchestrator(
                 "서비스 구성",
                 "창 없는 Agent 자동 시작 서비스를 구성했습니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.Firewall);
             firewallManager.RemoveOwnedRule(SetupConstants.LegacyFirewallRuleName);
             firewallManager.ApplyViewerRule(
                 SetupConstants.FirewallRuleName,
@@ -502,9 +532,11 @@ public sealed class AgentDeploymentOrchestrator(
                 "방화벽 구성",
                 $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.ServiceStart);
             serviceManager.Start(SetupConstants.ServiceName, TimeSpan.FromSeconds(30));
             journal = journal with { Stage = "service-started" };
             journalStore.Write(journal);
+            steps.MarkActiveStage(SetupFailureStage.Readiness);
             agentHealth = await healthProbe.WaitUntilReadyAsync(
                 new Uri("https://127.0.0.1:18443/health/ready"),
                 package.Version,
@@ -532,11 +564,13 @@ public sealed class AgentDeploymentOrchestrator(
                     ? "Agent 서비스가 시작 중 다시 실행된 뒤 정상 준비 상태가 되었습니다."
                     : "Agent 서비스가 정상적으로 실행되고 있습니다."));
 
+            steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
             serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
 
             // Health success is the transaction commit boundary. Backup cleanup
             // must never turn a working installation into a rollback attempt
             // because recursive deletion may already be partially complete.
+            steps.MarkActiveStage(SetupFailureStage.CommitCleanup);
             journal = journal with { Stage = "committed" };
             journalStore.Write(journal);
             var committedDirectoriesClean = true;
@@ -665,8 +699,9 @@ public sealed class AgentDeploymentOrchestrator(
                 steps,
                 agentHealth);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            steps.RecordUnexpectedFailure(exception);
             const string primaryCode = SetupErrorCodes.Unexpected;
             const string primaryMessage =
                 "예상하지 못한 오류로 설치를 완료하지 못했습니다.";

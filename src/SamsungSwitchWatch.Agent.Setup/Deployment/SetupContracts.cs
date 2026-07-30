@@ -1,6 +1,8 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Security;
 
 namespace SamsungSwitchWatch.Agent.Setup.Deployment;
 
@@ -135,10 +137,50 @@ internal sealed record SetupStageDiagnostic(
     long DurationMilliseconds,
     long ElapsedMilliseconds);
 
+internal enum SetupFailureStage
+{
+    Unknown,
+    OperationLock,
+    Administrator,
+    RecoveryJournal,
+    Input,
+    PackageValidation,
+    FileSystem,
+    Configuration,
+    FileStaging,
+    ServiceStop,
+    FileActivation,
+    ServiceConfiguration,
+    Firewall,
+    ServiceStart,
+    Readiness,
+    CommitCleanup,
+    Recovery,
+    UiOperation
+}
+
+internal enum SetupFailureCategory
+{
+    Unknown,
+    AccessDenied,
+    Io,
+    Timeout,
+    WindowsApi,
+    InvalidState,
+    Platform
+}
+
+internal sealed record SetupFailureDiagnostic(
+    SetupFailureStage Stage,
+    SetupFailureCategory Category,
+    long DurationMilliseconds,
+    long ElapsedMilliseconds);
+
 internal sealed record SetupOperationDiagnosticMetadata(
     long DurationMilliseconds,
     IReadOnlyList<SetupStageDiagnostic> Stages,
-    IReadOnlyList<string> SafeDecisionCodes);
+    IReadOnlyList<string> SafeDecisionCodes,
+    SetupFailureDiagnostic? Failure);
 
 internal sealed class SetupStepRecorder : IReadOnlyList<SetupStepResult>
 {
@@ -147,10 +189,14 @@ internal sealed class SetupStepRecorder : IReadOnlyList<SetupStepResult>
     private readonly List<string> _safeDecisionCodes = [];
     private readonly long _startedTimestamp = Stopwatch.GetTimestamp();
     private long _previousTimestamp;
+    private SetupFailureStage _activeStage = SetupFailureStage.Unknown;
+    private long _activeStageStartedTimestamp;
+    private SetupFailureDiagnostic? _failure;
 
     public SetupStepRecorder()
     {
         _previousTimestamp = _startedTimestamp;
+        _activeStageStartedTimestamp = _startedTimestamp;
     }
 
     public int Count => _steps.Count;
@@ -187,13 +233,41 @@ internal sealed class SetupStepRecorder : IReadOnlyList<SetupStepResult>
         }
     }
 
+    public void MarkActiveStage(SetupFailureStage stage)
+    {
+        if (stage == SetupFailureStage.Unknown)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stage));
+        }
+
+        _activeStage = stage;
+        _activeStageStartedTimestamp = Stopwatch.GetTimestamp();
+    }
+
+    public void RecordUnexpectedFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (_failure is not null)
+        {
+            return;
+        }
+
+        var timestamp = Stopwatch.GetTimestamp();
+        _failure = new SetupFailureDiagnostic(
+            _activeStage,
+            ClassifyFailure(exception),
+            ElapsedMilliseconds(_activeStageStartedTimestamp, timestamp),
+            ElapsedMilliseconds(_startedTimestamp, timestamp));
+    }
+
     public SetupOperationDiagnosticMetadata Snapshot()
     {
         var timestamp = Stopwatch.GetTimestamp();
         return new SetupOperationDiagnosticMetadata(
             ElapsedMilliseconds(_startedTimestamp, timestamp),
             _diagnostics.ToArray(),
-            _safeDecisionCodes.ToArray());
+            _safeDecisionCodes.ToArray(),
+            _failure);
     }
 
     public IEnumerator<SetupStepResult> GetEnumerator() => _steps.GetEnumerator();
@@ -207,6 +281,19 @@ internal sealed class SetupStepRecorder : IReadOnlyList<SetupStepResult>
             (long)Math.Round(
                 Stopwatch.GetElapsedTime(start, end).TotalMilliseconds,
                 MidpointRounding.AwayFromZero));
+
+    private static SetupFailureCategory ClassifyFailure(Exception exception) =>
+        exception switch
+        {
+            UnauthorizedAccessException or SecurityException =>
+                SetupFailureCategory.AccessDenied,
+            IOException => SetupFailureCategory.Io,
+            TimeoutException => SetupFailureCategory.Timeout,
+            Win32Exception => SetupFailureCategory.WindowsApi,
+            InvalidOperationException => SetupFailureCategory.InvalidState,
+            PlatformNotSupportedException => SetupFailureCategory.Platform,
+            _ => SetupFailureCategory.Unknown
+        };
 }
 
 public sealed record SetupOperationResult(

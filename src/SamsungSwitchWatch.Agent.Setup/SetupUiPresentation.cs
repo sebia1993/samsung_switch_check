@@ -251,6 +251,115 @@ internal sealed record SetupFailureDiagnosticContext(
     SetupOperationResult Result,
     PendingRecoveryInspection Recovery);
 
+internal readonly record struct SetupFailureDiagnosticProjection(
+    string Stage,
+    string Category,
+    long DurationMilliseconds)
+{
+    public static SetupFailureDiagnosticProjection Create(
+        SetupOperationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        var resultStage = StageForResultCode(result.Code);
+        if (resultStage == "RECOVERY")
+        {
+            return new SetupFailureDiagnosticProjection(
+                resultStage,
+                result.Code == SetupErrorCodes.Unexpected
+                    ? "UNKNOWN"
+                    : "CLASSIFIED",
+                -1);
+        }
+
+        if (result.DiagnosticMetadata?.Failure is { } failure)
+        {
+            return new SetupFailureDiagnosticProjection(
+                StageToken(failure.Stage),
+                CategoryToken(failure.Category),
+                failure.DurationMilliseconds);
+        }
+
+        return new SetupFailureDiagnosticProjection(
+            resultStage,
+            result.Code == SetupErrorCodes.Unexpected
+                ? "UNKNOWN"
+                : "CLASSIFIED",
+            -1);
+    }
+
+    private static string StageToken(SetupFailureStage stage) =>
+        stage switch
+        {
+            SetupFailureStage.OperationLock => "OPERATION_LOCK",
+            SetupFailureStage.Administrator => "ADMINISTRATOR",
+            SetupFailureStage.RecoveryJournal => "RECOVERY_JOURNAL",
+            SetupFailureStage.Input => "INPUT",
+            SetupFailureStage.PackageValidation => "PACKAGE_VALIDATION",
+            SetupFailureStage.FileSystem => "FILESYSTEM",
+            SetupFailureStage.Configuration => "CONFIGURATION",
+            SetupFailureStage.FileStaging => "FILE_STAGING",
+            SetupFailureStage.ServiceStop => "SERVICE_STOP",
+            SetupFailureStage.FileActivation => "FILE_ACTIVATION",
+            SetupFailureStage.ServiceConfiguration => "SERVICE_CONFIGURATION",
+            SetupFailureStage.Firewall => "FIREWALL",
+            SetupFailureStage.ServiceStart => "SERVICE_START",
+            SetupFailureStage.Readiness => "READINESS",
+            SetupFailureStage.CommitCleanup => "COMMIT_CLEANUP",
+            SetupFailureStage.Recovery => "RECOVERY",
+            SetupFailureStage.UiOperation => "UI_OPERATION",
+            _ => "UNKNOWN"
+        };
+
+    private static string CategoryToken(SetupFailureCategory category) =>
+        category switch
+        {
+            SetupFailureCategory.AccessDenied => "ACCESS_DENIED",
+            SetupFailureCategory.Io => "IO",
+            SetupFailureCategory.Timeout => "TIMEOUT",
+            SetupFailureCategory.WindowsApi => "WINDOWS_API",
+            SetupFailureCategory.InvalidState => "INVALID_STATE",
+            SetupFailureCategory.Platform => "PLATFORM",
+            _ => "UNKNOWN"
+        };
+
+    private static string StageForResultCode(string code) =>
+        code switch
+        {
+            SetupErrorCodes.PackageNotFound or
+            SetupErrorCodes.ManifestInvalid or
+            SetupErrorCodes.PackageHashMismatch => "PACKAGE_VALIDATION",
+            SetupErrorCodes.ViewerIpInvalid or
+            SetupErrorCodes.NetworkSelectionInvalid or
+            SetupErrorCodes.ExistingNetworksNotLoaded => "INPUT",
+            SetupErrorCodes.AdministratorRequired => "ADMINISTRATOR",
+            SetupErrorCodes.PathInvalid or
+            SetupErrorCodes.PathUntrusted or
+            SetupErrorCodes.PathNotWritable => "FILESYSTEM",
+            SetupErrorCodes.ConfigurationInvalid => "CONFIGURATION",
+            SetupErrorCodes.ServiceFailed => "SERVICE",
+            SetupErrorCodes.FirewallFailed => "FIREWALL",
+            SetupErrorCodes.HealthFailed => "READINESS",
+            SetupErrorCodes.RecoveryRequired or
+            SetupErrorCodes.RollbackStateMismatch or
+            SetupErrorCodes.RollbackJournalWriteFailed => "RECOVERY_JOURNAL",
+            SetupErrorCodes.RollbackFailed or
+            SetupErrorCodes.RollbackServiceStopFailed or
+            SetupErrorCodes.RollbackFileRestoreFailed or
+            SetupErrorCodes.RollbackDataCleanupFailed or
+            SetupErrorCodes.RollbackServiceRestoreFailed or
+            SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
+            SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
+            SetupErrorCodes.RollbackEvidenceCleanupFailed or
+            SetupErrorCodes.RollbackStagingCleanupFailed or
+            SetupErrorCodes.RollbackBackupCleanupFailed or
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
+            SetupErrorCodes.RollbackJournalCleanupFailed => "RECOVERY",
+            SetupErrorCodes.AlreadyRunning => "OPERATION_LOCK",
+            SetupErrorCodes.Cancelled => "CANCELLED",
+            _ => "UNKNOWN"
+        };
+}
+
 internal static class SetupFailureDiagnosticFormatter
 {
     public static string Format(SetupFailureDiagnosticContext context)
@@ -269,6 +378,7 @@ internal static class SetupFailureDiagnosticFormatter
             .Where(value => value != "none")
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+        var failure = SetupFailureDiagnosticProjection.Create(context.Result);
 
         var lines = new[]
         {
@@ -280,6 +390,10 @@ internal static class SetupFailureDiagnosticFormatter
             $"PrimaryFailureCode={SafeToken(
                 context.Result.PrimaryFailureCode ??
                 context.Recovery.PrimaryFailureCode)}",
+            $"FailedStage={failure.Stage}",
+            $"FailureCategory={failure.Category}",
+            $"FailureStageDurationMs={
+                MillisecondsToken(failure.DurationMilliseconds)}",
             $"AgentHealthCode={SafeToken(
                 context.Result.AgentHealthCode ??
                 context.Recovery.AgentHealthCode)}",
@@ -354,6 +468,12 @@ internal static class SetupFailureDiagnosticFormatter
 
     private static string BooleanToken(bool value) =>
         value ? "true" : "false";
+
+    private static string MillisecondsToken(long milliseconds) =>
+        milliseconds >= 0
+            ? Math.Min(86_400_000, milliseconds)
+                .ToString(CultureInfo.InvariantCulture)
+            : "unknown";
 
     private static string EvidenceToken(
         PendingRecoveryInspection recovery,
@@ -485,6 +605,7 @@ internal static class SetupFieldDiagnosticFormatter
             context.Result.PrimaryFailureCode,
             AllowedErrorCodes,
             resultCode);
+        var failure = SetupFailureDiagnosticProjection.Create(context.Result);
         var stages = BuildStages(context.Result);
         var firewallDecisionCodes = BuildFirewallDecisionCodes(
             context.Result,
@@ -501,9 +622,17 @@ internal static class SetupFieldDiagnosticFormatter
             $"Operation={operation}",
             $"Result={(context.Result.Succeeded ? "SUCCESS" : "FAILURE")}",
             $"FailedStage={
-                (context.Result.Succeeded ? "NONE" : FailedStage(primaryCode))}",
+                (context.Result.Succeeded ? "NONE" : failure.Stage)}",
             $"ErrorCode={
                 (context.Result.Succeeded ? SetupErrorCodes.Ok : resultCode)}",
+            $"PrimaryFailureCode={
+                (context.Result.Succeeded ? "NONE" : primaryCode)}",
+            $"FailureCategory={
+                (context.Result.Succeeded ? NotRun : failure.Category)}",
+            $"FailureStageDurationMs={
+                (context.Result.Succeeded
+                    ? "unknown"
+                    : MillisecondsToken(failure.DurationMilliseconds))}",
             $"RecommendedActionCode={
                 RecommendedActionCode(
                     context.Result.Succeeded
@@ -748,43 +877,6 @@ internal static class SetupFieldDiagnosticFormatter
             ? "FAIL"
             : NotRun;
     }
-
-    private static string FailedStage(string code) =>
-        code switch
-        {
-            SetupErrorCodes.PackageNotFound or
-            SetupErrorCodes.ManifestInvalid or
-            SetupErrorCodes.PackageHashMismatch => "PACKAGE_VALIDATION",
-            SetupErrorCodes.ViewerIpInvalid or
-            SetupErrorCodes.NetworkSelectionInvalid or
-            SetupErrorCodes.ExistingNetworksNotLoaded => "INPUT",
-            SetupErrorCodes.AdministratorRequired => "ADMINISTRATOR",
-            SetupErrorCodes.PathInvalid or
-            SetupErrorCodes.PathUntrusted or
-            SetupErrorCodes.PathNotWritable => "FILESYSTEM",
-            SetupErrorCodes.ConfigurationInvalid => "CONFIGURATION",
-            SetupErrorCodes.ServiceFailed => "SERVICE",
-            SetupErrorCodes.FirewallFailed => "FIREWALL",
-            SetupErrorCodes.HealthFailed => "READINESS",
-            SetupErrorCodes.RecoveryRequired or
-            SetupErrorCodes.RollbackStateMismatch or
-            SetupErrorCodes.RollbackJournalWriteFailed => "RECOVERY_JOURNAL",
-            SetupErrorCodes.RollbackFailed or
-            SetupErrorCodes.RollbackServiceStopFailed or
-            SetupErrorCodes.RollbackFileRestoreFailed or
-            SetupErrorCodes.RollbackDataCleanupFailed or
-            SetupErrorCodes.RollbackServiceRestoreFailed or
-             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
-             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
-             SetupErrorCodes.RollbackEvidenceCleanupFailed or
-             SetupErrorCodes.RollbackStagingCleanupFailed or
-             SetupErrorCodes.RollbackBackupCleanupFailed or
-             SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
-             SetupErrorCodes.RollbackJournalCleanupFailed => "RECOVERY",
-            SetupErrorCodes.AlreadyRunning => "OPERATION_LOCK",
-            SetupErrorCodes.Cancelled => "CANCELLED",
-            _ => "UNKNOWN"
-        };
 
     private static string RecommendedActionCode(string code) =>
         code switch

@@ -160,9 +160,13 @@
 
                         <Border Margin="0,18,0,0" Padding="12" Background="#EFF6FF" BorderBrush="#BFDBFE"
                                 BorderThickness="1" CornerRadius="4">
-                            <TextBlock x:Name="ResultText" TextWrapping="Wrap"
-                                       AutomationProperties.LiveSetting="Polite"
-                                       Text="접속 시험은 저장 전에도 실행할 수 있습니다. 실패해도 장비 저장은 가능합니다."/>
+                            <StackPanel>
+                                <TextBlock FontWeight="SemiBold"
+                                           Text="권장 순서: 1. 접속 시험 → 2. 저장 → 3. 주기 감시 켜기"/>
+                                <TextBlock x:Name="ResultText" Margin="0,5,0,0" TextWrapping="Wrap"
+                                           AutomationProperties.LiveSetting="Polite"
+                                           Text="접속 시험에 실패해도 장비는 저장되지만 주기 감시는 시작되지 않습니다."/>
+                            </StackPanel>
                         </Border>
                     </StackPanel>
                 </ScrollViewer>

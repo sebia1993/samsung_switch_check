@@ -8,6 +8,14 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
+        if (AgentSetupPackageSmokeCheck.IsRequested(e.Args))
+        {
+            Shutdown(AgentSetupPackageSmokeCheck.Run(
+                AppContext.BaseDirectory,
+                key => Resources.Contains(key) ? Resources[key] : null));
+            return;
+        }
+
         base.OnStartup(e);
 
         var fileSystem = new PhysicalSetupFileSystem();

@@ -162,11 +162,6 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     continue;
                 }
 
-                if (expectedProductVersion is null)
-                {
-                    return AgentHealthProbeResult.Success(restartObserved);
-                }
-
                 var readinessJson = await ReadBoundedAsync(
                     readyResponse.Content,
                     MaximumReadinessBytes,
@@ -220,7 +215,7 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
 
     internal static AgentHealthProbeCode ClassifyReadiness(
         string json,
-        string expectedProductVersion)
+        string? expectedProductVersion)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
@@ -230,11 +225,18 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             !string.Equals(status.GetString(), "ready", StringComparison.Ordinal) ||
             !root.TryGetProperty("apiVersion", out var apiVersion) ||
             apiVersion.ValueKind != JsonValueKind.Number ||
-            !apiVersion.TryGetInt32(out var api) ||
-            !root.TryGetProperty("protocol", out var protocol) ||
-            protocol.ValueKind != JsonValueKind.String ||
-            !root.TryGetProperty("productVersion", out var version) ||
-            version.ValueKind != JsonValueKind.String)
+            !apiVersion.TryGetInt32(out var api))
+        {
+            return AgentHealthProbeCode.PayloadInvalid;
+        }
+
+        var hasProtocol = root.TryGetProperty("protocol", out var protocol);
+        var hasProductVersion =
+            root.TryGetProperty("productVersion", out var version);
+        if ((hasProtocol && protocol.ValueKind != JsonValueKind.String) ||
+            (hasProductVersion && version.ValueKind != JsonValueKind.String) ||
+            (expectedProductVersion is not null &&
+             (!hasProtocol || !hasProductVersion)))
         {
             return AgentHealthProbeCode.PayloadInvalid;
         }
@@ -244,7 +246,8 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             return AgentHealthProbeCode.ApiVersionMismatch;
         }
 
-        if (!string.Equals(
+        if (hasProtocol &&
+            !string.Equals(
                 protocol.GetString(),
                 "https",
                 StringComparison.Ordinal))
@@ -252,8 +255,21 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             return AgentHealthProbeCode.ProtocolMismatch;
         }
 
+        var actualVersion = hasProductVersion
+            ? NormalizeVersion(version.GetString())
+            : string.Empty;
+        if (hasProductVersion && actualVersion.Length == 0)
+        {
+            return AgentHealthProbeCode.PayloadInvalid;
+        }
+
+        if (expectedProductVersion is null)
+        {
+            return AgentHealthProbeCode.Ready;
+        }
+
         return string.Equals(
-            NormalizeVersion(version.GetString()),
+            actualVersion,
             NormalizeVersion(expectedProductVersion),
             StringComparison.OrdinalIgnoreCase)
             ? AgentHealthProbeCode.Ready
