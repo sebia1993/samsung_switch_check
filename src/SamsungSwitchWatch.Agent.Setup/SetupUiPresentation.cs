@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
+using SamsungSwitchWatch.Support;
 
 namespace SamsungSwitchWatch.Agent.Setup;
 
@@ -526,6 +527,51 @@ internal static class SetupFieldDiagnosticFormatter
         }
 
         return string.Join("\r\n", lines);
+    }
+
+    public static string CreateSupportCode(SetupFieldDiagnosticContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(context.Result);
+        ArgumentNullException.ThrowIfNull(context.Recovery);
+        if (context.Result.Succeeded)
+        {
+            throw new ArgumentException(
+                "SWD1 support codes are generated only for failed operations.",
+                nameof(context));
+        }
+
+        var resultCode = AllowedCode(
+            context.Result.Code,
+            AllowedErrorCodes);
+        var primaryCode = AllowedCode(
+            context.Result.PrimaryFailureCode,
+            AllowedErrorCodes,
+            resultCode);
+        var stages = BuildStages(context.Result);
+        var rollbackCodes = context.Result.RollbackFailureCodes
+            .Concat(context.Recovery.RollbackFailureCodes)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var operation = string.Equals(
+            context.Operation,
+            "recovery-inspection",
+            StringComparison.Ordinal)
+            ? "recovery"
+            : context.Operation;
+        var payload = Swd1AgentPayloadBuilder.Build(
+            context.ProductVersion,
+            operation,
+            resultCode,
+            primaryCode,
+            rollbackCodes,
+            RecoveryJournal(context.Recovery),
+            ServiceStatus(context.Result, context.Recovery, stages),
+            LocalTcpStatus(context.Result, stages),
+            ReadinessStatus(context.Result, stages),
+            PackageValidation(context.Result, stages),
+            BuildFirewallDecisionCodes(context.Result, stages));
+        return Swd1SupportCode.Encode(payload);
     }
 
     private static IReadOnlyList<SetupStageDiagnostic> BuildStages(

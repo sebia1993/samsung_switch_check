@@ -1,4 +1,5 @@
 using System.IO;
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -18,6 +19,19 @@ namespace SamsungSwitchWatch.ManualCapture;
 
 internal static class Program
 {
+    private static readonly string[] ExpectedScreenshotNames =
+    [
+        "00-agent-setup.png",
+        "00-agent-setup-recovery-failed.png",
+        "01-dashboard.png",
+        "02-agent-connection.png",
+        "02-agent-connection-failed.png",
+        "03-device-management.png",
+        "04-command-output.png",
+        "05-mini-window.png",
+        "06-alert-popup.png"
+    ];
+
     private static readonly DateTimeOffset DemoNow =
         new(2026, 7, 23, 10, 24, 18, TimeSpan.FromHours(9));
 
@@ -220,6 +234,13 @@ internal static class Program
                 var saveFieldDiagnostic = (Button)setupLifetime.Window.FindName(
                     "SaveFieldDiagnosticButton");
                 saveFieldDiagnostic.Visibility = Visibility.Visible;
+                var agentSupportCode = CreateAgentFailureSupportCode();
+                var agentSupportCodeBorder = (Border)setupLifetime.Window.FindName(
+                    "SupportCodeBorder");
+                var agentSupportCodeTextBox = (TextBox)setupLifetime.Window.FindName(
+                    "SupportCodeTextBox");
+                agentSupportCodeTextBox.Text = agentSupportCode;
+                agentSupportCodeBorder.Visibility = Visibility.Visible;
                 recoverButton.Content = "복구 다시 시도";
                 operationState.Text =
                     "복구 실패 · SETUP_ROLLBACK_FAILED";
@@ -230,7 +251,8 @@ internal static class Program
                     Path.Combine(
                         outputDirectory,
                         "00-agent-setup-recovery-failed.png"),
-                    "복구 실패 상위 상태와 journal 대상별 정리 실패를 구분하고 작업 기록과 설치 잠금을 유지하며 복구 재시도와 익명 진단 저장을 안내하는 Agent Setup 화면");
+                    "복구 실패 상위 상태와 journal 대상별 정리 실패, 선택 가능한 SWD1 지원 코드를 구분하고 작업 기록과 설치 잠금을 유지하며 복구 재시도와 익명 진단 저장을 안내하는 Agent Setup 화면");
+                Console.WriteLine($"Agent failure support code: {agentSupportCode}");
                 if (previewAgentSetup)
                 {
                     var previewDeadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
@@ -297,6 +319,64 @@ internal static class Program
                     connectionLifetime.Window,
                     Path.Combine(outputDirectory, "02-agent-connection.png"),
                     "이 PC의 실제 사설 IPv4로 Agent 서비스, HTTPS 18443, API와 버전을 확인하고 스위치와 원격 경로는 미확인으로 구분하는 연결 설정 창");
+            }
+
+            using (var connectionFailureLifetime = new WindowLifetime(
+                       new ConnectionSettingsWindow(
+                           connectionSettings,
+                           (_, _) => Task.CompletedTask,
+                           new ManualFailingAgentConnectionProbe())
+                       {
+                           Width = 720,
+                           Height = 850,
+                           ShowInTaskbar = false,
+                           WindowStartupLocation = WindowStartupLocation.Manual,
+                           Left = 80,
+                           Top = 80
+                       }))
+            {
+                ShowAndLayout(connectionFailureLifetime.Window);
+                var saveButton = (Button)connectionFailureLifetime.Window.FindName(
+                    "SaveButton");
+                var supportCodePanel = (Border)connectionFailureLifetime.Window.FindName(
+                    "SupportCodePanel");
+                saveButton.RaiseEvent(
+                    new RoutedEventArgs(Button.ClickEvent));
+                WaitUntil(
+                    () => supportCodePanel.Visibility == Visibility.Visible,
+                    TimeSpan.FromSeconds(3));
+
+                var snapshot =
+                    ((ConnectionSettingsWindow)connectionFailureLifetime.Window)
+                    .FieldDiagnosticSnapshot
+                    ?? throw new InvalidOperationException(
+                        "The Viewer failure diagnostic was not created.");
+                var viewerSupportCode =
+                    ViewerFieldDiagnostic.CreateSupportCode(snapshot);
+                EnsureSupportCodeDecodes(
+                    typeof(ConnectionSettingsWindow).Assembly,
+                    viewerSupportCode);
+                var viewerSupportCodeTextBox =
+                    (TextBox)connectionFailureLifetime.Window.FindName(
+                        "SupportCodeTextBox");
+                if (!string.Equals(
+                        viewerSupportCodeTextBox.Text,
+                        viewerSupportCode,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "The Viewer failure UI does not show the formatter output.");
+                }
+
+                RefreshLayout(connectionFailureLifetime.Window);
+                Capture(
+                    connectionFailureLifetime.Window,
+                    Path.Combine(
+                        outputDirectory,
+                        "02-agent-connection-failed.png"),
+                    "Agent TCP 18443 연결 거부 단계와 선택 가능한 SWD1 지원 코드를 함께 보여 주고 익명 진단 저장을 유지하는 Viewer 연결 실패 화면");
+                Console.WriteLine(
+                    $"Viewer failure support code: {viewerSupportCode}");
             }
 
             using (var deviceLifetime = new WindowLifetime(
@@ -406,7 +486,13 @@ internal static class Program
             Console.WriteLine($"Created {generated.Length} sanitized WPF screenshots in {outputDirectory}");
             foreach (var item in generated) Console.WriteLine($"  {item}");
 
-            return generated.Length >= 7 ? 0 : 2;
+            return generated.SequenceEqual(
+                ExpectedScreenshotNames.OrderBy(
+                    name => name,
+                    StringComparer.Ordinal),
+                StringComparer.Ordinal)
+                ? 0
+                : 2;
         }
         finally
         {
@@ -447,6 +533,54 @@ internal static class Program
                 "The deterministic manual capture must use the local preflight fixture.");
     }
 
+    private sealed class ManualFailingAgentConnectionProbe : IAgentConnectionProbe
+    {
+        public Task<AgentConnectionProbeResult> ProbeAsync(
+            ViewerSettings settings,
+            IProgress<AgentConnectionProbeUpdate>? progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new AgentConnectionProbeUpdate(
+                AgentConnectionProbeStage.Address,
+                AgentConnectionProbeState.Succeeded,
+                "Agent 주소 형식을 확인했습니다."));
+            progress?.Report(new AgentConnectionProbeUpdate(
+                AgentConnectionProbeStage.Dns,
+                AgentConnectionProbeState.Succeeded,
+                "Agent PC IPv4를 확인했습니다."));
+            progress?.Report(new AgentConnectionProbeUpdate(
+                AgentConnectionProbeStage.Tcp,
+                AgentConnectionProbeState.Failed,
+                "Agent PC의 TCP/18443 연결이 거부되었습니다.",
+                "AGENT_CONNECTION_REFUSED"));
+
+            return Task.FromResult(
+                AgentConnectionProbeResult.Failure(
+                    AgentConnectionProbeStage.Tcp,
+                    "AGENT_CONNECTION_REFUSED",
+                    "Agent PC의 TCP/18443 연결이 거부되었습니다.")
+                with
+                {
+                    StageSnapshots =
+                    [
+                        new(
+                            AgentConnectionProbeStage.Address,
+                            AgentConnectionProbeState.Succeeded,
+                            4),
+                        new(
+                            AgentConnectionProbeStage.Dns,
+                            AgentConnectionProbeState.Succeeded,
+                            7),
+                        new(
+                            AgentConnectionProbeStage.Tcp,
+                            AgentConnectionProbeState.Failed,
+                            12)
+                    ]
+                });
+        }
+    }
+
     private sealed class ManualLocalAgentPreflight : ILocalAgentPreflight
     {
         public Task<LocalAgentPreflightResult> RunAsync(
@@ -467,7 +601,7 @@ internal static class Program
                          (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
                          (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
                          (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
-                         (AgentConnectionProbeStage.Identity, "Agent 0.10.9-poc · API v4 확인")
+                         (AgentConnectionProbeStage.Identity, "Agent 0.10.10-poc · API v4 확인")
                      })
             {
                 progress?.Report(new LocalAgentPreflightUpdate(
@@ -489,11 +623,11 @@ internal static class Program
                 8,
                 65_536)
             {
-                ProductVersion = "0.10.9-poc"
+                ProductVersion = "0.10.10-poc"
             };
             var probeResult = AgentConnectionProbeResult.Success(
                 identity,
-                "Agent 0.10.9-poc · API v4 확인");
+                "Agent 0.10.10-poc · API v4 확인");
             return Task.FromResult(new LocalAgentPreflightResult(
                 true,
                 candidate,
@@ -583,16 +717,133 @@ internal static class Program
 
     private static void DeleteLegacyScreenshots(string outputDirectory)
     {
-        foreach (var fileName in new[]
-                 {
-                     "01-dashboard-demo.png",
-                     "02-new-log.png",
-                     "03-collector-diagnostics.png",
-                     "04-agent-connection-demo.png"
-                 })
+        foreach (var fileName in ExpectedScreenshotNames.Concat(
+                     [
+                         "01-dashboard-demo.png",
+                         "02-new-log.png",
+                         "03-collector-diagnostics.png",
+                         "04-agent-connection-demo.png"
+                     ]))
         {
             var path = Path.Combine(outputDirectory, fileName);
             if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    private static string CreateAgentFailureSupportCode()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.RollbackFailed,
+            "복구 자료 정리를 완료하지 못했습니다.",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.FirewallFailed,
+                    "최초 설치 실패",
+                    SetupStepState.Failed,
+                    "설치 단계의 최초 실패 원인은 그대로 보존됩니다."),
+                new SetupStepResult(
+                    SetupErrorCodes.RollbackJournalCleanupFailed,
+                    "복구 기록 정리",
+                    SetupStepState.Failed,
+                    "작업 기록 정리와 삭제 확인이 끝나지 않았습니다.")
+            ])
+        with
+        {
+            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            RollbackFailureCodes =
+            [
+                SetupErrorCodes.RollbackJournalCleanupFailed
+            ]
+        };
+        var recovery = new PendingRecoveryInspection(
+            true,
+            true,
+            SetupErrorCodes.RecoveryRequired,
+            "이전 설치 상태 복구가 필요합니다.")
+        {
+            JournalFormatVersion = 1,
+            JournalStage = "rollback-completed",
+            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            RollbackFailureCodes =
+            [
+                SetupErrorCodes.RollbackJournalCleanupFailed
+            ],
+            ServiceState = "stopped",
+            EvidenceStateKnown = true,
+            InstallDirectoryExists = true,
+            StagingDirectoryExists = false,
+            BackupDirectoryExists = false,
+            FailedDirectoryExists = false,
+            DataDirectoryExists = true
+        };
+
+        var setupAssembly = typeof(AgentSetupWindow).Assembly;
+        var contextType = setupAssembly.GetType(
+            "SamsungSwitchWatch.Agent.Setup.SetupFieldDiagnosticContext",
+            throwOnError: true)!;
+        var formatterType = setupAssembly.GetType(
+            "SamsungSwitchWatch.Agent.Setup.SetupFieldDiagnosticFormatter",
+            throwOnError: true)!;
+        var context = Activator.CreateInstance(
+            contextType,
+            BindingFlags.Instance |
+            BindingFlags.Public |
+            BindingFlags.NonPublic,
+            binder: null,
+            args:
+            [
+                "0.10.10-poc",
+                DemoNow,
+                "10.0.22631.0",
+                "X64",
+                "recovery",
+                TimeSpan.FromMilliseconds(812),
+                result,
+                recovery
+            ],
+            culture: null)
+            ?? throw new InvalidOperationException(
+                "The Agent support-code context could not be created.");
+        var method = formatterType.GetMethod(
+            "CreateSupportCode",
+            BindingFlags.Static |
+            BindingFlags.Public |
+            BindingFlags.NonPublic)
+            ?? throw new MissingMethodException(
+                formatterType.FullName,
+                "CreateSupportCode");
+        var code = method.Invoke(null, [context]) as string;
+        if (string.IsNullOrWhiteSpace(code) ||
+            code.Length != 24 ||
+            !code.StartsWith("SWD1-", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The Agent formatter did not produce a valid SWD1 shape.");
+        }
+        EnsureSupportCodeDecodes(setupAssembly, code);
+        return code;
+    }
+
+    private static void EnsureSupportCodeDecodes(
+        Assembly assembly,
+        string code)
+    {
+        var codecType = assembly.GetType(
+            "SamsungSwitchWatch.Support.Swd1SupportCode",
+            throwOnError: true)!;
+        var method = codecType.GetMethod(
+            "TryDecode",
+            BindingFlags.Static |
+            BindingFlags.Public)
+            ?? throw new MissingMethodException(
+                codecType.FullName,
+                "TryDecode");
+        object?[] arguments = [code, null];
+        if (method.Invoke(null, arguments) is not true ||
+            arguments[1] is null)
+        {
+            throw new InvalidOperationException(
+                "The generated SWD1 support code did not decode.");
         }
     }
 

@@ -43,6 +43,7 @@
                              Height="36"
                              Padding="10,6"
                              VerticalContentAlignment="Center"
+                             TextChanged="ViewerIpTextBox_TextChanged"
                              ToolTip="예: 10.20.30.41" />
                     <Button Grid.Column="1"
                             x:Name="UseThisPcAddressButton"
@@ -190,6 +191,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <Grid Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
@@ -252,6 +254,34 @@
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                 </ScrollViewer>
+                <Border Grid.Row="3"
+                        x:Name="SupportCodeBorder"
+                        Margin="0,10,0,0"
+                        Padding="10,8"
+                        CornerRadius="6"
+                        Background="#FFFBEB"
+                        BorderBrush="#D97706"
+                        BorderThickness="1"
+                        Visibility="Collapsed"
+                        AutomationProperties.Name="지원 코드">
+                    <StackPanel>
+                        <TextBlock Text="지원 코드 · 이 코드만 전달하세요"
+                                   FontSize="11"
+                                   FontWeight="SemiBold"
+                                   Foreground="#B45309" />
+                        <TextBox x:Name="SupportCodeTextBox"
+                                 Margin="0,2,0,0"
+                                 Padding="0"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 FontFamily="Consolas"
+                                 FontSize="12"
+                                 IsReadOnly="True"
+                                 IsReadOnlyCaretVisible="True"
+                                 Text=""
+                                 AutomationProperties.Name="지원 코드 값" />
+                    </StackPanel>
+                </Border>
             </Grid>
         </Border>
 

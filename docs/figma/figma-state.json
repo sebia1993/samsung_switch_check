@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260730-v13-recovery-evidence-cleanup-figma-synced",
+  "runId": "ssw-20260730-v14-failure-support-code-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -41,14 +41,16 @@
     "agentSetupSamePcHelperV10": "54:363",
     "agentSetupRecoveryRequiredV11": "58:72",
     "agentSetupRecoveryCompleteV11": "58:97",
-    "agentSetupRecoveryFailedV13": "58:120",
+    "agentSetupRecoveryFailedV14": "58:120",
     "agentSetupUnsafeRecoveryStateV11": "58:147",
     "agentSetupSanitizedDiagnosticV12": "60:340",
-    "httpsConnectionSanitizedDiagnosticV12": "62:99",
+    "httpsConnectionFailureSupportCodeV14": "62:99",
+    "agentSetupSupportCodePanelV14": "68:340",
+    "viewerConnectionSupportCodePanelV14": "69:341",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v13-recovery-evidence-cleanup",
+    "version": "v14-failure-support-code",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -60,6 +62,24 @@
     "fingerprintInput": false,
     "pairingTokenInput": false,
     "fieldDiagnosticPersistence": "manual-save-only"
+  },
+  "supportCodeFlow": {
+    "schema": "SWD1",
+    "format": "SWD1-XXXX-XXXX-XXXX-XXXX",
+    "components": [
+      "AGENT_SETUP",
+      "VIEWER"
+    ],
+    "failureOnly": true,
+    "visibleDuringRunning": false,
+    "visibleOnSuccess": false,
+    "clearedBeforeNewAttempt": true,
+    "offlineGenerated": true,
+    "authenticationToken": false,
+    "pairingToken": false,
+    "containsCredentials": false,
+    "containsNetworkIdentifiers": false,
+    "existingFieldDiagnosticSchemaUnchanged": true
   },
   "managementNetworkFlow": {
     "automaticDiscovery": true,

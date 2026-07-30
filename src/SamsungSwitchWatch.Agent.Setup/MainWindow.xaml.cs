@@ -81,8 +81,23 @@ public partial class MainWindow : Window
         _existingNetworksWarning = warning;
     }
 
-    private void RefreshNetworksButton_Click(object sender, RoutedEventArgs e) =>
+    private void RefreshNetworksButton_Click(object sender, RoutedEventArgs e)
+    {
         RefreshNetworks();
+        RefreshRecoveryState(
+            preserveFailureDiagnostics:
+                _lastFailedOperation is { Succeeded: false });
+    }
+
+    private void ViewerIpTextBox_TextChanged(
+        object sender,
+        System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (IsInitialized)
+        {
+            HideSupportCode();
+        }
+    }
 
     private void UseThisPcAddressButton_Click(object sender, RoutedEventArgs e)
     {
@@ -255,6 +270,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideSupportCode();
         var requestedState = selectedItem.IsSelected;
         _suppressNetworkSelectionEvent = true;
         try
@@ -319,6 +335,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        HideSupportCode();
         var matchingItems = _networks
             .Where(item => string.Equals(
                 item.Cidr,
@@ -379,6 +396,7 @@ public partial class MainWindow : Window
         }
 
         _networks.Remove(item);
+        HideSupportCode();
         ShowManualNetworkFeedback(
             $"직접 추가 관리망을 삭제했습니다: {item.Cidr}",
             Brushes.RoyalBlue);
@@ -492,6 +510,7 @@ public partial class MainWindow : Window
         }
 
         UpdateActionAvailability();
+        RefreshSupportCode();
     }
 
     private void ApplyRecoveryState(PendingRecoveryInspection inspection)
@@ -622,6 +641,7 @@ public partial class MainWindow : Window
             "recovery",
             displayedResult,
             _lastCompletedOperationDuration);
+        RefreshSupportCode();
         UpdateActionAvailability();
         InstallButton.IsEnabled =
             completion.ReadyForInstall && InstallButton.IsEnabled;
@@ -685,6 +705,7 @@ public partial class MainWindow : Window
         Func<CancellationToken, Task<SetupOperationResult>> operation)
     {
         var stopwatch = Stopwatch.StartNew();
+        HideSupportCode();
         SetBusy(true);
         _results.Clear();
         DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
@@ -732,7 +753,8 @@ public partial class MainWindow : Window
             ShowSingleFailure(
                 SetupErrorCodes.Unexpected,
                 "작업 실패",
-                "화면에서 작업 결과를 처리하지 못했습니다.");
+                "화면에서 작업 결과를 처리하지 못했습니다.",
+                operationName);
             if (_lastFailedOperation is { } failure)
             {
                 CaptureCompletedOperation(
@@ -763,7 +785,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ShowSingleFailure(string code, string label, string message)
+    private void ShowSingleFailure(
+        string code,
+        string label,
+        string message,
+        string operationName = "ui")
     {
         var result = SetupOperationResult.Failure(
             code,
@@ -771,7 +797,7 @@ public partial class MainWindow : Window
             [new SetupStepResult(code, label, SetupStepState.Failed, message)]);
         ShowResultSteps(result);
         _lastFailedOperation = result;
-        _lastOperationName = "ui";
+        _lastOperationName = operationName;
         ShowDiagnosticsAction();
         OperationStateText.Text = $"실패 · {code}";
         OperationStateText.Foreground = Brushes.Firebrick;
@@ -818,6 +844,42 @@ public partial class MainWindow : Window
         _lastOperationName = "none";
         CopyDiagnosticsButton.Visibility = Visibility.Collapsed;
         DiagnosticsCopyFeedbackText.Visibility = Visibility.Collapsed;
+        HideSupportCode();
+    }
+
+    private void RefreshSupportCode()
+    {
+        HideSupportCode();
+        if (_lastFailedOperation is not { Succeeded: false } failure)
+        {
+            return;
+        }
+
+        try
+        {
+            SupportCodeTextBox.Text =
+                SetupFieldDiagnosticFormatter.CreateSupportCode(
+                    new SetupFieldDiagnosticContext(
+                        ProductVersion(),
+                        DateTimeOffset.UtcNow,
+                        Environment.OSVersion.Version.ToString(),
+                        RuntimeInformation.OSArchitecture.ToString(),
+                        _lastOperationName,
+                        _lastCompletedOperationDuration,
+                        failure,
+                        _recoveryInspection));
+            SupportCodeBorder.Visibility = Visibility.Visible;
+        }
+        catch
+        {
+            HideSupportCode();
+        }
+    }
+
+    private void HideSupportCode()
+    {
+        SupportCodeTextBox.Text = string.Empty;
+        SupportCodeBorder.Visibility = Visibility.Collapsed;
     }
 
     private void CopyDiagnosticsButton_Click(object sender, RoutedEventArgs e)

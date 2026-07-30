@@ -472,6 +472,7 @@ public partial class ConnectionSettingsWindow : Window
         _lastDiagnosticCandidateCount = candidateCount;
         DiagnosticSaveButton.Visibility = Visibility.Visible;
         DiagnosticSaveButton.IsEnabled = true;
+        RefreshSupportCode();
     }
 
     private void ReplaceSuccessfulDiagnosticWithApplyFailure(string errorCode)
@@ -489,6 +490,7 @@ public partial class ConnectionSettingsWindow : Window
             errorCode);
         DiagnosticSaveButton.Visibility = Visibility.Visible;
         DiagnosticSaveButton.IsEnabled = true;
+        RefreshSupportCode();
     }
 
     private void ClearFieldDiagnostic()
@@ -499,6 +501,33 @@ public partial class ConnectionSettingsWindow : Window
         _lastDiagnosticCandidateCount = 0;
         DiagnosticSaveButton.Visibility = Visibility.Collapsed;
         DiagnosticSaveButton.IsEnabled = false;
+        HideSupportCode();
+    }
+
+    private void RefreshSupportCode()
+    {
+        HideSupportCode();
+        if (_lastFieldDiagnostic is not { Result: "FAILED" } snapshot)
+        {
+            return;
+        }
+
+        try
+        {
+            SupportCodeTextBox.Text =
+                ViewerFieldDiagnostic.CreateSupportCode(snapshot);
+            SupportCodePanel.Visibility = Visibility.Visible;
+        }
+        catch
+        {
+            HideSupportCode();
+        }
+    }
+
+    private void HideSupportCode()
+    {
+        SupportCodeTextBox.Text = string.Empty;
+        SupportCodePanel.Visibility = Visibility.Collapsed;
     }
 
     private void ShowDiagnosticWriteFailure()

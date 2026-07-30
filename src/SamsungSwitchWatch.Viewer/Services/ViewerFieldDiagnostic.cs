@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using SamsungSwitchWatch.Support;
 using SamsungSwitchWatch.Viewer.Models;
 
 namespace SamsungSwitchWatch.Viewer.Services;
@@ -164,6 +165,43 @@ internal static class ViewerFieldDiagnostic
         Append(builder, "AgentProductVersion", SafeVersion(snapshot.AgentProductVersion));
         Append(builder, "ApiVersion", SafeApiVersion(snapshot.ApiVersion));
         return builder.ToString();
+    }
+
+    internal static string CreateSupportCode(
+        ViewerFieldDiagnosticSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (snapshot.Result != "FAILED")
+        {
+            throw new ArgumentException(
+                "SWD1 support codes are generated only for failed connection checks.",
+                nameof(snapshot));
+        }
+
+        var stages = NormalizeStages(snapshot.Stages, null);
+        string State(AgentConnectionProbeStage stage) =>
+            StateName(stages.Single(item => item.Stage == stage).State);
+
+        var errorCode = AllowlistedErrorCode(snapshot.ErrorCode);
+        var payload = Swd1ViewerPayloadBuilder.Build(
+            snapshot.ProductVersion,
+            Operation,
+            errorCode,
+            errorCode,
+            AllowedModes.Contains(snapshot.Mode) ? snapshot.Mode : "NORMAL",
+            AllowedStageName(snapshot.FailedStage),
+            State(AgentConnectionProbeStage.Address),
+            State(AgentConnectionProbeStage.Dns),
+            State(AgentConnectionProbeStage.Tcp),
+            State(AgentConnectionProbeStage.Https),
+            State(AgentConnectionProbeStage.Identity),
+            Math.Clamp(
+                snapshot.CandidateCount,
+                0,
+                LocalAgentPreflight.DefaultMaxCandidateAttempts),
+            snapshot.AgentProductVersion,
+            snapshot.ApiVersion);
+        return Swd1SupportCode.Encode(payload);
     }
 
     private static IReadOnlyList<AgentConnectionProbeStageSnapshot> NormalizeStages(
