@@ -334,6 +334,9 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public Exception? CaptureException { get; set; }
     private int StopCallCount { get; set; }
 
+    public void SetState(ServiceSnapshot state) =>
+        State = Clone(state);
+
     public ServiceSnapshot Capture(string serviceName)
     {
         Operations.Add("capture");
@@ -390,7 +393,23 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
         InstalledState = Clone(State);
     }
 
-    public void ConfigureRecovery(string serviceName) => Operations.Add("recovery");
+    public void ConfigureRecovery(string serviceName)
+    {
+        Operations.Add("recovery");
+        State = State with
+        {
+            Recovery = WindowsServiceManager.CreateAutomaticRecoveryPolicy()
+        };
+    }
+
+    public void DisableRecovery(string serviceName)
+    {
+        Operations.Add("recovery-disabled");
+        State = State with
+        {
+            Recovery = WindowsServiceManager.CreateDisabledRecoveryPolicy()
+        };
+    }
 
     public void Start(string serviceName, TimeSpan timeout)
     {
@@ -519,15 +538,26 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     }
 }
 
-internal sealed class FakeHealthProbe(bool ready) : IAgentHealthProbe
+internal sealed class FakeHealthProbe(
+    bool ready,
+    Action? beforeResult = null) : IAgentHealthProbe
 {
-    public Task<bool> WaitUntilReadyAsync(
+    public Task<AgentHealthProbeResult> WaitUntilReadyAsync(
         Uri endpoint,
         string? expectedProductVersion,
-        int expectedProcessId,
+        Func<ServiceSnapshot> currentServiceSnapshot,
         TimeSpan timeout,
-        CancellationToken cancellationToken) =>
-        Task.FromResult(ready);
+        CancellationToken cancellationToken)
+    {
+        _ = currentServiceSnapshot();
+        beforeResult?.Invoke();
+        return Task.FromResult(
+            ready
+                ? AgentHealthProbeResult.Success(restartObserved: false)
+                : AgentHealthProbeResult.Failure(
+                    AgentHealthProbeCode.DeadlineExceeded,
+                    restartObserved: false));
+    }
 }
 
 internal sealed class TemporaryFolder : IDisposable

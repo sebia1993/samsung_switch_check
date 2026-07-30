@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -14,6 +15,8 @@ public sealed partial class WindowsServiceManager : IServiceManager
     private const uint ServiceErrorNormal = 0x00000001;
     private const uint ServiceNoChange = 0xFFFFFFFF;
     private const uint ServiceStopped = 0x00000001;
+    private const uint ServiceStartPending = 0x00000002;
+    private const uint ServiceStopPending = 0x00000003;
     private const uint ServiceRunning = 0x00000004;
     private const uint ServiceControlStop = 0x00000001;
     private const int ScStatusProcessInfo = 0;
@@ -23,7 +26,10 @@ public sealed partial class WindowsServiceManager : IServiceManager
     private const int ServiceConfigServiceSidInfo = 5;
     private const uint ServiceSidTypeUnrestricted = 1;
     private const int ErrorServiceDoesNotExist = 1060;
+    private const int ErrorServiceNotActive = 1062;
     private const uint DaclSecurityInformation = 0x00000004;
+    private static readonly TimeSpan ServiceStatePollInterval =
+        TimeSpan.FromMilliseconds(200);
 
     public ServiceSnapshot Capture(string serviceName)
     {
@@ -106,20 +112,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
     public void Stop(string serviceName, TimeSpan timeout)
     {
         WithService(serviceName, service =>
-        {
-            var status = QueryStatus(service);
-            if (status.CurrentState == ServiceStopped)
-            {
-                return;
-            }
-
-            if (!NativeMethods.ControlService(service, ServiceControlStop, out _))
-            {
-                ThrowServiceFailure();
-            }
-
-            WaitForState(service, ServiceStopped, timeout);
-        });
+            WaitForServiceStopAndProcessExit(service, timeout));
     }
 
     public void InstallOrUpdate(
@@ -196,17 +189,26 @@ public sealed partial class WindowsServiceManager : IServiceManager
 
     public void ConfigureRecovery(string serviceName)
     {
-        var recovery = new ServiceRecoverySnapshot(
-            86400,
-            true,
-            string.Empty,
-            string.Empty,
-            [
-                new ServiceFailureActionSnapshot(1, 5000),
-                new ServiceFailureActionSnapshot(1, 15000),
-                new ServiceFailureActionSnapshot(1, 60000)
-            ]);
-        WithService(serviceName, service => SetRecovery(service, recovery));
+        WithService(
+            serviceName,
+            service => SetRecovery(service, CreateAutomaticRecoveryPolicy()));
+    }
+
+    public void DisableRecovery(string serviceName)
+    {
+        WithService(
+            serviceName,
+            service =>
+            {
+                SetRecovery(service, CreateDisabledRecoveryPolicy());
+                var readback = QueryRecovery(service);
+                if (readback.Actions.Count != 0)
+                {
+                    throw new SetupException(
+                        SetupErrorCodes.ServiceFailed,
+                        "Windows 서비스의 자동 복구 작업이 비활성화되었는지 확인하지 못했습니다.");
+                }
+            });
     }
 
     public void Start(string serviceName, TimeSpan timeout)
@@ -432,6 +434,174 @@ public sealed partial class WindowsServiceManager : IServiceManager
             "Windows 서비스가 제한 시간 안에 요청한 상태가 되지 않았습니다.");
     }
 
+    private static void WaitForServiceStopAndProcessExit(
+        IntPtr service,
+        TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        var observedProcesses = new Dictionary<int, Process>();
+        var stopRequestedProcessIds = new HashSet<int>();
+        try
+        {
+            while (true)
+            {
+                var status = QueryStatus(service);
+                TrackProcess(status.ProcessId, observedProcesses);
+                if (IsStopComplete(
+                        status.CurrentState,
+                        observedProcesses.Values.Select(ProcessHasExited)))
+                {
+                    return;
+                }
+
+                if (elapsed.Elapsed >= timeout)
+                {
+                    ThrowServiceStopTimeout();
+                }
+
+                var processId = checked((int)status.ProcessId);
+                if (ShouldRequestStop(
+                        status.CurrentState,
+                        processId,
+                        stopRequestedProcessIds))
+                {
+                    if (!NativeMethods.ControlService(
+                            service,
+                            ServiceControlStop,
+                            out _))
+                    {
+                        var error = Marshal.GetLastWin32Error();
+                        if (error != ErrorServiceNotActive)
+                        {
+                            ThrowServiceFailure(error);
+                        }
+                    }
+                }
+
+                var remaining = timeout - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    ThrowServiceStopTimeout();
+                }
+
+                Thread.Sleep(
+                    remaining < ServiceStatePollInterval
+                        ? remaining
+                        : ServiceStatePollInterval);
+            }
+        }
+        finally
+        {
+            foreach (var process in observedProcesses.Values)
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    internal static bool IsStopComplete(
+        uint currentState,
+        IEnumerable<bool> observedProcessExitStates) =>
+        currentState == ServiceStopped &&
+        observedProcessExitStates.All(hasExited => hasExited);
+
+    internal static bool ShouldRequestStop(
+        uint currentState,
+        int processId,
+        ISet<int> stopRequestedProcessIds)
+    {
+        if (currentState is
+                ServiceStopped or
+                ServiceStartPending or
+                ServiceStopPending)
+        {
+            return false;
+        }
+
+        return stopRequestedProcessIds.Add(processId);
+    }
+
+    internal static ServiceRecoverySnapshot CreateAutomaticRecoveryPolicy() =>
+        new(
+            86400,
+            true,
+            string.Empty,
+            string.Empty,
+            [
+                new ServiceFailureActionSnapshot(1, 5000),
+                new ServiceFailureActionSnapshot(1, 15000),
+                new ServiceFailureActionSnapshot(1, 60000)
+            ]);
+
+    internal static ServiceRecoverySnapshot CreateDisabledRecoveryPolicy() =>
+        new(
+            0,
+            false,
+            string.Empty,
+            string.Empty,
+            []);
+
+    private static void TrackProcess(
+        uint processId,
+        IDictionary<int, Process> observedProcesses)
+    {
+        if (processId == 0)
+        {
+            return;
+        }
+
+        var checkedProcessId = checked((int)processId);
+        if (observedProcesses.ContainsKey(checkedProcessId))
+        {
+            return;
+        }
+
+        Process? process = null;
+        try
+        {
+            process = Process.GetProcessById(checkedProcessId);
+            _ = process.Handle;
+            observedProcesses.Add(checkedProcessId, process);
+        }
+        catch (ArgumentException)
+        {
+            process?.Dispose();
+            // The process exited between the SCM status query and handle open.
+        }
+        catch (InvalidOperationException)
+        {
+            process?.Dispose();
+            // The process exited between lookup and handle acquisition.
+        }
+        catch (Win32Exception exception)
+        {
+            process?.Dispose();
+            ThrowServiceFailure(exception.NativeErrorCode);
+        }
+    }
+
+    private static bool ProcessHasExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
+        }
+        catch (Win32Exception exception)
+        {
+            ThrowServiceFailure(exception.NativeErrorCode);
+            return false;
+        }
+    }
+
+    private static void ThrowServiceStopTimeout() =>
+        throw new SetupException(
+            SetupErrorCodes.ServiceFailed,
+            "Windows 서비스가 제한 시간 안에 종료되어 프로그램 파일을 해제하지 못했습니다.");
+
     private static void SetDescription(IntPtr service, string description)
     {
         var text = Marshal.StringToHGlobalUni(description ?? string.Empty);
@@ -586,9 +756,11 @@ public sealed partial class WindowsServiceManager : IServiceManager
         var commandPointer = IntPtr.Zero;
         try
         {
-            actionsPointer = actions.Count == 0
-                ? IntPtr.Zero
-                : Marshal.AllocHGlobal(checked(actionSize * actions.Count));
+            // SERVICE_FAILURE_ACTIONS only deletes an existing action array
+            // when cActions is zero and lpsaActions is non-null. A null
+            // pointer would leave the old restart actions unchanged.
+            actionsPointer = Marshal.AllocHGlobal(
+                GetRecoveryActionsAllocationSize(actions.Count));
             rebootMessagePointer = string.IsNullOrEmpty(recovery.RebootMessage)
                 ? IntPtr.Zero
                 : Marshal.StringToHGlobalUni(recovery.RebootMessage);
@@ -791,6 +963,24 @@ public sealed partial class WindowsServiceManager : IServiceManager
     private static void ThrowServiceFailure()
     {
         var error = Marshal.GetLastWin32Error();
+        ThrowServiceFailure(error);
+    }
+
+    internal static int GetRecoveryActionsAllocationSize(int actionCount)
+    {
+        if (actionCount is < 0 or > 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(actionCount));
+        }
+
+        var actionSize = Marshal.SizeOf<ScAction>();
+        return actionCount == 0
+            ? actionSize
+            : checked(actionSize * actionCount);
+    }
+
+    private static void ThrowServiceFailure(int error)
+    {
         throw new SetupException(
             SetupErrorCodes.ServiceFailed,
             $"Windows 서비스 작업에 실패했습니다. 오류 코드: {error}",

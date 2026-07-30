@@ -14,6 +14,7 @@ public sealed class SetupDiagnosticsService(
         CancellationToken cancellationToken)
     {
         var steps = new SetupStepRecorder();
+        AgentHealthProbeResult? agentHealth = null;
         try
         {
             if (!administratorChecker.IsAdministrator())
@@ -107,22 +108,34 @@ public sealed class SetupDiagnosticsService(
 
             if (service.Running)
             {
-                var ready = await healthProbe.WaitUntilReadyAsync(
+                agentHealth = await healthProbe.WaitUntilReadyAsync(
                     new Uri("https://127.0.0.1:18443/health/ready"),
                     expectedProductVersion: null,
-                    expectedProcessId: service.ProcessId,
+                    () => serviceManager.Capture(SetupConstants.ServiceName),
                     TimeSpan.FromSeconds(5),
                     cancellationToken);
+                steps.AddSafeDecisionCode(
+                    AgentDeploymentOrchestrator.AgentHealthDecisionCode(
+                        agentHealth.Value.Code));
                 steps.Add(new SetupStepResult(
-                    ready ? "AGENT_READY" : "AGENT_NOT_READY",
+                    agentHealth.Value.Ready ? "AGENT_READY" : "AGENT_NOT_READY",
                     "Agent 응답",
-                    ready ? SetupStepState.Succeeded : SetupStepState.Information,
-                    ready
-                        ? "현재 Agent가 정상 응답합니다."
-                        : "서비스는 실행 중이지만 준비 상태 응답을 받지 못했습니다."));
+                    agentHealth.Value.Ready
+                        ? SetupStepState.Succeeded
+                        : SetupStepState.Information,
+                    agentHealth.Value.Ready
+                        ? agentHealth.Value.RestartObserved
+                            ? "현재 Agent가 다시 시작된 뒤 정상 응답합니다."
+                            : "현재 Agent가 정상 응답합니다."
+                        : "서비스는 실행 중이지만 준비 상태 응답을 받지 못했습니다. " +
+                          $"진단 단계: {AgentDeploymentOrchestrator.AgentHealthDisplayName(agentHealth.Value.Code)}"));
             }
 
-            return SetupOperationResult.Success("사전 점검이 완료되었습니다.", steps);
+            return SetupOperationResult.Success("사전 점검이 완료되었습니다.", steps) with
+            {
+                AgentHealthCode = agentHealth?.Code.ToString(),
+                AgentRestartObserved = agentHealth?.RestartObserved ?? false
+            };
         }
         catch (OperationCanceledException)
         {

@@ -13,30 +13,60 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
     private const uint NoError = 0;
     private const uint InsufficientBuffer = 122;
     private readonly Func<HttpMessageHandler> _handlerFactory;
+    private readonly Func<int, int, ListenerOwnership> _listenerOwnership;
+    private readonly TimeSpan _retryDelay;
 
     public HttpsAgentHealthProbe()
-        : this(CreateHandler)
+        : this(
+            CreateHandler,
+            GetListenerOwnership,
+            TimeSpan.FromMilliseconds(500))
     {
     }
 
     internal HttpsAgentHealthProbe(Func<HttpMessageHandler> handlerFactory)
+        : this(
+            handlerFactory,
+            GetListenerOwnership,
+            TimeSpan.FromMilliseconds(500))
+    {
+    }
+
+    internal HttpsAgentHealthProbe(
+        Func<HttpMessageHandler> handlerFactory,
+        Func<int, int, ListenerOwnership> listenerOwnership,
+        TimeSpan retryDelay)
     {
         _handlerFactory = handlerFactory ??
                           throw new ArgumentNullException(nameof(handlerFactory));
+        _listenerOwnership = listenerOwnership ??
+                             throw new ArgumentNullException(nameof(listenerOwnership));
+        if (retryDelay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(retryDelay));
+        }
+
+        _retryDelay = retryDelay;
     }
 
-    public async Task<bool> WaitUntilReadyAsync(
+    public async Task<AgentHealthProbeResult> WaitUntilReadyAsync(
         Uri endpoint,
         string? expectedProductVersion,
-        int expectedProcessId,
+        Func<ServiceSnapshot> currentServiceSnapshot,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        ArgumentNullException.ThrowIfNull(currentServiceSnapshot);
         if (!endpoint.IsLoopback || endpoint.Scheme != Uri.UriSchemeHttps)
         {
             throw new ArgumentException(
                 "The native Setup health probe is restricted to loopback HTTPS.",
                 nameof(endpoint));
+        }
+        if (timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
         }
 
         using var handler = _handlerFactory();
@@ -46,43 +76,114 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
         };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
+        var lastCode = AgentHealthProbeCode.DeadlineExceeded;
+        var firstProcessId = 0;
+        var restartObserved = false;
 
         while (!deadline.IsCancellationRequested)
         {
+            ServiceSnapshot service;
             try
             {
-                if (expectedProcessId > 0 &&
-                    !OwnsListeningPort(expectedProcessId, endpoint.Port))
-                {
-                    await DelayBeforeRetry(deadline.Token, cancellationToken);
-                    continue;
-                }
+                service = currentServiceSnapshot();
+            }
+            catch
+            {
+                lastCode = AgentHealthProbeCode.ServiceInspectionFailed;
+                await DelayBeforeRetry(
+                    _retryDelay,
+                    deadline.Token,
+                    cancellationToken);
+                continue;
+            }
 
+            if (!service.Exists || !service.Running || service.ProcessId <= 0)
+            {
+                lastCode = AgentHealthProbeCode.ServiceUnavailable;
+                await DelayBeforeRetry(
+                    _retryDelay,
+                    deadline.Token,
+                    cancellationToken);
+                continue;
+            }
+
+            if (firstProcessId == 0)
+            {
+                firstProcessId = service.ProcessId;
+            }
+            else if (service.ProcessId != firstProcessId)
+            {
+                restartObserved = true;
+            }
+
+            var ownership = _listenerOwnership(service.ProcessId, endpoint.Port);
+            if (ownership != ListenerOwnership.OwnedByExpectedProcess)
+            {
+                lastCode = ownership switch
+                {
+                    ListenerOwnership.NotListening =>
+                        AgentHealthProbeCode.TcpNotListening,
+                    ListenerOwnership.OwnedByOtherProcess =>
+                        AgentHealthProbeCode.TcpOwnedByOtherProcess,
+                    _ => AgentHealthProbeCode.TcpOwnershipQueryFailed
+                };
+                await DelayBeforeRetry(
+                    _retryDelay,
+                    deadline.Token,
+                    cancellationToken);
+                continue;
+            }
+
+            try
+            {
                 using var readyRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
                 using var readyResponse = await client.SendAsync(
                     readyRequest,
                     HttpCompletionOption.ResponseHeadersRead,
                     deadline.Token);
-                if (readyResponse.StatusCode != HttpStatusCode.OK ||
-                    readyResponse.Content.Headers.ContentLength > MaximumReadinessBytes)
+                if (readyResponse.StatusCode != HttpStatusCode.OK)
                 {
-                    await DelayBeforeRetry(deadline.Token, cancellationToken);
+                    lastCode = AgentHealthProbeCode.HttpStatusInvalid;
+                    await DelayBeforeRetry(
+                        _retryDelay,
+                        deadline.Token,
+                        cancellationToken);
+                    continue;
+                }
+
+                if (readyResponse.Content.Headers.ContentLength >
+                    MaximumReadinessBytes)
+                {
+                    lastCode = AgentHealthProbeCode.PayloadTooLarge;
+                    await DelayBeforeRetry(
+                        _retryDelay,
+                        deadline.Token,
+                        cancellationToken);
                     continue;
                 }
 
                 if (expectedProductVersion is null)
                 {
-                    return true;
+                    return AgentHealthProbeResult.Success(restartObserved);
                 }
 
                 var readinessJson = await ReadBoundedAsync(
                     readyResponse.Content,
                     MaximumReadinessBytes,
                     deadline.Token);
-                if (readinessJson is not null &&
-                    IsExpectedReadiness(readinessJson, expectedProductVersion))
+                if (readinessJson is null)
                 {
-                    return true;
+                    lastCode = AgentHealthProbeCode.PayloadTooLarge;
+                }
+                else
+                {
+                    lastCode = ClassifyReadiness(
+                        readinessJson,
+                        expectedProductVersion);
+                    if (lastCode == AgentHealthProbeCode.Ready)
+                    {
+                        return AgentHealthProbeResult.Success(restartObserved);
+                    }
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -91,55 +192,78 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                 {
                     break;
                 }
+
+                lastCode = AgentHealthProbeCode.HttpsRequestFailed;
             }
             catch (HttpRequestException)
             {
-                // The listener can start after the service process. Retry while bounded.
+                lastCode = AgentHealthProbeCode.HttpsRequestFailed;
             }
             catch (JsonException)
             {
-                // A non-Agent or incomplete readiness payload is never accepted.
+                lastCode = AgentHealthProbeCode.PayloadInvalid;
             }
 
-            await DelayBeforeRetry(deadline.Token, cancellationToken);
+            await DelayBeforeRetry(
+                _retryDelay,
+                deadline.Token,
+                cancellationToken);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return false;
+        return AgentHealthProbeResult.Failure(lastCode, restartObserved);
     }
 
     internal static bool IsExpectedReadiness(string json, string expectedProductVersion)
+        => ClassifyReadiness(json, expectedProductVersion) ==
+           AgentHealthProbeCode.Ready;
+
+    internal static AgentHealthProbeCode ClassifyReadiness(
+        string json,
+        string expectedProductVersion)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        return root.ValueKind == JsonValueKind.Object &&
-               root.TryGetProperty("status", out var status) &&
-               status.ValueKind == JsonValueKind.String &&
-               string.Equals(
-                   status.GetString(),
-                   "ready",
-                   StringComparison.Ordinal) &&
-               root.TryGetProperty("apiVersion", out var apiVersion) &&
-               apiVersion.ValueKind == JsonValueKind.Number &&
-               apiVersion.TryGetInt32(out var api) &&
-               api == 4 &&
-               root.TryGetProperty("protocol", out var protocol) &&
-               protocol.ValueKind == JsonValueKind.String &&
-               string.Equals(
-                   protocol.GetString(),
-                   "https",
-                   StringComparison.Ordinal) &&
-               root.TryGetProperty("productVersion", out var version) &&
-               version.ValueKind == JsonValueKind.String &&
-               string.Equals(
-                   NormalizeVersion(version.GetString()),
-                   NormalizeVersion(expectedProductVersion),
-                   StringComparison.OrdinalIgnoreCase);
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("status", out var status) ||
+            status.ValueKind != JsonValueKind.String ||
+            !string.Equals(status.GetString(), "ready", StringComparison.Ordinal) ||
+            !root.TryGetProperty("apiVersion", out var apiVersion) ||
+            apiVersion.ValueKind != JsonValueKind.Number ||
+            !apiVersion.TryGetInt32(out var api) ||
+            !root.TryGetProperty("protocol", out var protocol) ||
+            protocol.ValueKind != JsonValueKind.String ||
+            !root.TryGetProperty("productVersion", out var version) ||
+            version.ValueKind != JsonValueKind.String)
+        {
+            return AgentHealthProbeCode.PayloadInvalid;
+        }
+
+        if (api != 4)
+        {
+            return AgentHealthProbeCode.ApiVersionMismatch;
+        }
+
+        if (!string.Equals(
+                protocol.GetString(),
+                "https",
+                StringComparison.Ordinal))
+        {
+            return AgentHealthProbeCode.ProtocolMismatch;
+        }
+
+        return string.Equals(
+            NormalizeVersion(version.GetString()),
+            NormalizeVersion(expectedProductVersion),
+            StringComparison.OrdinalIgnoreCase)
+            ? AgentHealthProbeCode.Ready
+            : AgentHealthProbeCode.ProductVersionMismatch;
     }
 
     private static HttpMessageHandler CreateHandler() =>
         new HttpClientHandler
         {
+            UseProxy = false,
             ServerCertificateCustomValidationCallback = (_, _, _, _) => true
         };
 
@@ -183,12 +307,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
     }
 
     private static async Task DelayBeforeRetry(
+        TimeSpan retryDelay,
         CancellationToken deadlineToken,
         CancellationToken callerToken)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(500), deadlineToken);
+            await Task.Delay(retryDelay, deadlineToken);
         }
         catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
         {
@@ -196,11 +321,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
         }
     }
 
-    private static bool OwnsListeningPort(int expectedProcessId, int port)
+    private static ListenerOwnership GetListenerOwnership(
+        int expectedProcessId,
+        int port)
     {
-        if (!OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows() || expectedProcessId <= 0)
         {
-            return false;
+            return ListenerOwnership.QueryFailed;
         }
 
         uint size = 0;
@@ -211,9 +338,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             AddressFamilyIpv4,
             TcpTableOwnerPidListener,
             0);
+        if (first == NoError && size == 0)
+        {
+            return ListenerOwnership.NotListening;
+        }
         if (first != InsufficientBuffer || size == 0)
         {
-            return false;
+            return ListenerOwnership.QueryFailed;
         }
 
         var table = Marshal.AllocHGlobal(checked((int)size));
@@ -227,12 +358,13 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     TcpTableOwnerPidListener,
                     0) != NoError)
             {
-                return false;
+                return ListenerOwnership.QueryFailed;
             }
 
             var count = Marshal.ReadInt32(table);
             var rowSize = Marshal.SizeOf<MibTcpRowOwnerPid>();
             var rowPointer = IntPtr.Add(table, sizeof(uint));
+            var matchingPortFound = false;
             for (var index = 0; index < count; index++)
             {
                 var row = Marshal.PtrToStructure<MibTcpRowOwnerPid>(
@@ -241,16 +373,30 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     unchecked((short)(row.LocalPort & 0xFFFF)));
                 if (row.OwningPid == expectedProcessId && localPort == port)
                 {
-                    return true;
+                    return ListenerOwnership.OwnedByExpectedProcess;
+                }
+                if (localPort == port)
+                {
+                    matchingPortFound = true;
                 }
             }
 
-            return false;
+            return matchingPortFound
+                ? ListenerOwnership.OwnedByOtherProcess
+                : ListenerOwnership.NotListening;
         }
         finally
         {
             Marshal.FreeHGlobal(table);
         }
+    }
+
+    internal enum ListenerOwnership : byte
+    {
+        OwnedByExpectedProcess = 0,
+        NotListening = 1,
+        OwnedByOtherProcess = 2,
+        QueryFailed = 3
     }
 
     [StructLayout(LayoutKind.Sequential)]

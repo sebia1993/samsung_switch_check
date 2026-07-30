@@ -2,8 +2,8 @@
 
 ## 릴리스 계약
 
-- 현재 버전: `0.10.10-poc`
-- 태그: annotated tag `v0.10.10-poc`
+- 현재 버전: `0.10.11-poc`
+- 태그: annotated tag `v0.10.11-poc`
 - 대상: Windows x64, self-contained, single-file managed publish, untrimmed
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP 정확히 두 개
 - 공개 패키지: PowerShell·CMD·개발 설정·DB·인증정보 제외
@@ -12,15 +12,15 @@
 공개 Asset:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.10-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.10-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.10.11-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.10.11-poc-win-x64.zip
 ```
 
 내부 검증 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.10-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.10-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.10.11-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.10.11-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -106,7 +106,7 @@ python .\tools\build-user-manual.py `
 python .\tools\render-user-manual-pdf.py `
   --input .\docs\SamsungSwitchWatch_User_Manual_KO.docx `
   --output .\docs\SamsungSwitchWatch_User_Manual_KO.pdf `
-  --render-dir .\tmp\manual-render-0.10.10
+  --render-dir .\tmp\manual-render-0.10.11
 ```
 
 DOCX는 저장소 편집 원본이고 공개 패키지에는 넣지 않습니다. PDF는 두 ZIP에 포함합니다.
@@ -115,13 +115,13 @@ QA 페이지 PNG는 시각 검사 후 임시 폴더에만 두며 커밋하지 �
 ## 로컬 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.10-poc
+.\scripts\build-release.ps1 -Version 0.10.11-poc
 ```
 
 진단용 dirty 빌드는 게시하지 않습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.10-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.10.11-poc -AllowDirty
 ```
 
 빌드 스크립트는 다음 순서로 실행됩니다.
@@ -152,7 +152,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.10_POC_KO.md
+RELEASE_NOTES_0.10.11_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -178,7 +178,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.10_POC_KO.md
+RELEASE_NOTES_0.10.11_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -193,7 +193,7 @@ Viewer는 설치하지 않고 압축 해제한 폴더에서 EXE를 직접 실행
 $commit = (git rev-parse HEAD).Trim()
 .\scripts\test-package-contract.ps1 `
   -ReleaseDirectory .\artifacts\release `
-  -Version 0.10.10-poc `
+  -Version 0.10.11-poc `
   -ExpectedSourceCommit $commit
 .\scripts\test-release-workflow-contract.ps1
 ```
@@ -212,8 +212,8 @@ $commit = (git rev-parse HEAD).Trim()
 ## 태그와 게시
 
 ```powershell
-git tag -a v0.10.10-poc -m "Samsung Switch Watch v0.10.10-poc"
-git push origin v0.10.10-poc
+git tag -a v0.10.11-poc -m "Samsung Switch Watch v0.10.11-poc"
+git push origin v0.10.11-poc
 ```
 
 Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객체와 peeled commit이
@@ -226,10 +226,10 @@ Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객
 ## 게시 후 확인
 
 ```powershell
-$tag = 'v0.10.10-poc'
+$tag = 'v0.10.11-poc'
 $expected = @(
-  'SamsungSwitchWatch-Agent-0.10.10-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.10.10-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.10.11-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.10.11-poc-win-x64.zip'
 ) | Sort-Object
 $release = gh release view $tag --json isDraft,isPrerelease,assets,url | ConvertFrom-Json
 $actual = @($release.assets | ForEach-Object { $_.name } | Sort-Object)

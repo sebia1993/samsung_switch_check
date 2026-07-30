@@ -280,6 +280,13 @@ internal static class SetupFailureDiagnosticFormatter
             $"PrimaryFailureCode={SafeToken(
                 context.Result.PrimaryFailureCode ??
                 context.Recovery.PrimaryFailureCode)}",
+            $"AgentHealthCode={SafeToken(
+                context.Result.AgentHealthCode ??
+                context.Recovery.AgentHealthCode)}",
+            $"AgentRestartObserved={
+                BooleanToken(
+                    context.Result.AgentRestartObserved ||
+                    context.Recovery.AgentRestartObserved)}",
             $"RollbackFailureCodes={
                 (rollbackCodes.Length == 0 ? "none" : string.Join(",", rollbackCodes))}",
             $"RecoveryJournalExists={
@@ -513,6 +520,12 @@ internal static class SetupFieldDiagnosticFormatter
                     : string.Join(",", firewallDecisionCodes))}",
             $"LocalTcp18443={LocalTcpStatus(context.Result, stages)}",
             $"Readiness={ReadinessStatus(context.Result, stages)}",
+            $"AgentHealthCode={AgentHealthCode(context.Result, context.Recovery)}",
+            $"AgentRestartObserved={
+                (context.Result.AgentRestartObserved ||
+                 context.Recovery.AgentRestartObserved
+                    ? "TRUE"
+                    : "FALSE")}",
             $"StageCount={stages.Count.ToString(CultureInfo.InvariantCulture)}"
         };
 
@@ -570,8 +583,36 @@ internal static class SetupFieldDiagnosticFormatter
             LocalTcpStatus(context.Result, stages),
             ReadinessStatus(context.Result, stages),
             PackageValidation(context.Result, stages),
-            BuildFirewallDecisionCodes(context.Result, stages));
+            BuildFirewallDecisionCodes(context.Result, stages),
+            reserved: AgentHealthSwd1Code(context.Result, context.Recovery));
         return Swd1SupportCode.Encode(payload);
+    }
+
+    private static string AgentHealthCode(
+        SetupOperationResult result,
+        PendingRecoveryInspection recovery)
+    {
+        var value = result.AgentHealthCode ?? recovery.AgentHealthCode;
+        return Enum.TryParse<AgentHealthProbeCode>(
+            value,
+            ignoreCase: false,
+            out var code)
+            ? code.ToString().ToUpperInvariant()
+            : NotRun;
+    }
+
+    private static byte AgentHealthSwd1Code(
+        SetupOperationResult result,
+        PendingRecoveryInspection recovery)
+    {
+        var value = result.AgentHealthCode ?? recovery.AgentHealthCode;
+        return Enum.TryParse<AgentHealthProbeCode>(
+                   value,
+                   ignoreCase: false,
+                   out var code) &&
+               code != AgentHealthProbeCode.Ready
+            ? (byte)code
+            : (byte)Swd1AgentHealthCode.NotRecorded;
     }
 
     private static IReadOnlyList<SetupStageDiagnostic> BuildStages(

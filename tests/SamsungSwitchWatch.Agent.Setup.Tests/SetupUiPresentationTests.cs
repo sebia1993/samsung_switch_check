@@ -579,6 +579,8 @@ public sealed class SetupUiPresentationTests
             text);
         Assert.Contains("LocalTcp18443=NOT_RUN", text);
         Assert.Contains("Readiness=NOT_RUN", text);
+        Assert.Contains("AgentHealthCode=NOT_RUN", text);
+        Assert.Contains("AgentRestartObserved=FALSE", text);
         Assert.Contains("StageCount=3", text);
         Assert.Contains("Stage.01.Code=PACKAGE_VALID", text);
         Assert.Contains("Stage.01.Status=SUCCESS", text);
@@ -631,6 +633,55 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("Service=RUNNING_READY", text);
         Assert.Contains("LocalTcp18443=PASS", text);
         Assert.Contains("Readiness=PASS", text);
+        Assert.Contains("AgentHealthCode=NOT_RUN", text);
+        Assert.Contains("AgentRestartObserved=FALSE", text);
+    }
+
+    [Fact]
+    public void HealthFailureDiagnosticsAndSupportCodePreserveSafeCause()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.HealthFailed,
+            "private detail",
+            []) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.HealthFailed,
+            AgentHealthCode =
+                AgentHealthProbeCode.TcpOwnedByOtherProcess.ToString(),
+            AgentRestartObserved = true
+        };
+
+        var failureText = SetupFailureDiagnosticFormatter.Format(
+            new SetupFailureDiagnosticContext(
+                "0.10.11-poc",
+                DateTimeOffset.UnixEpoch,
+                "install",
+                result,
+                PendingRecoveryInspection.None));
+        var fieldContext = new SetupFieldDiagnosticContext(
+            "0.10.11-poc",
+            DateTimeOffset.UnixEpoch,
+            "10.0.26100.0",
+            "X64",
+            "install",
+            TimeSpan.Zero,
+            result,
+            PendingRecoveryInspection.None);
+        var fieldText = SetupFieldDiagnosticFormatter.Format(fieldContext);
+        var code = SetupFieldDiagnosticFormatter.CreateSupportCode(fieldContext);
+
+        Assert.Contains(
+            "AgentHealthCode=TcpOwnedByOtherProcess",
+            failureText);
+        Assert.Contains("AgentRestartObserved=true", failureText);
+        Assert.Contains(
+            "AgentHealthCode=TCPOWNEDBYOTHERPROCESS",
+            fieldText);
+        Assert.Contains("AgentRestartObserved=TRUE", fieldText);
+        Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
+        Assert.Equal(
+            Swd1AgentHealthCode.TcpOwnedByOtherProcess,
+            decoded!.Agent!.Value.HealthCode);
     }
 
     [Fact]

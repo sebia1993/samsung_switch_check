@@ -26,6 +26,8 @@ public sealed record DeploymentJournal(
     public string? PrimaryFailureCode { get; init; }
     public string? PrimaryFailureMessage { get; init; }
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
+    public string? AgentHealthCode { get; init; }
+    public bool AgentRestartObserved { get; init; }
 }
 
 internal sealed class DeploymentJournalCleanupVerificationException

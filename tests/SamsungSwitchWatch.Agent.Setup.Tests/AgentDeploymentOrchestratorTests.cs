@@ -41,6 +41,37 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Contains(
             fixture.FileSystem.AccessRequests,
             request => request.Kind == DirectoryAccessKind.AgentDataModify);
+        Assert.True(
+            fixture.Services.Operations.IndexOf("install") <
+            fixture.Services.Operations.IndexOf("recovery-disabled"));
+        Assert.True(
+            fixture.Services.Operations.IndexOf("recovery-disabled") <
+            fixture.Services.Operations.IndexOf("start"));
+        Assert.True(
+            fixture.Services.Operations.IndexOf("start") <
+            fixture.Services.Operations.IndexOf("recovery"));
+    }
+
+    [Fact]
+    public async Task DeployAsync_ExistingPendingServiceStopsBeforeProgramSwap()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services = new FakeServiceManager(
+            fixture.Services.State with
+            {
+                Running = false,
+                ProcessId = 3210
+            });
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.True(
+            fixture.Services.Operations.IndexOf("stop") <
+            fixture.Services.Operations.IndexOf("install"));
     }
 
     [Fact]
@@ -75,6 +106,35 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Contains(
             result.Steps,
             step => step.Code == "ROLLBACK_COMPLETED");
+        Assert.Contains("recovery-disabled", fixture.Services.Operations);
+        Assert.DoesNotContain("recovery", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_HealthFailureStopsPendingServiceBeforeRollbackMove()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var health = new FakeHealthProbe(
+            ready: false,
+            beforeResult: () => fixture.Services.SetState(
+                fixture.Services.State with
+                {
+                    Running = false,
+                    ProcessId = 9876
+                }));
+        var orchestrator = fixture.CreateOrchestrator(health);
+
+        var result = await orchestrator.DeployAsync(
+            new SetupRequest("192.168.1.20", ["10.20.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        var startIndex = fixture.Services.Operations.IndexOf("start");
+        var rollbackStopIndex = fixture.Services.Operations.FindIndex(
+            startIndex + 1,
+            operation => operation == "stop");
+        Assert.True(rollbackStopIndex > startIndex);
     }
 
     [Fact]
@@ -93,6 +153,31 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.False(Directory.Exists(fixture.Paths.DataDirectory));
         Assert.False(fixture.Services.State.Exists);
         Assert.False(fixture.Firewall.State.Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_FreshHealthFailureRetriesTransientProgramMoveLock()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.FileSystem.MoveFailuresRemaining = 1;
+        fixture.FileSystem.MoveFailurePredicate = (_, destination) =>
+            Path.GetFileName(destination)
+                .Contains(".__failed_", StringComparison.Ordinal);
+
+        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.HealthFailed, result.Code);
+        Assert.Empty(result.RollbackFailureCodes);
+        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.False(Directory.Exists(fixture.Paths.DataDirectory));
+        Assert.False(fixture.Services.State.Exists);
+        Assert.False(new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths).Exists);
     }
 
     [Fact]
@@ -668,7 +753,7 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
-    public async Task DeployAsync_RollbackFileMoveFailureNeverRestartsPreviousService()
+    public async Task DeployAsync_TransientRollbackFileMoveFailureRestoresPreviousService()
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
@@ -682,13 +767,50 @@ public sealed class AgentDeploymentOrchestratorTests
             CancellationToken.None);
 
         Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.HealthFailed, result.Code);
+        Assert.Equal(SetupErrorCodes.HealthFailed, result.PrimaryFailureCode);
+        Assert.DoesNotContain(
+            SetupErrorCodes.RollbackFileRestoreFailed,
+            result.RollbackFailureCodes);
+        Assert.Contains("restore", fixture.Services.Operations);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+    }
+
+    [Fact]
+    public async Task DeployAsync_PersistentRollbackFileMoveFailureNeverRestartsPreviousService()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.MoveFailuresRemaining = 10;
+        fixture.FileSystem.MoveFailurePredicate = (_, destination) =>
+            Path.GetFileName(destination)
+                .Contains(".__failed_", StringComparison.Ordinal);
+
+        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
         Assert.Equal(SetupErrorCodes.HealthFailed, result.PrimaryFailureCode);
+        Assert.Equal(
+            AgentHealthProbeCode.DeadlineExceeded.ToString(),
+            result.AgentHealthCode);
         Assert.Contains(
             SetupErrorCodes.RollbackFileRestoreFailed,
             result.RollbackFailureCodes);
         Assert.DoesNotContain("restore", fixture.Services.Operations);
         Assert.False(fixture.Services.State.Running);
+        var pending = new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths).Read();
+        Assert.Equal(
+            AgentHealthProbeCode.DeadlineExceeded.ToString(),
+            pending.AgentHealthCode);
+        Assert.False(pending.AgentRestartObserved);
     }
 
     [Fact]
@@ -1348,6 +1470,8 @@ public sealed class AgentDeploymentOrchestratorTests
         json.Remove(nameof(DeploymentJournal.PrimaryFailureCode));
         json.Remove(nameof(DeploymentJournal.PrimaryFailureMessage));
         json.Remove(nameof(DeploymentJournal.RollbackFailureCodes));
+        json.Remove(nameof(DeploymentJournal.AgentHealthCode));
+        json.Remove(nameof(DeploymentJournal.AgentRestartObserved));
         File.WriteAllText(journalStore.JournalPath, json.ToJsonString());
 
         var restored = journalStore.Read();
@@ -1356,6 +1480,8 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Null(restored.PrimaryFailureCode);
         Assert.Null(restored.PrimaryFailureMessage);
         Assert.Empty(restored.RollbackFailureCodes);
+        Assert.Null(restored.AgentHealthCode);
+        Assert.False(restored.AgentRestartObserved);
     }
 
     [Theory]
@@ -1889,12 +2015,16 @@ public sealed class AgentDeploymentOrchestratorTests
         public FakeMachineDeploymentLock MachineLock { get; } = new();
 
         public AgentDeploymentOrchestrator CreateOrchestrator(bool ready) =>
+            CreateOrchestrator(new FakeHealthProbe(ready));
+
+        public AgentDeploymentOrchestrator CreateOrchestrator(
+            IAgentHealthProbe healthProbe) =>
             new(
                 new AgentPackageValidator(FileSystem),
                 FileSystem,
                 Services,
                 Firewall,
-                new FakeHealthProbe(ready),
+                healthProbe,
                 new FakeAdministratorChecker(),
                 MachineLock,
                 Paths);
