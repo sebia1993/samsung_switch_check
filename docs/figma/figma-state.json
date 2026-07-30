@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260729-v12-sanitized-field-diagnostic-figma-synced",
+  "runId": "ssw-20260730-v13-recovery-evidence-cleanup-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -41,14 +41,14 @@
     "agentSetupSamePcHelperV10": "54:363",
     "agentSetupRecoveryRequiredV11": "58:72",
     "agentSetupRecoveryCompleteV11": "58:97",
-    "agentSetupRecoveryFailedV11": "58:120",
+    "agentSetupRecoveryFailedV13": "58:120",
     "agentSetupUnsafeRecoveryStateV11": "58:147",
     "agentSetupSanitizedDiagnosticV12": "60:340",
     "httpsConnectionSanitizedDiagnosticV12": "62:99",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v12-sanitized-field-diagnostic",
+    "version": "v13-recovery-evidence-cleanup",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -108,6 +108,16 @@
     "automaticInstallAfterRecovery": false,
     "primaryFailureSeparated": true,
     "rollbackStageFailuresSeparated": true,
+    "cleanupRetryBounded": true,
+    "freshJournalCheckRequiredForSuccess": true,
+    "installBlockedUntilRecoveryVerified": true,
+    "retryableCleanupFailureAction": "복구 다시 시도",
+    "sanitizedCleanupFailureCodes": [
+      "ROLLBACK_STAGING_CLEANUP_FAILED",
+      "ROLLBACK_BACKUP_CLEANUP_FAILED",
+      "ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED",
+      "ROLLBACK_JOURNAL_CLEANUP_FAILED"
+    ],
     "unsafeStateRequiresAdministrator": true,
     "diagnosticsClipboardOnly": true,
     "diagnosticsVisibleOnFailureOnly": true,

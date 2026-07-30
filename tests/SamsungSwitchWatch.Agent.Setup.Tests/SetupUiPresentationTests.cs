@@ -77,7 +77,7 @@ public sealed class SetupUiPresentationTests
             inspection);
 
         Assert.False(state.InstallEnabled);
-        Assert.True(state.RecoverVisible);
+        Assert.False(state.RecoverVisible);
         Assert.False(state.RecoverEnabled);
     }
 
@@ -92,6 +92,211 @@ public sealed class SetupUiPresentationTests
         Assert.True(state.InstallEnabled);
         Assert.False(state.RecoverVisible);
         Assert.False(state.RecoverEnabled);
+    }
+
+    [Fact]
+    public void RecoveryCompletion_SuccessWithoutJournalIsReadyForManualInstall()
+    {
+        var result = SetupOperationResult.Success(
+            "recovery completed",
+            [
+                new SetupStepResult(
+                    "ROLLBACK_COMPLETED",
+                    "이전 상태 복구",
+                    SetupStepState.Succeeded,
+                    "completed")
+            ]);
+
+        var completion = SetupRecoveryCompletionPolicy.Evaluate(
+            result,
+            PendingRecoveryInspection.None);
+        var actions = SetupRecoveryActionPolicy.Evaluate(
+            diagnosticsOnly: false,
+            busy: false,
+            PendingRecoveryInspection.None);
+
+        Assert.True(completion.ReadyForInstall);
+        Assert.False(completion.UseInspectionResult);
+        Assert.Equal(
+            SetupRecoveryCompletionSeverity.Success,
+            completion.Severity);
+        Assert.Equal("복구 완료 · 설치 준비됨", completion.StatusText);
+        Assert.True(actions.InstallEnabled);
+        Assert.False(actions.RecoverVisible);
+    }
+
+    [Fact]
+    public void RecoveryCompletion_SuccessWithPendingJournalRequiresRecheck()
+    {
+        var result = SetupOperationResult.Success(
+            "recovery API completed",
+            [
+                new SetupStepResult(
+                    "ROLLBACK_COMPLETED",
+                    "이전 상태 복구",
+                    SetupStepState.Succeeded,
+                    "completed")
+            ]);
+        var inspection = new PendingRecoveryInspection(
+            Exists: true,
+            CanRecover: true,
+            SetupErrorCodes.RecoveryRequired,
+            "journal remains");
+
+        var completion = SetupRecoveryCompletionPolicy.Evaluate(
+            result,
+            inspection);
+        var actions = SetupRecoveryActionPolicy.Evaluate(
+            diagnosticsOnly: false,
+            busy: false,
+            inspection);
+
+        Assert.False(completion.ReadyForInstall);
+        Assert.True(completion.UseInspectionResult);
+        Assert.Equal(
+            SetupRecoveryCompletionSeverity.Warning,
+            completion.Severity);
+        Assert.Contains(
+            SetupErrorCodes.RecoveryRequired,
+            completion.StatusText,
+            StringComparison.Ordinal);
+        Assert.False(actions.InstallEnabled);
+        Assert.True(actions.RecoverVisible);
+        Assert.True(actions.RecoverEnabled);
+    }
+
+    [Fact]
+    public void RecoveryCompletion_FailureWithPendingJournalPreservesOriginalFailureRows()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.RollbackFailed,
+            "rollback failed",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.ServiceFailed,
+                    "설치 실패",
+                    SetupStepState.Failed,
+                    "service failed")
+            ]) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.ServiceFailed,
+            PrimaryFailureMessage = "original install failure",
+            RollbackFailureCodes =
+            [
+                SetupErrorCodes.RollbackFileRestoreFailed
+            ]
+        };
+        var inspection = new PendingRecoveryInspection(
+            Exists: true,
+            CanRecover: true,
+            SetupErrorCodes.RecoveryRequired,
+            "retry is safe");
+
+        var completion = SetupRecoveryCompletionPolicy.Evaluate(
+            result,
+            inspection);
+        var rows = SetupResultPresentation.BuildSteps(result);
+        var actions = SetupRecoveryActionPolicy.Evaluate(
+            diagnosticsOnly: false,
+            busy: false,
+            inspection);
+
+        Assert.False(completion.ReadyForInstall);
+        Assert.False(completion.UseInspectionResult);
+        Assert.Equal(
+            SetupRecoveryCompletionSeverity.Error,
+            completion.Severity);
+        Assert.Equal(
+            $"복구 실패 · {SetupErrorCodes.RollbackFailed}",
+            completion.StatusText);
+        Assert.Equal(
+            "설치는 계속 잠겨 있습니다. 아래 원래 실패 원인과 복구 실패 단계를 확인하세요.",
+            completion.GuidanceText);
+        Assert.False(actions.InstallEnabled);
+        Assert.True(actions.RecoverVisible);
+        Assert.True(actions.RecoverEnabled);
+        Assert.Contains(
+            rows,
+            row => row.Code == SetupErrorCodes.ServiceFailed);
+        Assert.Contains(
+            rows,
+            row =>
+                row.Code ==
+                SetupErrorCodes.RollbackFileRestoreFailed);
+    }
+
+    [Fact]
+    public void RecoveryCompletion_UnsafePendingJournalDisablesRecoveryAndInstall()
+    {
+        var result = SetupOperationResult.Success(
+            "recovery API completed",
+            [
+                new SetupStepResult(
+                    "ROLLBACK_COMPLETED",
+                    "이전 상태 복구",
+                    SetupStepState.Succeeded,
+                    "completed")
+            ]);
+        var inspection = new PendingRecoveryInspection(
+            Exists: true,
+            CanRecover: false,
+            SetupErrorCodes.RecoveryRequired,
+            "unsafe journal");
+
+        var completion = SetupRecoveryCompletionPolicy.Evaluate(
+            result,
+            inspection);
+        var actions = SetupRecoveryActionPolicy.Evaluate(
+            diagnosticsOnly: false,
+            busy: false,
+            inspection);
+
+        Assert.False(completion.ReadyForInstall);
+        Assert.True(completion.UseInspectionResult);
+        Assert.Equal(
+            SetupRecoveryCompletionSeverity.Error,
+            completion.Severity);
+        Assert.Contains("상태 확인 실패", completion.StatusText);
+        Assert.False(actions.InstallEnabled);
+        Assert.False(actions.RecoverVisible);
+        Assert.False(actions.RecoverEnabled);
+    }
+
+    [Fact]
+    public void BuildSteps_TargetSpecificCleanupFailureReplacesGenericCleanupRow()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.RollbackFailed,
+            "이전 설치 상태를 완전히 복구하지 못했습니다.",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.RollbackEvidenceCleanupFailed,
+                    "복구 자료 정리",
+                    SetupStepState.Failed,
+                    "복구 자료를 정리하지 못했습니다."),
+                new SetupStepResult(
+                    SetupErrorCodes.RollbackJournalCleanupFailed,
+                    "복구 기록 정리",
+                    SetupStepState.Failed,
+                    "복구 작업 기록을 정리하지 못했습니다.")
+            ]) with
+        {
+            RollbackFailureCodes =
+            [
+                SetupErrorCodes.RollbackEvidenceCleanupFailed,
+                SetupErrorCodes.RollbackJournalCleanupFailed
+            ]
+        };
+
+        var rows = SetupResultPresentation.BuildSteps(result);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(SetupErrorCodes.RollbackJournalCleanupFailed, row.Code);
+        Assert.Equal("복구 기록 정리", row.Label);
+        Assert.Contains("작업 기록", row.Message);
+        Assert.DoesNotContain(
+            rows,
+            item => item.Code == SetupErrorCodes.RollbackEvidenceCleanupFailed);
     }
 
     [Fact]
@@ -467,6 +672,43 @@ public sealed class SetupUiPresentationTests
         Assert.DoesNotContain("DOMAIN", text);
         Assert.DoesNotContain("operator", text);
         Assert.DoesNotContain("password", text);
+    }
+
+    [Theory]
+    [InlineData(SetupErrorCodes.RollbackStagingCleanupFailed)]
+    [InlineData(SetupErrorCodes.RollbackBackupCleanupFailed)]
+    [InlineData(SetupErrorCodes.RollbackFailedDirectoryCleanupFailed)]
+    [InlineData(SetupErrorCodes.RollbackJournalCleanupFailed)]
+    public void FieldDiagnostic_PreservesSanitizedCleanupStageCode(string code)
+    {
+        var steps = new SetupStepRecorder();
+        steps.Add(new SetupStepResult(
+            code,
+            "복구 정리",
+            SetupStepState.Failed,
+            "안전한 메시지"));
+        var result = SetupOperationResult.Failure(
+            code,
+            "복구 실패",
+            steps);
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.9-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "recovery",
+                TimeSpan.Zero,
+                result,
+                PendingRecoveryInspection.None));
+
+        Assert.Contains($"Stage.01.Code={code}", text);
+        Assert.Contains($"ErrorCode={code}", text);
+        Assert.Contains("FailedStage=RECOVERY", text);
+        Assert.Contains(
+            "RecommendedActionCode=RUN_OR_REVIEW_RECOVERY",
+            text);
     }
 
     [Fact]

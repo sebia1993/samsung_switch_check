@@ -235,6 +235,12 @@ Viewer가 종료되면 감시도 중단되는 구조가 현장 운영 요구와 
 - [ ] 작업 기록 손상 또는 현재 상태 불일치에서는 복구와 설치가 모두 차단되고 관리자 안내가 표시됨
 - [ ] `이전 상태 복구` 성공 뒤 설치 버튼은 다시 활성화되지만 설치가 자동으로 시작되지 않음
 - [ ] 복구 성공 뒤 운영자가 검사를 다시 확인하고 설치 또는 업데이트를 별도로 실행함
+- [ ] staging·backup·failed·journal 정리는 정확한 검증 대상만 최대 3회 시도하고 실패한 시도 사이 250ms 대기함
+- [ ] 삭제 API가 성공해도 대상이 남아 있으면 복구 성공으로 표시하지 않음
+- [ ] 복구 호출 성공 뒤 새 작업 기록 검사에서 journal이 남아 있으면 설치 버튼이 계속 비활성화됨
+- [ ] staging·backup·failed·journal 중 정리 실패 대상이 실제 경로 없이 안전 단계로 구분됨
+- [ ] 대상별 단계가 `ROLLBACK_STAGING_CLEANUP_FAILED`, `ROLLBACK_BACKUP_CLEANUP_FAILED`,
+      `ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED`, `ROLLBACK_JOURNAL_CLEANUP_FAILED`로 구분됨
 - [ ] 설치·업데이트 최초 실패 원인과 rollback 단계별 실패 원인이 서로 구분되어 표시됨
 - [ ] `SETUP_ROLLBACK_FAILED`가 같은 결과 행에 중복 표시되지 않음
 - [ ] 프로그램 복원이 불완전하면 이전 Agent 서비스를 다시 시작하지 않음

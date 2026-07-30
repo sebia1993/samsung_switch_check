@@ -176,7 +176,7 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
-        fixture.FileSystem.JournalDeleteFailuresRemaining = 2;
+        fixture.FileSystem.JournalDeleteFailuresRemaining = 6;
         var journalStore = new DeploymentJournalStore(
             fixture.FileSystem,
             fixture.Paths);
@@ -232,6 +232,285 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Equal("new-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
         Assert.True(fixture.Services.State.Running);
         Assert.False(journalStore.Exists);
+    }
+
+    [Fact]
+    public async Task RecoverAsync_CommittedBackupCleanupRetriesAndNextDeploySucceeds()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        Directory.CreateDirectory(pending.BackupDirectory);
+        File.WriteAllText(
+            Path.Combine(pending.BackupDirectory, "old-agent.txt"),
+            "old-agent");
+        fixture.FileSystem.BackupDirectoryCleanupFailuresRemaining = 2;
+
+        var orchestrator = fixture.CreateOrchestrator(ready: true);
+        var recovery = await orchestrator.RecoverAsync(CancellationToken.None);
+
+        Assert.True(recovery.Succeeded);
+        Assert.Equal(3, fixture.FileSystem.BackupDirectoryCleanupAttempts);
+        Assert.Equal(
+            2,
+            fixture.FileSystem.AccessRequests.Count(request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    pending.BackupDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly));
+        Assert.False(Directory.Exists(pending.BackupDirectory));
+        Assert.False(journalStore.Exists);
+
+        var deployment = await orchestrator.DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(deployment.Succeeded);
+        Assert.Equal("new-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.False(journalStore.Exists);
+    }
+
+    [Fact]
+    public async Task RecoverAsync_DirectoryDeleteIOExceptionWithFalseProbeRetries()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        Directory.CreateDirectory(pending.BackupDirectory);
+        fixture.FileSystem.BackupDirectoryCleanupFailuresRemaining = 1;
+        fixture.FileSystem
+            .HideCleanupDirectoryAfterDeleteFailureUntilAccessNormalization = true;
+        fixture.FileSystem.KeepFalseProbeAfterAccessNormalization = true;
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, fixture.FileSystem.BackupDirectoryCleanupAttempts);
+        Assert.Single(
+            fixture.FileSystem.AccessRequests,
+            request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    pending.BackupDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly);
+        Assert.False(Directory.Exists(pending.BackupDirectory));
+        Assert.False(journalStore.Exists);
+    }
+
+    [Theory]
+    [InlineData("staging", SetupErrorCodes.RollbackStagingCleanupFailed)]
+    [InlineData("backup", SetupErrorCodes.RollbackBackupCleanupFailed)]
+    [InlineData("failed", SetupErrorCodes.RollbackFailedDirectoryCleanupFailed)]
+    public async Task RecoverAsync_PersistentCommittedDirectoryCleanupFailsClosed(
+        string target,
+        string expectedCode)
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        var targetPath = target switch
+        {
+            "staging" => pending.StagingDirectory,
+            "backup" => pending.BackupDirectory,
+            _ => pending.FailedDirectory
+        };
+        Directory.CreateDirectory(targetPath);
+        switch (target)
+        {
+            case "staging":
+                fixture.FileSystem.StagingDirectoryCleanupFailuresRemaining = 10;
+                break;
+            case "backup":
+                fixture.FileSystem.BackupDirectoryCleanupFailuresRemaining = 10;
+                break;
+            default:
+                fixture.FileSystem.FailedDirectoryCleanupFailuresRemaining = 10;
+                break;
+        }
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
+        Assert.Contains(expectedCode, result.RollbackFailureCodes);
+        Assert.Contains(
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            result.RollbackFailureCodes);
+        Assert.True(journalStore.Exists);
+        Assert.True(Directory.Exists(targetPath));
+        Assert.Equal(
+            2,
+            fixture.FileSystem.AccessRequests.Count(request =>
+                PhysicalSetupFileSystem.SamePath(request.Path, targetPath) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly));
+        Assert.Equal(
+            3,
+            target switch
+            {
+                "staging" => fixture.FileSystem.StagingDirectoryCleanupAttempts,
+                "backup" => fixture.FileSystem.BackupDirectoryCleanupAttempts,
+                _ => fixture.FileSystem.FailedDirectoryCleanupAttempts
+            });
+    }
+
+    [Fact]
+    public async Task RecoverAsync_SilentJournalDeleteNeverReturnsSuccess()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        fixture.FileSystem.SilentJournalDeleteAttemptsRemaining = 3;
+        var operationsAccessBefore = fixture.FileSystem.AccessRequests.Count(
+            request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    fixture.Paths.OperationsDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly);
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
+        Assert.Contains(
+            SetupErrorCodes.RollbackJournalCleanupFailed,
+            result.RollbackFailureCodes);
+        Assert.Contains(
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            result.RollbackFailureCodes);
+        Assert.Equal(3, fixture.FileSystem.JournalDeleteAttempts);
+        Assert.True(journalStore.Exists);
+        Assert.Equal(
+            operationsAccessBefore + 1,
+            fixture.FileSystem.AccessRequests.Count(request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    fixture.Paths.OperationsDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly));
+    }
+
+    [Fact]
+    public async Task RecoverAsync_DeleteIOExceptionWithFalseProbeStillRetriesDelete()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        fixture.FileSystem.JournalDeleteFailuresRemaining = 1;
+        fixture.FileSystem.HideJournalAfterDeleteFailureUntilAccessNormalization = true;
+        fixture.FileSystem.KeepFalseProbeAfterAccessNormalization = true;
+        var operationsAccessBefore = fixture.FileSystem.AccessRequests.Count(
+            request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    fixture.Paths.OperationsDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly);
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, fixture.FileSystem.JournalDeleteAttempts);
+        Assert.Equal(
+            operationsAccessBefore + 1,
+            fixture.FileSystem.AccessRequests.Count(request =>
+                PhysicalSetupFileSystem.SamePath(
+                    request.Path,
+                    fixture.Paths.OperationsDirectory) &&
+                request.Kind == DirectoryAccessKind.AdministratorOnly));
+        Assert.False(File.Exists(journalStore.JournalPath));
+        Assert.False(journalStore.Exists);
+    }
+
+    [Fact]
+    public async Task RecoverAsync_JournalReappearanceFailsFinalPostcondition()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        fixture.FileSystem.RecreateJournalAfterDeleteVerification = true;
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
+        Assert.Contains(
+            SetupErrorCodes.RollbackJournalCleanupFailed,
+            result.RollbackFailureCodes);
+        Assert.Contains(
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            result.RollbackFailureCodes);
+        Assert.Equal(1, fixture.FileSystem.JournalDeleteAttempts);
+        Assert.True(journalStore.Exists);
+    }
+
+    [Fact]
+    public async Task RecoverAsync_CancellationDuringCleanupDelayPreservesJournal()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "committed",
+            mutationStarted: true,
+            installMovedToBackup: true,
+            stagingActivated: true,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        Directory.CreateDirectory(pending.BackupDirectory);
+        fixture.FileSystem.BackupDirectoryCleanupFailuresRemaining = 10;
+        using var cancellation = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(50));
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.True(journalStore.Exists);
+        Assert.True(Directory.Exists(pending.BackupDirectory));
+        Assert.Equal(1, fixture.FileSystem.BackupDirectoryCleanupAttempts);
     }
 
     [Fact]
@@ -326,7 +605,7 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
-        fixture.FileSystem.FailedDirectoryCleanupFailuresRemaining = 1;
+        fixture.FileSystem.FailedDirectoryCleanupFailuresRemaining = 3;
         var journalStore = new DeploymentJournalStore(
             fixture.FileSystem,
             fixture.Paths);
@@ -511,6 +790,37 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Contains(
             result.Steps,
             step => step.Code == "BACKUP_CLEANUP_PENDING");
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.RollbackBackupCleanupFailed);
+        var journalStore = new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths);
+        Assert.True(journalStore.Exists);
+        var pending = journalStore.Read();
+        Assert.Equal("committed", pending.Stage);
+        Assert.True(Directory.Exists(pending.BackupDirectory));
+    }
+
+    [Fact]
+    public async Task DeployAsync_CommittedJournalCleanupRetriesBeforeSuccess()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.JournalDeleteFailuresRemaining = 2;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.50.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(3, fixture.FileSystem.JournalDeleteAttempts);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "JOURNAL_CLEANUP_PENDING");
+        Assert.False(new DeploymentJournalStore(
+            fixture.FileSystem,
+            fixture.Paths).Exists);
     }
 
     [Fact]
@@ -1110,7 +1420,7 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
-        fixture.FileSystem.JournalDeleteFailuresRemaining = 1;
+        fixture.FileSystem.JournalDeleteFailuresRemaining = 3;
         var journalStore = WritePendingJournal(
             fixture,
             "service-stop-pending",

@@ -20,12 +20,73 @@ internal static class SetupRecoveryActionPolicy
                 !busy &&
                 !diagnosticsOnly &&
                 !recovery.Exists,
-            RecoverVisible: recovery.Exists,
+            RecoverVisible:
+                recovery.Exists &&
+                recovery.CanRecover,
             RecoverEnabled:
                 !busy &&
                 !diagnosticsOnly &&
                 recovery.Exists &&
                 recovery.CanRecover);
+}
+
+internal enum SetupRecoveryCompletionSeverity
+{
+    Success,
+    Warning,
+    Error
+}
+
+internal sealed record SetupRecoveryCompletionState(
+    bool ReadyForInstall,
+    bool UseInspectionResult,
+    SetupRecoveryCompletionSeverity Severity,
+    string StatusText,
+    string GuidanceText);
+
+internal static class SetupRecoveryCompletionPolicy
+{
+    public static SetupRecoveryCompletionState Evaluate(
+        SetupOperationResult recoveryResult,
+        PendingRecoveryInspection inspection)
+    {
+        ArgumentNullException.ThrowIfNull(recoveryResult);
+        ArgumentNullException.ThrowIfNull(inspection);
+
+        if (recoveryResult.Succeeded && !inspection.Exists)
+        {
+            return new SetupRecoveryCompletionState(
+                ReadyForInstall: true,
+                UseInspectionResult: false,
+                SetupRecoveryCompletionSeverity.Success,
+                "복구 완료 · 설치 준비됨",
+                "복구가 완료되었습니다. 설치 / 업데이트 버튼을 눌러 다음 작업을 시작하세요.");
+        }
+
+        if (recoveryResult.Succeeded)
+        {
+            return inspection.CanRecover
+                ? new SetupRecoveryCompletionState(
+                    ReadyForInstall: false,
+                    UseInspectionResult: true,
+                    SetupRecoveryCompletionSeverity.Warning,
+                    $"복구 후 상태 재확인 필요 · {inspection.Code}",
+                    "이전 작업 기록이 아직 남아 있습니다. 이전 상태 복구를 다시 실행한 뒤 완료 여부를 확인하세요.")
+                : new SetupRecoveryCompletionState(
+                    ReadyForInstall: false,
+                    UseInspectionResult: true,
+                    SetupRecoveryCompletionSeverity.Error,
+                    $"복구 후 상태 확인 실패 · {inspection.Code}",
+                    "복구 상태를 안전하게 확인할 수 없습니다. 설치를 진행하지 말고 익명 진단을 관리자에게 전달하세요.");
+        }
+
+        return new SetupRecoveryCompletionState(
+            ReadyForInstall: false,
+            UseInspectionResult: false,
+            SetupRecoveryCompletionSeverity.Error,
+            $"복구 실패 · {recoveryResult.Code}",
+            "설치는 계속 잠겨 있습니다. 아래 원래 실패 원인과 복구 실패 단계를 확인하세요.");
+    }
 }
 
 internal static class SetupResultPresentation
@@ -63,13 +124,24 @@ internal static class SetupResultPresentation
         ArgumentNullException.ThrowIfNull(result);
 
         var primaryCode = NormalizeCode(result.PrimaryFailureCode);
-        var rollbackCodes = result.RollbackFailureCodes
+        var allRollbackCodes = result.RollbackFailureCodes
             .Select(NormalizeCode)
             .Where(code => code is not null)
             .Cast<string>()
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        var rollbackCodeSet = rollbackCodes.ToHashSet(StringComparer.Ordinal);
+        var hasTargetSpecificCleanupFailure =
+            allRollbackCodes.Any(IsTargetSpecificCleanupFailure);
+        var rollbackCodes = allRollbackCodes
+            .Where(code =>
+                !hasTargetSpecificCleanupFailure ||
+                !string.Equals(
+                    code,
+                    SetupErrorCodes.RollbackEvidenceCleanupFailed,
+                    StringComparison.Ordinal))
+            .ToArray();
+        var rollbackCodeSet =
+            allRollbackCodes.ToHashSet(StringComparer.Ordinal);
 
         var steps = result.Steps
             .Where(step =>
@@ -100,7 +172,7 @@ internal static class SetupResultPresentation
         steps.AddRange(rollbackCodes.Select(code =>
             new SetupStepResult(
                 code,
-                "이전 상태 복구 실패",
+                RollbackFailureLabel(code),
                 SetupStepState.Failed,
                 RollbackFailureMessage(code))));
 
@@ -138,8 +210,37 @@ internal static class SetupResultPresentation
                 "복구 완료 상태를 안전하게 기록하지 못했습니다.",
             SetupErrorCodes.RollbackEvidenceCleanupFailed =>
                 "복구 확인 후 남은 설치 흔적을 정리하지 못했습니다.",
+            SetupErrorCodes.RollbackStagingCleanupFailed =>
+                "임시 설치 자료 정리를 완료하지 못했습니다.",
+            SetupErrorCodes.RollbackBackupCleanupFailed =>
+                "이전 파일 백업 자료 정리를 완료하지 못했습니다.",
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed =>
+                "실패한 설치 자료 정리를 완료하지 못했습니다.",
+            SetupErrorCodes.RollbackJournalCleanupFailed =>
+                "복구 작업 기록을 삭제하고 결과를 확인하지 못했습니다.",
             _ => "이전 상태 복구의 일부 단계를 완료하지 못했습니다."
         };
+
+    private static string RollbackFailureLabel(string code) =>
+        code switch
+        {
+            SetupErrorCodes.RollbackStagingCleanupFailed =>
+                "임시 설치 자료 정리",
+            SetupErrorCodes.RollbackBackupCleanupFailed =>
+                "이전 파일 정리",
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed =>
+                "실패 설치 자료 정리",
+            SetupErrorCodes.RollbackJournalCleanupFailed =>
+                "복구 기록 정리",
+            _ => "이전 상태 복구 실패"
+        };
+
+    private static bool IsTargetSpecificCleanupFailure(string code) =>
+        code is
+            SetupErrorCodes.RollbackStagingCleanupFailed or
+            SetupErrorCodes.RollbackBackupCleanupFailed or
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
+            SetupErrorCodes.RollbackJournalCleanupFailed;
 }
 
 internal sealed record SetupFailureDiagnosticContext(
@@ -298,6 +399,10 @@ internal static class SetupFieldDiagnosticFormatter
             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed,
             SetupErrorCodes.RollbackJournalWriteFailed,
             SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            SetupErrorCodes.RollbackStagingCleanupFailed,
+            SetupErrorCodes.RollbackBackupCleanupFailed,
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+            SetupErrorCodes.RollbackJournalCleanupFailed,
             SetupErrorCodes.AlreadyRunning,
             SetupErrorCodes.Cancelled,
             SetupErrorCodes.Unexpected,
@@ -582,9 +687,13 @@ internal static class SetupFieldDiagnosticFormatter
             SetupErrorCodes.RollbackFileRestoreFailed or
             SetupErrorCodes.RollbackDataCleanupFailed or
             SetupErrorCodes.RollbackServiceRestoreFailed or
-            SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
-            SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
-            SetupErrorCodes.RollbackEvidenceCleanupFailed => "RECOVERY",
+             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
+             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
+             SetupErrorCodes.RollbackEvidenceCleanupFailed or
+             SetupErrorCodes.RollbackStagingCleanupFailed or
+             SetupErrorCodes.RollbackBackupCleanupFailed or
+             SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
+             SetupErrorCodes.RollbackJournalCleanupFailed => "RECOVERY",
             SetupErrorCodes.AlreadyRunning => "OPERATION_LOCK",
             SetupErrorCodes.Cancelled => "CANCELLED",
             _ => "UNKNOWN"
@@ -617,10 +726,14 @@ internal static class SetupFieldDiagnosticFormatter
             SetupErrorCodes.RollbackDataCleanupFailed or
             SetupErrorCodes.RollbackServiceRestoreFailed or
             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
-            SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
-            SetupErrorCodes.RollbackJournalWriteFailed or
-            SetupErrorCodes.RollbackEvidenceCleanupFailed =>
-                "RUN_OR_REVIEW_RECOVERY",
+             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
+             SetupErrorCodes.RollbackJournalWriteFailed or
+             SetupErrorCodes.RollbackEvidenceCleanupFailed or
+             SetupErrorCodes.RollbackStagingCleanupFailed or
+             SetupErrorCodes.RollbackBackupCleanupFailed or
+             SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
+             SetupErrorCodes.RollbackJournalCleanupFailed =>
+                 "RUN_OR_REVIEW_RECOVERY",
             SetupErrorCodes.AlreadyRunning => "WAIT_AND_RETRY",
             SetupErrorCodes.Cancelled => "RETRY_WHEN_READY",
             SetupErrorCodes.DiagnosticWriteFailed =>

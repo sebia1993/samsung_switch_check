@@ -28,6 +28,15 @@ public sealed record DeploymentJournal(
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
 }
 
+internal sealed class DeploymentJournalCleanupVerificationException
+    : Exception
+{
+    public DeploymentJournalCleanupVerificationException()
+        : base("설치 작업 기록이 삭제됐는지 확인할 수 없습니다.")
+    {
+    }
+}
+
 public sealed class DeploymentJournalStore(
     ISetupFileSystem fileSystem,
     DeploymentPaths paths)
@@ -82,9 +91,11 @@ public sealed class DeploymentJournalStore(
 
     public void Delete()
     {
+        fileSystem.DeleteFile(JournalPath);
+
         if (Exists)
         {
-            fileSystem.DeleteFile(JournalPath);
+            throw new DeploymentJournalCleanupVerificationException();
         }
     }
 

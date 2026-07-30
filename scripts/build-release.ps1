@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '0.10.8-poc',
+    [string]$Version = '0.10.9-poc',
     [switch]$SkipTests,
     [switch]$AllowDirty,
     [string]$SigningCertificatePath,

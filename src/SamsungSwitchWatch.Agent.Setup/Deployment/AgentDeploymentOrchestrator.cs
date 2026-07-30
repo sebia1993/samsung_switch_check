@@ -12,6 +12,9 @@ public sealed class AgentDeploymentOrchestrator(
 {
     private static readonly SemaphoreSlim ProcessDeploymentGate = new(1, 1);
     private const string RollbackCompletedStage = "rollback-completed";
+    private const int EvidenceCleanupMaxAttempts = 3;
+    private static readonly TimeSpan EvidenceCleanupRetryDelay =
+        TimeSpan.FromMilliseconds(250);
     private const int FirewallVerificationRetryCount = 10;
     private static readonly TimeSpan FirewallVerificationRetryDelay =
         TimeSpan.FromMilliseconds(200);
@@ -136,7 +139,18 @@ public sealed class AgentDeploymentOrchestrator(
                     steps);
             }
 
-            RecoverPendingTransaction(journalStore, steps);
+            await RecoverPendingTransactionAsync(
+                journalStore,
+                steps,
+                cancellationToken);
+            if (journalStore.Exists)
+            {
+                RecordRemainingJournalFailure(journalStore, steps);
+                throw new SetupException(
+                    SetupErrorCodes.RollbackFailed,
+                    "이전 설치 상태 복구 뒤에도 작업 기록이 남아 있어 설치를 계속할 수 없습니다.");
+            }
+
             return SetupOperationResult.Success(
                 "이전 상태 복구가 완료되었습니다. 설치 / 업데이트를 다시 실행할 수 있습니다.",
                 steps);
@@ -501,28 +515,55 @@ public sealed class AgentDeploymentOrchestrator(
             // because recursive deletion may already be partially complete.
             journal = journal with { Stage = "committed" };
             journalStore.Write(journal);
-            if (installMovedToBackup && fileSystem.DirectoryExists(backupDirectory))
+            var committedDirectoriesClean = true;
+            foreach (var target in new[]
+                     {
+                         (
+                             Path: journal.StagingDirectory,
+                             Code: SetupErrorCodes.RollbackStagingCleanupFailed,
+                             Label: "임시 설치 자료 정리"),
+                         (
+                             Path: journal.BackupDirectory,
+                             Code: SetupErrorCodes.RollbackBackupCleanupFailed,
+                             Label: "이전 파일 정리"),
+                         (
+                             Path: journal.FailedDirectory,
+                             Code: SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+                             Label: "실패 설치 자료 정리")
+                     })
             {
-                try
+                if (await TryDeleteEvidenceDirectoryAsync(
+                        target.Path,
+                        CancellationToken.None))
                 {
-                    fileSystem.DeleteDirectory(backupDirectory, recursive: true);
+                    continue;
                 }
-                catch
-                {
-                    steps.Add(new SetupStepResult(
-                        "BACKUP_CLEANUP_PENDING",
-                        "이전 파일 정리",
-                        SetupStepState.Information,
-                        "설치는 완료됐지만 이전 버전 백업 일부가 남았습니다. Agent 동작에는 영향이 없습니다."));
-                }
+
+                committedDirectoriesClean = false;
+                steps.Add(new SetupStepResult(
+                    target.Code,
+                    target.Label,
+                    SetupStepState.Information,
+                    "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남아 있습니다."));
             }
 
-            try
+            if (!committedDirectoriesClean)
             {
-                journalStore.Delete();
+                steps.Add(new SetupStepResult(
+                    "BACKUP_CLEANUP_PENDING",
+                    "이전 파일 정리",
+                    SetupStepState.Information,
+                    "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남았습니다. Agent 동작에는 영향이 없습니다."));
             }
-            catch
+            else if (!await TryDeleteJournalAsync(
+                         journalStore,
+                         CancellationToken.None))
             {
+                steps.Add(new SetupStepResult(
+                    SetupErrorCodes.RollbackJournalCleanupFailed,
+                    "작업 기록 정리",
+                    SetupStepState.Information,
+                    "설치는 완료됐지만 완료된 작업 기록이 남아 있습니다."));
                 steps.Add(new SetupStepResult(
                     "JOURNAL_CLEANUP_PENDING",
                     "작업 기록 정리",
@@ -539,7 +580,7 @@ public sealed class AgentDeploymentOrchestrator(
             const string primaryCode = SetupErrorCodes.Cancelled;
             const string primaryMessage = "설치가 취소되었습니다.";
             var rollback = currentTransactionOwned
-                ? TryRollback(
+                ? await TryRollbackAsync(
                     journalStore,
                     journal,
                     previousService,
@@ -555,7 +596,8 @@ public sealed class AgentDeploymentOrchestrator(
                     mutationStarted,
                     primaryCode,
                     primaryMessage,
-                    steps)
+                    steps,
+                    CancellationToken.None)
                 : RollbackOutcome.Success;
             return BuildFailedDeploymentResult(
                 primaryCode,
@@ -567,7 +609,7 @@ public sealed class AgentDeploymentOrchestrator(
         catch (SetupException exception)
         {
             var rollback = currentTransactionOwned
-                ? TryRollback(
+                ? await TryRollbackAsync(
                     journalStore,
                     journal,
                     previousService,
@@ -583,7 +625,8 @@ public sealed class AgentDeploymentOrchestrator(
                     mutationStarted,
                     exception.Code,
                     exception.Message,
-                    steps)
+                    steps,
+                    CancellationToken.None)
                 : RollbackOutcome.Success;
             return BuildFailedDeploymentResult(
                 exception.Code,
@@ -598,7 +641,7 @@ public sealed class AgentDeploymentOrchestrator(
             const string primaryMessage =
                 "예상하지 못한 오류로 설치를 완료하지 못했습니다.";
             var rollback = currentTransactionOwned
-                ? TryRollback(
+                ? await TryRollbackAsync(
                     journalStore,
                     journal,
                     previousService,
@@ -614,7 +657,8 @@ public sealed class AgentDeploymentOrchestrator(
                     mutationStarted,
                     primaryCode,
                     primaryMessage,
-                    steps)
+                    steps,
+                    CancellationToken.None)
                 : RollbackOutcome.Success;
             return BuildFailedDeploymentResult(
                 primaryCode,
@@ -657,7 +701,7 @@ public sealed class AgentDeploymentOrchestrator(
         return verification;
     }
 
-    private RollbackOutcome TryRollback(
+    private async Task<RollbackOutcome> TryRollbackAsync(
         DeploymentJournalStore journalStore,
         DeploymentJournal? journal,
         ServiceSnapshot? previousService,
@@ -673,7 +717,8 @@ public sealed class AgentDeploymentOrchestrator(
         bool mutationStarted,
         string primaryFailureCode,
         string primaryFailureMessage,
-        SetupStepRecorder steps)
+        SetupStepRecorder steps,
+        CancellationToken cleanupCancellationToken)
     {
         var failureCodes = new List<string>();
         var installExists = false;
@@ -1039,43 +1084,56 @@ public sealed class AgentDeploymentOrchestrator(
 
         if (authoritativeRestorationCompleted && rollbackMarkerWritten)
         {
-            try
+            if (stagingDirectory is not null &&
+                !await TryDeleteEvidenceDirectoryAsync(
+                    stagingDirectory,
+                    cleanupCancellationToken))
             {
-                if (stagingDirectory is not null &&
-                    fileSystem.DirectoryExists(stagingDirectory))
-                {
-                    fileSystem.DeleteDirectory(stagingDirectory, recursive: true);
-                }
-
-                if (failedDirectory is not null &&
-                    fileSystem.DirectoryExists(failedDirectory))
-                {
-                    fileSystem.DeleteDirectory(failedDirectory, recursive: true);
-                }
-            }
-            catch
-            {
-                AddRollbackFailure(
+                AddEvidenceCleanupFailure(
                     failureCodes,
                     steps,
-                    SetupErrorCodes.RollbackEvidenceCleanupFailed,
-                    "복구 자료 정리",
-                    "복구는 완료됐지만 임시 또는 실패 파일을 정리하지 못했습니다.");
+                    SetupErrorCodes.RollbackStagingCleanupFailed,
+                    "임시 설치 자료 정리",
+                    "복구는 완료됐지만 임시 설치 자료를 정리하지 못했습니다.");
+            }
+
+            if (backupDirectory is not null &&
+                !await TryDeleteEvidenceDirectoryAsync(
+                    backupDirectory,
+                    cleanupCancellationToken))
+            {
+                AddEvidenceCleanupFailure(
+                    failureCodes,
+                    steps,
+                    SetupErrorCodes.RollbackBackupCleanupFailed,
+                    "이전 파일 정리",
+                    "복구는 완료됐지만 이전 설치 백업 자료를 정리하지 못했습니다.");
+            }
+
+            if (failedDirectory is not null &&
+                !await TryDeleteEvidenceDirectoryAsync(
+                    failedDirectory,
+                    cleanupCancellationToken))
+            {
+                AddEvidenceCleanupFailure(
+                    failureCodes,
+                    steps,
+                    SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+                    "실패 설치 자료 정리",
+                    "복구는 완료됐지만 실패한 설치 자료를 정리하지 못했습니다.");
             }
         }
 
         if (failureCodes.Count == 0 && journal is not null)
         {
-            try
+            if (!await TryDeleteJournalAsync(
+                    journalStore,
+                    cleanupCancellationToken))
             {
-                journalStore.Delete();
-            }
-            catch
-            {
-                AddRollbackFailure(
+                AddEvidenceCleanupFailure(
                     failureCodes,
                     steps,
-                    SetupErrorCodes.RollbackEvidenceCleanupFailed,
+                    SetupErrorCodes.RollbackJournalCleanupFailed,
                     "복구 기록 정리",
                     "복구는 완료됐지만 작업 기록을 정리하지 못했습니다.");
             }
@@ -1176,36 +1234,60 @@ public sealed class AgentDeploymentOrchestrator(
         }
     }
 
-    private void RecordPendingRecoveryFailure(
+    private static void AddEvidenceCleanupFailure(
+        List<string> failureCodes,
+        SetupStepRecorder steps,
+        string targetCode,
+        string label,
+        string message)
+    {
+        AddRollbackFailure(
+            failureCodes,
+            steps,
+            targetCode,
+            label,
+            message);
+        AddRollbackFailure(
+            failureCodes,
+            steps,
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            "복구 자료 정리",
+            "복구 완료 뒤 남은 설치 자료 또는 작업 기록을 정리하지 못했습니다.");
+    }
+
+    private void RecordPendingEvidenceCleanupFailure(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        string code,
+        string targetCode,
         string label,
         string message,
         SetupStepRecorder steps)
     {
-        var codes = pending.RollbackFailureCodes
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
-        if (!codes.Contains(code, StringComparer.Ordinal))
-        {
-            codes.Add(code);
-        }
-        if (!steps.Any(step =>
-                step.State == SetupStepState.Failed &&
-                string.Equals(step.Code, code, StringComparison.Ordinal)))
-        {
-            steps.Add(Failed(code, label, message));
-        }
+        AddFailureStep(steps, targetCode, label, message);
+        AddFailureStep(
+            steps,
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            "복구 자료 정리",
+            "복구 완료 뒤 남은 설치 자료 또는 작업 기록을 정리하지 못했습니다.");
+
         try
         {
-            journalStore.Write(pending with
+            var current = journalStore.Exists
+                ? journalStore.Read()
+                : pending;
+            var codes = current.RollbackFailureCodes
+                .Append(targetCode)
+                .Append(SetupErrorCodes.RollbackEvidenceCleanupFailed)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            journalStore.Write(current with
             {
-                RollbackFailureCodes = codes.ToArray()
+                RollbackFailureCodes = codes
             });
         }
         catch
         {
+            var codes = new List<string>();
             AddRollbackFailure(
                 codes,
                 steps,
@@ -1213,6 +1295,161 @@ public sealed class AgentDeploymentOrchestrator(
                 "복구 기록 저장",
                 "복구 실패 정보를 작업 기록에 저장하지 못했습니다.");
         }
+    }
+
+    private void RecordRemainingJournalFailure(
+        DeploymentJournalStore journalStore,
+        SetupStepRecorder steps)
+    {
+        AddFailureStep(
+            steps,
+            SetupErrorCodes.RollbackJournalCleanupFailed,
+            "복구 기록 정리",
+            "복구가 완료된 뒤 작업 기록이 다시 확인됐습니다.");
+        AddFailureStep(
+            steps,
+            SetupErrorCodes.RollbackEvidenceCleanupFailed,
+            "복구 자료 정리",
+            "복구 완료 뒤 남은 작업 기록을 정리하지 못했습니다.");
+
+        try
+        {
+            var pending = journalStore.Read();
+            RecordPendingEvidenceCleanupFailure(
+                journalStore,
+                pending,
+                SetupErrorCodes.RollbackJournalCleanupFailed,
+                "복구 기록 정리",
+                "복구가 완료된 뒤 작업 기록이 다시 확인됐습니다.",
+                steps);
+        }
+        catch
+        {
+            // The fail-closed journal remains authoritative even when it cannot
+            // be read or updated. Do not expose raw filesystem details.
+            AddFailureStep(
+                steps,
+                SetupErrorCodes.RollbackJournalWriteFailed,
+                "복구 기록 저장",
+                "남은 복구 작업 기록에 실패 정보를 저장하지 못했습니다.");
+        }
+    }
+
+    private static void AddFailureStep(
+        SetupStepRecorder steps,
+        string code,
+        string label,
+        string message)
+    {
+        if (!steps.Any(step =>
+                step.State == SetupStepState.Failed &&
+                string.Equals(step.Code, code, StringComparison.Ordinal)))
+        {
+            steps.Add(Failed(code, label, message));
+        }
+    }
+
+    private Task<bool> TryDeleteEvidenceDirectoryAsync(
+        string directory,
+        CancellationToken cancellationToken) =>
+        TryDeleteEvidenceAsync(
+            () => fileSystem.DirectoryExists(directory),
+            () => fileSystem.DeleteDirectory(directory, recursive: true),
+            () => fileSystem.EnsureDirectoryAccess(
+                directory,
+                DirectoryAccessKind.AdministratorOnly),
+            cancellationToken);
+
+    private Task<bool> TryDeleteJournalAsync(
+        DeploymentJournalStore journalStore,
+        CancellationToken cancellationToken) =>
+        TryDeleteEvidenceAsync(
+            () => journalStore.Exists,
+            journalStore.Delete,
+            () => fileSystem.EnsureDirectoryAccess(
+                paths.OperationsDirectory,
+                DirectoryAccessKind.AdministratorOnly),
+            cancellationToken);
+
+    private static async Task<bool> TryDeleteEvidenceAsync(
+        Func<bool> exists,
+        Action delete,
+        Action normalizeAccess,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= EvidenceCleanupMaxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var normalizeAccessBeforeRetry = false;
+            try
+            {
+                delete();
+                if (!exists())
+                {
+                    return true;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+                return true;
+            }
+            catch (DeploymentJournalCleanupVerificationException)
+            {
+                // The delete returned without an access exception, but the
+                // journal still exists. Retry without changing its ACL.
+            }
+            catch (IOException)
+            {
+                normalizeAccessBeforeRetry = true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                normalizeAccessBeforeRetry = true;
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (attempt == EvidenceCleanupMaxAttempts)
+            {
+                return false;
+            }
+
+            if (normalizeAccessBeforeRetry)
+            {
+                try
+                {
+                    normalizeAccess();
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    // Keep the retry bounded. A later delete may still succeed
+                    // when the local lock or policy race was transient.
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            await Task.Delay(EvidenceCleanupRetryDelay, cancellationToken);
+        }
+
+        return false;
     }
 
     private static bool IsRollbackStageFailure(string code) =>
@@ -1225,7 +1462,11 @@ public sealed class AgentDeploymentOrchestrator(
             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed or
             SetupErrorCodes.RollbackJournalWriteFailed or
-            SetupErrorCodes.RollbackEvidenceCleanupFailed;
+            SetupErrorCodes.RollbackEvidenceCleanupFailed or
+            SetupErrorCodes.RollbackStagingCleanupFailed or
+            SetupErrorCodes.RollbackBackupCleanupFailed or
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed or
+            SetupErrorCodes.RollbackJournalCleanupFailed;
 
     private sealed record RollbackOutcome(
         bool Succeeded,
@@ -1237,9 +1478,10 @@ public sealed class AgentDeploymentOrchestrator(
             new(false, failureCodes.ToArray());
     }
 
-    private void RecoverPendingTransaction(
+    private async Task RecoverPendingTransactionAsync(
         DeploymentJournalStore journalStore,
-        SetupStepRecorder steps)
+        SetupStepRecorder steps,
+        CancellationToken cancellationToken)
     {
         var pending = journalStore.Read();
         ValidatePendingTransaction(pending);
@@ -1255,13 +1497,21 @@ public sealed class AgentDeploymentOrchestrator(
 
         if (string.Equals(pending.Stage, RollbackCompletedStage, StringComparison.Ordinal))
         {
-            RecoverCompletedRollback(journalStore, pending, steps);
+            await RecoverCompletedRollbackAsync(
+                journalStore,
+                pending,
+                steps,
+                cancellationToken);
             return;
         }
 
         if (string.Equals(pending.Stage, "committed", StringComparison.Ordinal))
         {
-            RecoverCommittedTransaction(journalStore, pending, steps);
+            await RecoverCommittedTransactionAsync(
+                journalStore,
+                pending,
+                steps,
+                cancellationToken);
             return;
         }
 
@@ -1273,7 +1523,7 @@ public sealed class AgentDeploymentOrchestrator(
                           SetupErrorCodes.RecoveryRequired;
         var primaryMessage = pending.PrimaryFailureMessage ??
                              "이전 설치 작업이 완료되지 않았습니다.";
-        var rollback = TryRollback(
+        var rollback = await TryRollbackAsync(
             journalStore,
             pending,
             pending.PreviousService,
@@ -1289,7 +1539,8 @@ public sealed class AgentDeploymentOrchestrator(
             pending.MutationStarted,
             primaryCode,
             primaryMessage,
-            steps);
+            steps,
+            cancellationToken);
         if (!rollback.Succeeded)
         {
             throw new SetupException(
@@ -1298,10 +1549,11 @@ public sealed class AgentDeploymentOrchestrator(
         }
     }
 
-    private void RecoverCompletedRollback(
+    private async Task RecoverCompletedRollbackAsync(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        SetupStepRecorder steps)
+        SetupStepRecorder steps,
+        CancellationToken cancellationToken)
     {
         var installExists = fileSystem.DirectoryExists(paths.InstallDirectory);
         var backupExists = fileSystem.DirectoryExists(pending.BackupDirectory);
@@ -1339,33 +1591,68 @@ public sealed class AgentDeploymentOrchestrator(
                 "완료된 이전 설치 복구 상태가 안전한 파일 시스템 조건과 일치하지 않습니다.");
         }
 
-        try
+        var cleanupFailed = false;
+        if (!await TryDeleteEvidenceDirectoryAsync(
+                pending.StagingDirectory,
+                cancellationToken))
         {
-            if (stagingExists)
-            {
-                fileSystem.DeleteDirectory(pending.StagingDirectory, recursive: true);
-            }
-
-            if (failedExists)
-            {
-                fileSystem.DeleteDirectory(pending.FailedDirectory, recursive: true);
-            }
-
-            journalStore.Delete();
-        }
-        catch (Exception exception)
-        {
-            RecordPendingRecoveryFailure(
+            cleanupFailed = true;
+            RecordPendingEvidenceCleanupFailure(
                 journalStore,
                 pending,
-                SetupErrorCodes.RollbackEvidenceCleanupFailed,
-                "복구 자료 정리",
-                "완료된 이전 설치 복구 자료를 정리하지 못했습니다.",
+                SetupErrorCodes.RollbackStagingCleanupFailed,
+                "임시 설치 자료 정리",
+                "완료된 이전 설치의 임시 자료를 정리하지 못했습니다.",
+                steps);
+        }
+
+        if (!await TryDeleteEvidenceDirectoryAsync(
+                pending.BackupDirectory,
+                cancellationToken))
+        {
+            cleanupFailed = true;
+            RecordPendingEvidenceCleanupFailure(
+                journalStore,
+                pending,
+                SetupErrorCodes.RollbackBackupCleanupFailed,
+                "이전 파일 정리",
+                "완료된 이전 설치의 백업 자료를 정리하지 못했습니다.",
+                steps);
+        }
+
+        if (!await TryDeleteEvidenceDirectoryAsync(
+                pending.FailedDirectory,
+                cancellationToken))
+        {
+            cleanupFailed = true;
+            RecordPendingEvidenceCleanupFailure(
+                journalStore,
+                pending,
+                SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+                "실패 설치 자료 정리",
+                "완료된 이전 설치의 실패 자료를 정리하지 못했습니다.",
+                steps);
+        }
+
+        if (cleanupFailed)
+        {
+            throw new SetupException(
+                SetupErrorCodes.RollbackFailed,
+                "완료된 이전 설치 복구 자료를 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.");
+        }
+
+        if (!await TryDeleteJournalAsync(journalStore, cancellationToken))
+        {
+            RecordPendingEvidenceCleanupFailure(
+                journalStore,
+                pending,
+                SetupErrorCodes.RollbackJournalCleanupFailed,
+                "복구 기록 정리",
+                "완료된 이전 설치 복구 기록을 정리하지 못했습니다.",
                 steps);
             throw new SetupException(
                 SetupErrorCodes.RollbackFailed,
-                "완료된 이전 설치 복구 자료를 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.",
-                exception);
+                "완료된 이전 설치 복구 기록을 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.");
         }
 
         steps.Add(new SetupStepResult(
@@ -1375,10 +1662,11 @@ public sealed class AgentDeploymentOrchestrator(
             "완료된 이전 설치 복구 자료를 안전하게 정리했습니다."));
     }
 
-    private void RecoverCommittedTransaction(
+    private async Task RecoverCommittedTransactionAsync(
         DeploymentJournalStore journalStore,
         DeploymentJournal pending,
-        SetupStepRecorder steps)
+        SetupStepRecorder steps,
+        CancellationToken cancellationToken)
     {
         if (!fileSystem.DirectoryExists(paths.InstallDirectory) ||
             !fileSystem.DirectoryExists(paths.DataDirectory))
@@ -1389,58 +1677,60 @@ public sealed class AgentDeploymentOrchestrator(
         }
 
         var cleanupFailed = false;
-        foreach (var obsolete in new[]
+        foreach (var target in new[]
                  {
-                     pending.BackupDirectory,
-                     pending.StagingDirectory,
-                     pending.FailedDirectory
+                     (
+                         Path: pending.StagingDirectory,
+                         Code: SetupErrorCodes.RollbackStagingCleanupFailed,
+                         Label: "임시 설치 자료 정리",
+                         Message: "완료된 설치의 임시 자료를 정리하지 못했습니다."),
+                     (
+                         Path: pending.BackupDirectory,
+                         Code: SetupErrorCodes.RollbackBackupCleanupFailed,
+                         Label: "이전 파일 정리",
+                         Message: "완료된 설치의 백업 자료를 정리하지 못했습니다."),
+                     (
+                         Path: pending.FailedDirectory,
+                         Code: SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+                         Label: "실패 설치 자료 정리",
+                         Message: "완료된 설치의 실패 자료를 정리하지 못했습니다.")
                  })
         {
-            try
-            {
-                if (fileSystem.DirectoryExists(obsolete))
-                {
-                    fileSystem.DeleteDirectory(obsolete, recursive: true);
-                }
-            }
-            catch
+            if (!await TryDeleteEvidenceDirectoryAsync(
+                    target.Path,
+                    cancellationToken))
             {
                 // A committed installation remains authoritative. Preserve leftovers.
                 cleanupFailed = true;
+                RecordPendingEvidenceCleanupFailure(
+                    journalStore,
+                    pending,
+                    target.Code,
+                    target.Label,
+                    target.Message,
+                    steps);
             }
         }
 
         if (cleanupFailed)
         {
-            RecordPendingRecoveryFailure(
-                journalStore,
-                pending,
-                SetupErrorCodes.RollbackEvidenceCleanupFailed,
-                "설치 자료 정리",
-                "완료된 설치의 임시 또는 백업 자료를 정리하지 못했습니다.",
-                steps);
             throw new SetupException(
                 SetupErrorCodes.RollbackFailed,
                 "완료된 이전 설치 자료를 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.");
         }
 
-        try
+        if (!await TryDeleteJournalAsync(journalStore, cancellationToken))
         {
-            journalStore.Delete();
-        }
-        catch (Exception exception)
-        {
-            RecordPendingRecoveryFailure(
+            RecordPendingEvidenceCleanupFailure(
                 journalStore,
                 pending,
-                SetupErrorCodes.RollbackEvidenceCleanupFailed,
+                SetupErrorCodes.RollbackJournalCleanupFailed,
                 "작업 기록 정리",
                 "완료된 이전 설치 작업 기록을 정리하지 못했습니다.",
                 steps);
             throw new SetupException(
                 SetupErrorCodes.RollbackFailed,
-                "완료된 이전 설치 작업 기록을 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.",
-                exception);
+                "완료된 이전 설치 작업 기록을 정리할 수 없습니다. 다음 실행에서 다시 시도합니다.");
         }
 
         steps.Add(new SetupStepResult(

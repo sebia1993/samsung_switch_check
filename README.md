@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.8-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.9-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -49,12 +49,18 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 Setup이 이전 설치·업데이트의 미완료 작업 기록을 발견하면 해당 기록을 읽기 전용으로
 검사하고 `설치/업데이트`를 비활성화합니다. 복구 가능 상태일 때만 `이전 상태 복구`를
-누르십시오. 복구 성공 뒤 설치 버튼은 다시 활성화되지만 설치가 자동으로 이어지지는 않으므로,
-운영자가 검사 결과를 확인한 뒤 별도로 설치 또는 업데이트해야 합니다. 작업 기록이 손상됐거나
-안전한 복구를 증명할 수 없으면 복구와 설치를 모두 중단하고 Windows 관리자에게 확인합니다.
+누르십시오. Setup은 검증된 staging·backup·failed·journal 경로만 제한적으로 다시 정리하고
+각 대상이 실제로 사라졌는지 확인합니다. 새로 검사한 작업 기록에서도 미완료 상태가 없어야만
+복구 성공과 설치 버튼 활성화를 표시합니다. 설치가 자동으로 이어지지는 않으므로 운영자가
+검사 결과를 확인한 뒤 별도로 설치 또는 업데이트해야 합니다. 작업 기록이 손상됐거나 안전한
+복구를 증명할 수 없으면 복구와 설치를 모두 중단하고 Windows 관리자에게 확인합니다.
 
 설치와 복구가 모두 실패하면 최초 설치·업데이트 원인과 복구 단계별 원인을 나누어 표시합니다.
 이때만 보이는 `진단정보 복사`는 민감정보를 제외한 진단 요약을 클립보드에 복사합니다.
+정리 실패 화면의 상단 상태는 `SETUP_ROLLBACK_FAILED`이고, 세부 행은 실제 경로 대신
+staging·backup·failed·journal 중 어느 안전 단계에서 실패했는지
+`ROLLBACK_STAGING_CLEANUP_FAILED`, `ROLLBACK_BACKUP_CLEANUP_FAILED`,
+`ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED`, `ROLLBACK_JOURNAL_CLEANUP_FAILED`로 구분합니다.
 `.__staging_*`, `.__backup_*`, `.__failed_*` 폴더나 작업 기록을 수동으로 삭제·이동·이름
 변경하지 마십시오.
 
@@ -144,7 +150,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.8-poc
+.\scripts\build-release.ps1 -Version 0.10.9-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -161,5 +167,5 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
-- [0.10.8-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.8_POC_KO.md)
+- [0.10.9-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.9_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)
