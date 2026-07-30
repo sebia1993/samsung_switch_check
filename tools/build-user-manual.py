@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.8 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.9 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.8-poc"
-DOCUMENT_DATE = "2026-07-29"
+VERSION = "0.10.9-poc"
+DOCUMENT_DATE = "2026-07-30"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -110,6 +110,13 @@ def set_repeat_table_header(row):
     header = OxmlElement("w:tblHeader")
     header.set(qn("w:val"), "true")
     tr_pr.append(header)
+
+
+def prevent_table_row_split(row):
+    tr_pr = row._tr.get_or_add_trPr()
+    cant_split = OxmlElement("w:cantSplit")
+    cant_split.set(qn("w:val"), "true")
+    tr_pr.append(cant_split)
 
 
 def set_cell_margins(cell):
@@ -525,6 +532,7 @@ def add_table(
     set_table_borders(table)
     table.rows[0]._tr.get_or_add_trPr()
     set_repeat_table_header(table.rows[0])
+    prevent_table_row_split(table.rows[0])
     for index, header in enumerate(headers):
         cell = table.rows[0].cells[index]
         set_cell_shading(cell, LIGHT_BLUE)
@@ -535,7 +543,9 @@ def add_table(
         set_run_font(run, size=header_size, color=NAVY, bold=True)
 
     for row_index, values in enumerate(rows):
-        cells = table.add_row().cells
+        row = table.add_row()
+        prevent_table_row_split(row)
+        cells = row.cells
         for index, value in enumerate(values):
             cell = cells[index]
             if row_index % 2:
@@ -751,8 +761,8 @@ Viewer PC                 Agent PC                    Samsung Switch
             "'허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님'에 원격 Viewer 주소를 입력합니다. 같은 PC 시험이라면 '같은 PC 시험용 주소'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
             "자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
             "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
-            "Setup이 중단된 이전 설치 기록을 발견하면 설치/업데이트가 잠깁니다. '이전 상태 복구'를 먼저 누르고 복구 완료를 확인합니다.",
-            "복구 성공 뒤 설치는 자동으로 시작되지 않습니다. 별도로 '설치 / 업데이트'를 누른 뒤 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
+            "Setup이 중단된 이전 설치 기록을 발견하면 설치/업데이트가 잠깁니다. '이전 상태 복구'를 먼저 누르고 새 작업 기록 검사까지 완료됐는지 확인합니다.",
+            "정리 대상과 작업 기록이 모두 사라진 경우에만 복구 성공으로 표시됩니다. 별도로 '설치 / 업데이트'를 누른 뒤 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
         ],
     )
     add_image(
@@ -768,9 +778,28 @@ Viewer PC                 Agent PC                    Samsung Switch
         "복구 대기 화면",
         "Setup은 시작할 때 이전 작업의 journal을 읽기 전용으로 확인합니다. 안전하게 복구할 수 있는 "
         "기록이면 '이전 상태 복구'만 활성화하고 설치/업데이트는 비활성화합니다. 이 확인만으로 "
-        "파일·서비스·방화벽을 변경하거나 복구를 자동 실행하지 않습니다. 복구 성공 뒤에도 설치는 "
-        "자동으로 이어지지 않으므로 운영자가 결과를 확인한 뒤 설치/업데이트를 별도로 시작합니다.",
+        "파일·서비스·방화벽을 변경하거나 복구를 자동 실행하지 않습니다. 검증된 정리 대상이 실제로 "
+        "사라지고 새 journal 검사에서도 미완료 작업이 없어야만 복구 성공과 설치 버튼 활성화를 "
+        "표시합니다. 설치는 자동으로 이어지지 않으므로 운영자가 별도로 시작합니다.",
         "warning",
+    )
+    add_image(
+        doc,
+        images_dir / "00-agent-setup-recovery-failed.png",
+        width=4.5,
+        title="Agent Setup 복구 실패 화면",
+        alt_text="복구 자료 정리가 끝나지 않아 설치를 계속 잠그고 작업 기록 보존, 복구 재시도와 익명 진단 저장을 안내하는 Agent Setup 화면",
+        caption="그림 2. 복구 자료 정리 실패와 설치 차단 화면",
+    )
+    add_callout(
+        doc,
+        "복구 자료 정리가 끝나지 않은 경우",
+        "화면 상단에 SETUP_ROLLBACK_FAILED가 표시되고 복구 자료 정리 분류 아래 "
+        "ROLLBACK_JOURNAL_CLEANUP_FAILED 같은 대상별 코드가 표시되면, staging·backup·failed·journal 중 "
+        "검증된 정리 대상을 최대 3회 시도하고 실패한 시도 사이 250ms 대기한 뒤에도 남아 있다는 뜻입니다. "
+        "설치 버튼은 계속 잠기며 화면에서 '복구 다시 시도'를 사용할 수 있습니다. 반복되면 "
+        "'익명 진단 저장'을 사용하고, 폴더나 journal을 수동으로 삭제하지 마세요.",
+        "danger",
     )
     add_callout(
         doc,
@@ -819,6 +848,8 @@ Viewer PC IPv4 예     : 10.20.30.25
         "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램·방화벽 변경 중 "
         "현재 작업이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 다음 실행에서 완료되지 않은 "
         "journal이 남아 있으면 자동 복구하지 않고 별도의 '이전 상태 복구' 작업을 요구합니다. "
+        "staging·backup·failed·journal 정리가 잠시 실패하면 정확히 검증된 대상만 최대 3회 "
+        "시도하고 실패한 시도 사이 250ms 대기한 뒤 삭제 결과를 확인합니다. "
         "복구까지 실패하면 최초 설치 실패 코드를 별도로 유지하고 SETUP_ROLLBACK_FAILED와 "
         "실패한 ROLLBACK_* 단계를 함께 표시합니다.",
         "info",
@@ -920,7 +951,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=2.9,
         title="Agent 연결 창",
         alt_text="같은 PC 테스트 결과, 익명 진단 저장과 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
-        caption="그림 2. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
+        caption="그림 3. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
     )
     add_bullets(
         doc,
@@ -969,7 +1000,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=5.5,
         title="장비 관리 창",
         alt_text="장비명, 모델, IPv4, 계정 ID, 로그인 비밀번호, enable 비밀번호와 감시 설정을 입력하는 창",
-        caption="그림 3. Viewer가 보관하는 장비 및 계정 입력 화면",
+        caption="그림 4. Viewer가 보관하는 장비 및 계정 입력 화면",
     )
     add_table(
         doc,
@@ -1004,7 +1035,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=4.35,
         title="장비 명령 실행 화면",
         alt_text="show port status를 입력하고 데모 스위치의 익명화된 결과를 확인하는 장비 명령 탭",
-        caption="그림 4. 한 줄 show 명령 실행과 메모리 내 결과 확인",
+        caption="그림 5. 한 줄 show 명령 실행과 메모리 내 결과 확인",
     )
     add_table(
         doc,
@@ -1104,7 +1135,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=5.2,
         title="Viewer 대시보드",
         alt_text="장비 목록, 선택 장비 상태, 최근 이벤트와 Viewer 감시 상태를 보여 주는 대시보드",
-        caption="그림 5. Viewer 중심 대시보드 전체 화면",
+        caption="그림 6. Viewer 중심 대시보드 전체 화면",
     )
     add_table(
         doc,
@@ -1139,7 +1170,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=3.25,
         title="항상 위 미니 창",
         alt_text="정상, 경고, 장애 수와 최근 문제를 보여 주는 작은 항상 위 창",
-        caption="그림 6. 반복 운영용 미니 창",
+        caption="그림 7. 반복 운영용 미니 창",
     )
     add_image(
         doc,
@@ -1147,7 +1178,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         width=3.45,
         title="장애 알림 팝업",
         alt_text="데모 업링크 포트 Down 장애와 발생 시각을 보여 주는 알림 팝업",
-        caption="그림 7. 새 장애 알림 팝업",
+        caption="그림 8. 새 장애 알림 팝업",
     )
     add_bullets(
         doc,
@@ -1233,7 +1264,9 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("ROLLBACK_FILE_RESTORE_FAILED / ROLLBACK_DATA_CLEANUP_FAILED", "Program Files·ProgramData 권한, 파일 잠금, 백신·EDR 격리 확인. 증거 폴더는 보존"),
             ("ROLLBACK_SERVICE_RESTORE_FAILED", "파일 복구 완료 여부를 먼저 확인한 뒤 기존 서비스 설정·시작 실패를 Windows 관리자에게 전달"),
             ("ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED / ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED", "제품 HTTPS 규칙과 이전 legacy 규칙의 개별 복원 실패. 규칙 범위를 수동 확대하지 않음"),
-            ("ROLLBACK_JOURNAL_WRITE_FAILED / ROLLBACK_EVIDENCE_CLEANUP_FAILED", "journal 또는 증거 정리 단계 실패. 남은 기록·폴더를 삭제하지 않고 진단정보 전달"),
+            ("ROLLBACK_JOURNAL_WRITE_FAILED / ROLLBACK_EVIDENCE_CLEANUP_FAILED", "journal 또는 복구 증거 정리 단계 실패. 아래 대상별 안전 코드를 확인하고 남은 기록·폴더는 보존"),
+            ("ROLLBACK_STAGING_CLEANUP_FAILED / ROLLBACK_BACKUP_CLEANUP_FAILED", "현재 작업의 staging 또는 backup 자료 정리 실패. 수동 삭제 없이 익명 진단 전달"),
+            ("ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED / ROLLBACK_JOURNAL_CLEANUP_FAILED", "현재 작업의 failed 자료 또는 journal 정리·삭제 확인 실패. 설치는 잠긴 상태로 유지"),
             ("SETUP_EXISTING_NETWORKS_NOT_LOADED", "기존 관리망을 자동 복원하지 못함. 승인된 관리망을 다시 선택하거나 IPv4/prefix로 직접 추가"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택·추가한 관리망 내부인지 확인. 필요하면 승인된 사설 CIDR을 Setup에서 추가"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
@@ -1276,8 +1309,9 @@ Viewer PC IPv4 예     : 10.20.30.25
         "이전 상태 복구가 필요한 경우",
         "Setup은 남아 있는 journal을 읽기 전용으로 확인하고 SETUP_RECOVERY_REQUIRED를 표시합니다. "
         "이때 설치/업데이트는 잠겨 있으며 복구가 자동으로 시작되지 않습니다. '이전 상태 복구'를 "
-        "직접 실행하고, 성공한 경우에만 결과를 확인한 뒤 설치/업데이트를 별도로 시작하세요. "
-        "실패하면 '진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계를 전달합니다. "
+        "직접 실행하세요. 정리 대상 삭제와 새 journal 검사가 모두 성공한 경우에만 설치 버튼이 "
+        "활성화되며, 결과를 확인한 뒤 설치/업데이트를 별도로 시작합니다. 실패하면 "
+        "'진단정보 복사'로 최초 실패 코드와 실제 경로가 없는 ROLLBACK_* 안전 단계를 전달합니다. "
         ".__staging_, .__backup_, .__failed_ 폴더와 journal은 원인 확인 증거이므로 "
         "삭제·이동·이름 변경하지 마세요.",
         "danger",

@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.8-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.9-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.8-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.9-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.8-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.9-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -136,10 +136,17 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
   비활성화합니다.
 - 작업 기록이 손상됐거나 파일·서비스 상태가 기록과 맞지 않아 복구 안전성을 증명할 수 없으면
   복구와 설치를 모두 비활성화하고 Windows 관리자 확인을 요청합니다.
-- 복구가 성공하면 설치 버튼은 다시 활성화되지만 설치를 자동으로 시작하지 않습니다.
-  운영자가 검사 결과를 확인한 뒤 설치 또는 업데이트를 별도로 실행합니다.
+- 검증된 staging·backup·failed·journal 경로의 정리가 잠시 실패하면 Setup이 최대 3회
+  시도하고, 실패한 시도 사이에만 250ms 대기합니다. 다른 경로나 넓은 상위 폴더는 정리하지
+  않습니다.
+- 각 정리 대상이 실제로 사라졌고 새로 검사한 작업 기록에도 미완료 상태가 없을 때만 복구
+  성공과 설치 버튼 활성화를 표시합니다. 설치를 자동으로 시작하지 않으며, 운영자가 검사
+  결과를 확인한 뒤 설치 또는 업데이트를 별도로 실행합니다.
 - 복구가 실패하면 최초 설치·업데이트 실패 원인과 복구 단계별 원인을 구분해 표시합니다.
   하나의 `SETUP_ROLLBACK_FAILED`만 반복 표시되는 것으로 원인을 판단하지 마십시오.
+- `ROLLBACK_EVIDENCE_CLEANUP_FAILED` 범주에 해당하는 정리 실패는 화면 상단의
+  `SETUP_ROLLBACK_FAILED`와 staging·backup·failed·journal 대상별 전용 코드로 구분해
+  표시합니다. 실제 경로나 파일명은 진단에 넣지 않습니다.
 - 실패 화면에만 나타나는 `진단정보 복사`는 제품 버전, UTC 시각, 작업 종류, 안전한 오류 코드,
   작업 기록 형식·단계, 필요한 파일의 존재 여부와 서비스 상태만 클립보드에 복사합니다.
 - 검사·설치·복구가 끝나면 성공 여부와 관계없이 `익명 진단 저장`을 눌러 사내에서 외부로
@@ -353,6 +360,8 @@ Cause에는 실제 Viewer 주소나 규칙 원문 대신 `FIREWALL_REMOTE_ADDRES
   Setup이 복구 가능 상태로 표시할 때만 `이전 상태 복구`를 누릅니다.
 - `SETUP_ROLLBACK_FAILED`: 설치·업데이트 실패 뒤 이전 상태 복구도 완전히 끝나지 않았습니다.
   화면의 최초 실패 원인과 복구 단계별 원인을 함께 확인합니다.
+- `복구 완료`는 정리 대상 삭제 결과와 새 작업 기록 검사가 모두 성공한 경우에만 표시됩니다.
+  여전히 미완료 작업이 확인되면 설치 버튼은 비활성 상태로 유지됩니다.
 - 복구 성공은 설치 성공이 아닙니다. 설치 버튼이 다시 활성화되면 검사 결과를 확인하고
   운영자가 새 설치·업데이트를 별도로 시작합니다.
 - `진단정보 복사`는 실패 화면에서만 사용합니다. 복사된 내용에는 실제 IP/CIDR, PC·사용자명,
@@ -373,7 +382,11 @@ Cause에는 실제 Viewer 주소나 규칙 원문 대신 `FIREWALL_REMOTE_ADDRES
 | `ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED` | HTTPS/18443 방화벽 snapshot 복원 |
 | `ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED` | 이전 버전 방화벽 snapshot 복원 |
 | `ROLLBACK_JOURNAL_WRITE_FAILED` | 복구 상태 작업 기록 저장 |
-| `ROLLBACK_EVIDENCE_CLEANUP_FAILED` | 복구 완료 뒤 staging·backup·failed 자료 정리 |
+| `ROLLBACK_EVIDENCE_CLEANUP_FAILED` | 복구 완료 뒤 staging·backup·failed·journal 정리와 삭제 결과 확인 |
+| `ROLLBACK_STAGING_CLEANUP_FAILED` | 현재 작업의 staging 자료 정리 |
+| `ROLLBACK_BACKUP_CLEANUP_FAILED` | 현재 작업의 backup 자료 정리 |
+| `ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED` | 현재 작업의 failed 자료 정리 |
+| `ROLLBACK_JOURNAL_CLEANUP_FAILED` | 현재 작업 journal 정리와 삭제 결과 확인 |
 
 ### SETUP_EXISTING_NETWORKS_NOT_LOADED
 

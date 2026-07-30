@@ -475,7 +475,7 @@ public partial class MainWindow : Window
                 ClearDiagnosticsAction();
             }
 
-            if (_results.Count == 0)
+            if (!preserveExistingFailure)
             {
                 ShowResultSteps(pendingResult);
                 OperationStateText.Text = inspection.CanRecover
@@ -500,6 +500,7 @@ public partial class MainWindow : Window
         {
             RecoveryStatusBorder.Visibility = Visibility.Collapsed;
             RecoverButton.Visibility = Visibility.Collapsed;
+            RecoverButton.Content = "이전 상태 복구";
             ActionGuidanceText.Text =
                 "설정 변경은 설치 버튼을 누른 뒤에만 수행됩니다.";
             return;
@@ -507,6 +508,7 @@ public partial class MainWindow : Window
 
         RecoveryStatusBorder.Visibility = Visibility.Visible;
         RecoverButton.Visibility = Visibility.Visible;
+        RecoverButton.Content = "이전 상태 복구";
         if (inspection.CanRecover)
         {
             RecoveryStatusBorder.Background =
@@ -560,14 +562,69 @@ public partial class MainWindow : Window
             cancellationToken => _deployment.RecoverAsync(cancellationToken));
         RefreshRecoveryState(
             preserveFailureDiagnostics: result is { Succeeded: false });
-
-        if (result is { Succeeded: true } && !_recoveryInspection.Exists)
+        if (result is not null)
         {
-            OperationStateText.Text = "복구 완료 · 설치 준비됨";
-            OperationStateText.Foreground = Brushes.SeaGreen;
-            ActionGuidanceText.Text =
-                "복구가 완료되었습니다. 설치 / 업데이트 버튼을 눌러 다음 작업을 시작하세요.";
+            ApplyRecoveryCompletion(result);
         }
+    }
+
+    private void ApplyRecoveryCompletion(SetupOperationResult result)
+    {
+        var completion = SetupRecoveryCompletionPolicy.Evaluate(
+            result,
+            _recoveryInspection);
+        var displayedResult = completion.UseInspectionResult
+            ? SetupResultPresentation.BuildPendingRecoveryResult(
+                _recoveryInspection)
+            : result;
+
+        ShowResultSteps(displayedResult);
+        OperationStateText.Text = completion.StatusText;
+        OperationStateText.Foreground = completion.Severity switch
+        {
+            SetupRecoveryCompletionSeverity.Success => Brushes.SeaGreen,
+            SetupRecoveryCompletionSeverity.Warning => Brushes.DarkGoldenrod,
+            _ => Brushes.Firebrick
+        };
+        ActionGuidanceText.Text = completion.GuidanceText;
+
+        if (completion.ReadyForInstall)
+        {
+            ClearDiagnosticsAction();
+        }
+        else
+        {
+            _lastFailedOperation = displayedResult;
+            _lastOperationName = completion.UseInspectionResult
+                ? "recovery-inspection"
+                : "recovery";
+            ShowDiagnosticsAction();
+            RecoverButton.Content = "복구 다시 시도";
+            if (!result.Succeeded)
+            {
+                RecoveryStatusBorder.Visibility = Visibility.Visible;
+                RecoveryStatusBorder.Background =
+                    new SolidColorBrush(Color.FromRgb(254, 242, 242));
+                RecoveryStatusBorder.BorderBrush =
+                    new SolidColorBrush(Color.FromRgb(220, 38, 38));
+                RecoveryStatusTitle.Foreground = Brushes.Firebrick;
+                RecoveryStatusTitle.Text =
+                    "이전 상태를 완전히 복구하지 못했습니다";
+                RecoveryStatusText.Text =
+                    "설치 자료 정리 미완료 · 작업 기록 보존\n" +
+                    "설치는 계속 잠겨 있습니다. 복구 다시 시도를 누르고, 반복되면 익명 진단을 저장하세요.";
+                ActionGuidanceText.Text =
+                    "복구 다시 시도를 먼저 누르고, 반복되면 익명 진단을 저장하거나 진단정보를 복사해 관리자에게 전달하세요.";
+            }
+        }
+
+        CaptureCompletedOperation(
+            "recovery",
+            displayedResult,
+            _lastCompletedOperationDuration);
+        UpdateActionAvailability();
+        InstallButton.IsEnabled =
+            completion.ReadyForInstall && InstallButton.IsEnabled;
     }
 
     private async void InstallButton_Click(object sender, RoutedEventArgs e)

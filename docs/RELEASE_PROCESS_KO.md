@@ -2,8 +2,8 @@
 
 ## 릴리스 계약
 
-- 현재 버전: `0.10.8-poc`
-- 태그: annotated tag `v0.10.8-poc`
+- 현재 버전: `0.10.9-poc`
+- 태그: annotated tag `v0.10.9-poc`
 - 대상: Windows x64, self-contained, single-file managed publish, untrimmed
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP 정확히 두 개
 - 공개 패키지: PowerShell·CMD·개발 설정·DB·인증정보 제외
@@ -12,15 +12,15 @@
 공개 Asset:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip
 ```
 
 내부 검증 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -56,7 +56,12 @@ dotnet test SamsungSwitchWatch.sln -c Release --no-build
 - Agent ZIP의 기본 진입점이 `SamsungSwitchWatch.Agent.Setup.exe`임
 - Viewer ZIP은 `SamsungSwitchWatch.Viewer.exe`를 직접 실행하는 포터블 패키지임
 - 미완료 Agent 트랜잭션에서 설치가 차단되고 별도 `이전 상태 복구`만 허용됨
-- 복구 성공 뒤 설치가 자동 실행되지 않고, 실패 시 최초 원인과 복구 단계 원인이 분리됨
+- 복구 정리는 검증된 staging·backup·failed·journal 경로만 최대 3회 시도하고 실패한 시도 사이 250ms 대기함
+- 각 정리 대상 삭제와 새 작업 기록 검사가 모두 통과해야만 복구 성공과 설치 활성화로 표시됨
+- 복구 성공 뒤 설치가 자동 실행되지 않고, 실패 시 최초 원인과 복구 대상별 단계 원인이 분리됨
+- 복구 대상별 진단이 `ROLLBACK_STAGING_CLEANUP_FAILED`,
+  `ROLLBACK_BACKUP_CLEANUP_FAILED`, `ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED`,
+  `ROLLBACK_JOURNAL_CLEANUP_FAILED` 중 하나로 표시되고 실제 경로는 노출하지 않음
 - 실패 전용 `진단정보 복사`에 실제 IP·경로·사용자·자격 증명·방화벽 원문이 없음
 - Agent Setup과 Viewer의 `익명 진단 저장`이 수동으로만 동작하고
   `SSW_FIELD_DIAGNOSTIC/1` 허용 필드만 기록함
@@ -67,19 +72,21 @@ dotnet test SamsungSwitchWatch.sln -c Release --no-build
 운영 흐름, 화면 또는 버전이 바뀌면 다음 순서로 사용자 매뉴얼을 다시 만듭니다.
 
 1. `tools/build-user-manual.py`의 현재 버전과 내용을 갱신합니다.
-2. 비식별 WPF 화면 7개를 다시 캡처합니다.
+2. 비식별 WPF 화면 8개를 다시 캡처합니다.
 3. 생성 스크립트로 DOCX를 만듭니다.
 4. 프로젝트의 문서 렌더링 절차로 PDF와 QA 페이지 PNG를 만듭니다.
 5. 모든 페이지를 100% 배율로 확인하여 잘림, 깨짐과 오래된 설치 흐름이 없는지 검사합니다.
-6. 최종 DOCX, PDF와 문서에 사용한 비식별 화면 7개를 저장소에 반영합니다.
+6. 최종 DOCX, PDF와 문서에 사용한 비식별 화면 8개를 저장소에 반영합니다.
 
 Agent Setup 흐름이 바뀐 Release에서는 매뉴얼과 캡처가 다음 내용을 모두 보여야 합니다.
 
 - 미완료 작업을 읽기 전용으로 감지하고 설치를 비활성화하는 상태
 - 복구 가능한 상태에서만 표시되는 별도 `이전 상태 복구`
 - 복구 성공 뒤 설치가 자동으로 시작되지 않는 상태
+- 삭제 API 성공 뒤 대상 잔존 또는 새 작업 기록 잔존을 복구 성공으로 표시하지 않는 상태
+- 복구 자료 정리 실패에서 작업 기록 보존, 복구 재시도와 익명 진단 저장을 안내하는 상태
 - 손상되거나 안전성을 증명할 수 없는 상태의 관리자 안내
-- 최초 설치 실패와 복구 단계 실패가 분리된 결과
+- 최초 설치 실패와 staging·backup·failed·journal 복구 단계 실패가 분리된 결과
 - 실패 화면에서만 사용할 수 있는 `진단정보 복사`와 민감정보 제외 범위
 - 성공 또는 실패한 점검 뒤 사용할 수 있는 `익명 진단 저장`과 자동 저장 금지
 - staging·backup·failed 폴더와 작업 기록을 수동으로 정리하지 말라는 안내
@@ -94,7 +101,7 @@ python .\tools\build-user-manual.py `
 python .\tools\render-user-manual-pdf.py `
   --input .\docs\SamsungSwitchWatch_User_Manual_KO.docx `
   --output .\docs\SamsungSwitchWatch_User_Manual_KO.pdf `
-  --render-dir .\tmp\manual-render-0.10.8
+  --render-dir .\tmp\manual-render-0.10.9
 ```
 
 DOCX는 저장소 편집 원본이고 공개 패키지에는 넣지 않습니다. PDF는 두 ZIP에 포함합니다.
@@ -103,13 +110,13 @@ QA 페이지 PNG는 시각 검사 후 임시 폴더에만 두며 커밋하지 �
 ## 로컬 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.8-poc
+.\scripts\build-release.ps1 -Version 0.10.9-poc
 ```
 
 진단용 dirty 빌드는 게시하지 않습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.8-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.10.9-poc -AllowDirty
 ```
 
 빌드 스크립트는 다음 순서로 실행됩니다.
@@ -140,7 +147,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.8_POC_KO.md
+RELEASE_NOTES_0.10.9_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -166,7 +173,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.8_POC_KO.md
+RELEASE_NOTES_0.10.9_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -181,7 +188,7 @@ Viewer는 설치하지 않고 압축 해제한 폴더에서 EXE를 직접 실행
 $commit = (git rev-parse HEAD).Trim()
 .\scripts\test-package-contract.ps1 `
   -ReleaseDirectory .\artifacts\release `
-  -Version 0.10.8-poc `
+  -Version 0.10.9-poc `
   -ExpectedSourceCommit $commit
 .\scripts\test-release-workflow-contract.ps1
 ```
@@ -200,8 +207,8 @@ $commit = (git rev-parse HEAD).Trim()
 ## 태그와 게시
 
 ```powershell
-git tag -a v0.10.8-poc -m "Samsung Switch Watch v0.10.8-poc"
-git push origin v0.10.8-poc
+git tag -a v0.10.9-poc -m "Samsung Switch Watch v0.10.9-poc"
+git push origin v0.10.9-poc
 ```
 
 Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객체와 peeled commit이
@@ -214,10 +221,10 @@ Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객
 ## 게시 후 확인
 
 ```powershell
-$tag = 'v0.10.8-poc'
+$tag = 'v0.10.9-poc'
 $expected = @(
-  'SamsungSwitchWatch-Agent-0.10.8-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.10.8-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.10.9-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.10.9-poc-win-x64.zip'
 ) | Sort-Object
 $release = gh release view $tag --json isDraft,isPrerelease,assets,url | ConvertFrom-Json
 $actual = @($release.assets | ForEach-Object { $_.name } | Sort-Object)

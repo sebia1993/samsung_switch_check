@@ -7,6 +7,7 @@
 - Current device-command dashboard: node `37:333`
 - Current HTTPS Agent connection and same-PC preflight dialog: node `52:123`
 - Current Agent Setup same-PC address helper screen: node `54:363`
+- Current Agent Setup recovery-failed screen: node `58:120`
 - Current Agent Setup sanitized field-diagnostic screen: node `60:340`
 - Current Viewer connection sanitized field-diagnostic screen: node `62:99`
 - Previous HTTPS Agent connection dialog: node `36:2`
@@ -139,6 +140,31 @@ interrupted Agent Setup recovery.
 The four frames cover recovery required (`58:72`), recovery completed
 (`58:97`), retryable recovery failure with diagnostic-copy feedback
 (`58:120`), and unsafe recovery state (`58:147`).
+
+## v13 recovery evidence cleanup state
+
+Node `58:120` was updated in place as `Agent Setup / Recovery Failed v13`.
+It is the current source of truth when `ROLLBACK_EVIDENCE_CLEANUP_FAILED`
+prevents a recovery from being verified.
+
+1. The title is `이전 상태를 완전히 복구하지 못했습니다`; the safe detail is
+   `설치 자료 정리 미완료 · 작업 기록 보존`, so neither implies that recovery
+   completed.
+2. `설치 / 업데이트` remains disabled until a fresh journal inspection proves
+   that no pending recovery remains.
+3. The operator action is `복구 다시 시도`; repeated failure points to
+   `익명 진단 저장`.
+4. The screen does not offer manual evidence deletion, a bypass, or automatic
+   installation.
+5. The failure remains sanitized. The top-level state is
+   `SETUP_ROLLBACK_FAILED`, while the result row names the affected safe target
+   with one of
+   `ROLLBACK_STAGING_CLEANUP_FAILED`,
+   `ROLLBACK_BACKUP_CLEANUP_FAILED`,
+   `ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED`, and
+   `ROLLBACK_JOURNAL_CLEANUP_FAILED`. The generic
+   `ROLLBACK_EVIDENCE_CLEANUP_FAILED` remains a diagnostic classification; no
+   path or file name is shown.
 
 ## v12 sanitized field diagnostic flow
 

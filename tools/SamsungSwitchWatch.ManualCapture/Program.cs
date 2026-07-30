@@ -116,7 +116,7 @@ internal static class Program
                            diagnosticsOnly: false)
                        {
                             Width = 760,
-                            Height = 820,
+                            Height = 900,
                            ShowInTaskbar = previewAgentSetup,
                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 48,
@@ -188,6 +188,49 @@ internal static class Program
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
                     "중단된 이전 설치 기록을 읽기 전용으로 감지해 이전 상태 복구 버튼만 활성화하고 설치 업데이트 버튼은 비활성화한 Agent Setup 화면");
+
+                resultItems.ItemsSource = new[]
+                {
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "SETUP_FIREWALL_FAILED",
+                            "최초 설치 실패",
+                            SetupStepState.Failed,
+                            "설치 단계의 최초 실패 원인은 그대로 보존됩니다.")),
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            "ROLLBACK_JOURNAL_CLEANUP_FAILED",
+                            "복구 기록 정리",
+                            SetupStepState.Failed,
+                            "작업 기록 정리와 삭제 확인이 끝나지 않아 기록을 보존했습니다."))
+                };
+                recoveryStatusBorder.Background =
+                    new SolidColorBrush(Color.FromRgb(254, 242, 242));
+                recoveryStatusBorder.BorderBrush =
+                    new SolidColorBrush(Color.FromRgb(220, 38, 38));
+                recoveryStatusTitle.Text =
+                    "이전 상태를 완전히 복구하지 못했습니다";
+                recoveryStatusTitle.Foreground = Brushes.Firebrick;
+                recoveryStatusText.Text =
+                    "설치 자료 정리 미완료 · 작업 기록 보존\n" +
+                    "복구를 다시 시도하고 반복되면 익명 진단을 저장하세요.";
+                actionGuidance.Text =
+                    "복구 다시 시도 · 반복 시 익명 진단 저장";
+                copyDiagnostics.Visibility = Visibility.Visible;
+                var saveFieldDiagnostic = (Button)setupLifetime.Window.FindName(
+                    "SaveFieldDiagnosticButton");
+                saveFieldDiagnostic.Visibility = Visibility.Visible;
+                recoverButton.Content = "복구 다시 시도";
+                operationState.Text =
+                    "복구 실패 · SETUP_ROLLBACK_FAILED";
+                operationState.Foreground = Brushes.Firebrick;
+                RefreshLayout(setupLifetime.Window);
+                Capture(
+                    setupLifetime.Window,
+                    Path.Combine(
+                        outputDirectory,
+                        "00-agent-setup-recovery-failed.png"),
+                    "복구 실패 상위 상태와 journal 대상별 정리 실패를 구분하고 작업 기록과 설치 잠금을 유지하며 복구 재시도와 익명 진단 저장을 안내하는 Agent Setup 화면");
                 if (previewAgentSetup)
                 {
                     var previewDeadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
@@ -424,7 +467,7 @@ internal static class Program
                          (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
                          (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
                          (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
-                         (AgentConnectionProbeStage.Identity, "Agent 0.10.8-poc · API v4 확인")
+                         (AgentConnectionProbeStage.Identity, "Agent 0.10.9-poc · API v4 확인")
                      })
             {
                 progress?.Report(new LocalAgentPreflightUpdate(
@@ -446,11 +489,11 @@ internal static class Program
                 8,
                 65_536)
             {
-                ProductVersion = "0.10.8-poc"
+                ProductVersion = "0.10.9-poc"
             };
             var probeResult = AgentConnectionProbeResult.Success(
                 identity,
-                "Agent 0.10.8-poc · API v4 확인");
+                "Agent 0.10.9-poc · API v4 확인");
             return Task.FromResult(new LocalAgentPreflightResult(
                 true,
                 candidate,

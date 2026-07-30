@@ -16,16 +16,72 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public DirectoryAccessKind? AccessFailureKind { get; set; }
     public int AccessFailureOccurrence { get; set; } = 1;
     public int JournalDeleteFailuresRemaining { get; set; }
+    public int SilentJournalDeleteAttemptsRemaining { get; set; }
+    public bool RecreateJournalAfterDeleteVerification { get; set; }
+    public bool HideJournalAfterDeleteFailureUntilAccessNormalization { get; set; }
+    public bool KeepFalseProbeAfterAccessNormalization { get; set; }
+    public int JournalDeleteAttempts { get; private set; }
     public int JournalUpgradeWriteFailuresRemaining { get; set; }
     public int RollbackMarkerWriteFailuresRemaining { get; set; }
+    public int StagingDirectoryCleanupFailuresRemaining { get; set; }
+    public int StagingDirectoryCleanupAttempts { get; private set; }
+    public int BackupDirectoryCleanupFailuresRemaining { get; set; }
+    public int BackupDirectoryCleanupAttempts { get; private set; }
     public int FailedDirectoryCleanupFailuresRemaining { get; set; }
+    public int FailedDirectoryCleanupAttempts { get; private set; }
+    public bool HideCleanupDirectoryAfterDeleteFailureUntilAccessNormalization
+    {
+        get;
+        set;
+    }
     public int ActivationMoveFailuresRemaining { get; set; }
     public Func<string, string, bool>? MoveFailurePredicate { get; set; }
     public int MoveFailuresRemaining { get; set; }
     private int MatchingAccessRequests { get; set; }
+    private string? JournalReappearancePath { get; set; }
+    private string? JournalReappearanceContents { get; set; }
+    private int JournalMissingChecksBeforeReappearance { get; set; }
+    private string? HiddenJournalParentUntilAccessNormalization { get; set; }
+    private string? HiddenCleanupDirectoryUntilAccessNormalization { get; set; }
 
-    public bool FileExists(string path) => _inner.FileExists(path);
-    public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
+    public bool FileExists(string path)
+    {
+        if (HiddenJournalParentUntilAccessNormalization is not null &&
+            PhysicalSetupFileSystem.SamePath(
+                Path.GetDirectoryName(path)!,
+                HiddenJournalParentUntilAccessNormalization) &&
+            string.Equals(
+                Path.GetFileName(path),
+                "agent-native-setup-transaction.json",
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (JournalReappearancePath is not null &&
+            PhysicalSetupFileSystem.SamePath(path, JournalReappearancePath) &&
+            !File.Exists(path))
+        {
+            if (JournalMissingChecksBeforeReappearance > 0)
+            {
+                JournalMissingChecksBeforeReappearance--;
+                return false;
+            }
+
+            File.WriteAllText(path, JournalReappearanceContents!);
+            JournalReappearancePath = null;
+            JournalReappearanceContents = null;
+        }
+
+        return _inner.FileExists(path);
+    }
+    public bool DirectoryExists(string path) =>
+        HiddenCleanupDirectoryUntilAccessNormalization is not null &&
+        PhysicalSetupFileSystem.SamePath(
+            path,
+            HiddenCleanupDirectoryUntilAccessNormalization)
+            ? false
+            : _inner.DirectoryExists(path);
     public string ReadAllText(string path) => _inner.ReadAllText(path);
     public void WriteAllTextAtomic(string path, string contents)
     {
@@ -73,14 +129,39 @@ internal sealed class TestFileSystem : ISetupFileSystem
         DeleteDirectoryCore(path, recursive);
     public void DeleteFile(string path)
     {
-        if (JournalDeleteFailuresRemaining > 0 &&
-            string.Equals(
-                Path.GetFileName(path),
-                "agent-native-setup-transaction.json",
-                StringComparison.Ordinal))
+        var isJournal = string.Equals(
+            Path.GetFileName(path),
+            "agent-native-setup-transaction.json",
+            StringComparison.Ordinal);
+        if (isJournal)
         {
-            JournalDeleteFailuresRemaining--;
-            throw new IOException("simulated journal delete failure");
+            JournalDeleteAttempts++;
+            if (JournalDeleteFailuresRemaining > 0)
+            {
+                JournalDeleteFailuresRemaining--;
+                if (HideJournalAfterDeleteFailureUntilAccessNormalization)
+                {
+                    HiddenJournalParentUntilAccessNormalization =
+                        Path.GetDirectoryName(path);
+                }
+                throw new IOException("simulated journal delete failure");
+            }
+
+            if (SilentJournalDeleteAttemptsRemaining > 0)
+            {
+                SilentJournalDeleteAttemptsRemaining--;
+                return;
+            }
+
+            if (RecreateJournalAfterDeleteVerification)
+            {
+                RecreateJournalAfterDeleteVerification = false;
+                JournalReappearancePath = path;
+                JournalReappearanceContents = File.ReadAllText(path);
+                // DeploymentJournalStore.Delete and the bounded cleanup helper
+                // each verify absence. Recreate for RecoverAsync's final check.
+                JournalMissingChecksBeforeReappearance = 2;
+            }
         }
 
         File.Delete(path);
@@ -95,6 +176,26 @@ internal sealed class TestFileSystem : ISetupFileSystem
             ++MatchingAccessRequests == AccessFailureOccurrence)
         {
             throw new IOException("simulated directory access failure");
+        }
+
+        if (HiddenJournalParentUntilAccessNormalization is not null &&
+            accessKind == DirectoryAccessKind.AdministratorOnly &&
+            PhysicalSetupFileSystem.SamePath(
+                path,
+                HiddenJournalParentUntilAccessNormalization) &&
+            !KeepFalseProbeAfterAccessNormalization)
+        {
+            HiddenJournalParentUntilAccessNormalization = null;
+        }
+
+        if (HiddenCleanupDirectoryUntilAccessNormalization is not null &&
+            accessKind == DirectoryAccessKind.AdministratorOnly &&
+            PhysicalSetupFileSystem.SamePath(
+                path,
+                HiddenCleanupDirectoryUntilAccessNormalization) &&
+            !KeepFalseProbeAfterAccessNormalization)
+        {
+            HiddenCleanupDirectoryUntilAccessNormalization = null;
         }
     }
     public void ValidateDeploymentPaths(
@@ -122,6 +223,28 @@ internal sealed class TestFileSystem : ISetupFileSystem
 
     private void DeleteDirectoryCore(string path, bool recursive)
     {
+        if (Path.GetFileName(path).Contains(".__staging_", StringComparison.Ordinal))
+        {
+            StagingDirectoryCleanupAttempts++;
+            if (StagingDirectoryCleanupFailuresRemaining > 0)
+            {
+                StagingDirectoryCleanupFailuresRemaining--;
+                HideCleanupDirectoryAfterFailure(path);
+                throw new IOException("simulated staging directory cleanup failure");
+            }
+        }
+
+        if (Path.GetFileName(path).Contains(".__backup_", StringComparison.Ordinal))
+        {
+            BackupDirectoryCleanupAttempts++;
+            if (BackupDirectoryCleanupFailuresRemaining > 0)
+            {
+                BackupDirectoryCleanupFailuresRemaining--;
+                HideCleanupDirectoryAfterFailure(path);
+                throw new IOException("simulated backup directory cleanup failure");
+            }
+        }
+
         if (DataCleanupFailuresRemaining > 0 &&
             FreshDataDirectory is not null &&
             PhysicalSetupFileSystem.SamePath(path, FreshDataDirectory))
@@ -139,11 +262,26 @@ internal sealed class TestFileSystem : ISetupFileSystem
         if (FailedDirectoryCleanupFailuresRemaining > 0 &&
             Path.GetFileName(path).Contains(".__failed_", StringComparison.Ordinal))
         {
+            FailedDirectoryCleanupAttempts++;
             FailedDirectoryCleanupFailuresRemaining--;
+            HideCleanupDirectoryAfterFailure(path);
             throw new IOException("simulated failed directory cleanup failure");
         }
 
+        if (Path.GetFileName(path).Contains(".__failed_", StringComparison.Ordinal))
+        {
+            FailedDirectoryCleanupAttempts++;
+        }
+
         _inner.DeleteDirectory(path, recursive);
+    }
+
+    private void HideCleanupDirectoryAfterFailure(string path)
+    {
+        if (HideCleanupDirectoryAfterDeleteFailureUntilAccessNormalization)
+        {
+            HiddenCleanupDirectoryUntilAccessNormalization = path;
+        }
     }
 }
 

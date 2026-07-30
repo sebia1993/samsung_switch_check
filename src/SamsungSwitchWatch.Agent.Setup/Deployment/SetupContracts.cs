@@ -48,6 +48,14 @@ public static class SetupErrorCodes
     public const string RollbackJournalWriteFailed = "ROLLBACK_JOURNAL_WRITE_FAILED";
     public const string RollbackEvidenceCleanupFailed =
         "ROLLBACK_EVIDENCE_CLEANUP_FAILED";
+    public const string RollbackStagingCleanupFailed =
+        "ROLLBACK_STAGING_CLEANUP_FAILED";
+    public const string RollbackBackupCleanupFailed =
+        "ROLLBACK_BACKUP_CLEANUP_FAILED";
+    public const string RollbackFailedDirectoryCleanupFailed =
+        "ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED";
+    public const string RollbackJournalCleanupFailed =
+        "ROLLBACK_JOURNAL_CLEANUP_FAILED";
     public const string AlreadyRunning = "SETUP_ALREADY_RUNNING";
     public const string Cancelled = "SETUP_CANCELLED";
     public const string Unexpected = "SETUP_UNEXPECTED";
