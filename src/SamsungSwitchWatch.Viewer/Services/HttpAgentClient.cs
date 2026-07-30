@@ -35,10 +35,15 @@ public sealed class HttpAgentClient : IAgentClient
     private readonly HttpClient _queryHttpClient;
     private readonly CertificatePinValidator _certificateValidator;
     private readonly SemaphoreSlim _startGate = new(1, 1);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly object _operationSync = new();
     private AgentIdentityDto? _identity;
     private int _identityValidationReady;
     private int _connectionState = (int)AgentConnectionState.NeedsConnection;
-    private bool _disposed;
+    private int _activeOperationCount;
+    private int _disposeState;
+    private TaskCompletionSource<bool>? _operationsDrained;
+    private Task? _disposeTask;
 
     public HttpAgentClient(ViewerSettings settings) : this(settings, null, null, null)
     {
@@ -116,13 +121,14 @@ public sealed class HttpAgentClient : IAgentClient
     public bool SupportsStatelessV4 => true;
 
     public Task StartAsync(CancellationToken cancellationToken) =>
-        StartCoreAsync(forceIdentityRefresh: true, cancellationToken);
+        RunOperationAsync(
+            token => StartCoreAsync(forceIdentityRefresh: true, token),
+            cancellationToken);
 
     private async Task StartCoreAsync(
         bool forceIdentityRefresh,
         CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
         await _startGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -202,65 +208,104 @@ public sealed class HttpAgentClient : IAgentClient
 
     public async Task<AgentIdentityDto> GetIdentityAsync(CancellationToken cancellationToken)
     {
+        return await RunOperationAsync(GetIdentityCoreAsync, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<AgentIdentityDto> GetIdentityCoreAsync(CancellationToken cancellationToken)
+    {
         await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
         return Volatile.Read(ref _identity)!;
     }
 
-    public async Task<TelnetExecutionResultDto> TestTelnetAsync(
+    public Task<TelnetExecutionResultDto> TestTelnetAsync(
         TelnetTargetDto target,
-        CancellationToken cancellationToken)
-    {
-        ValidateTarget(target.Host, target.Port, target.Model);
-        await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
-        return await SendTelnetAsync(
-                AgentApiRoutes.TelnetTestV4,
-                target,
-                target.RequestId,
-                [],
-                cancellationToken)
-            .ConfigureAwait(false);
-    }
+        CancellationToken cancellationToken) =>
+        RunOperationAsync(
+            async token =>
+            {
+                ValidateTarget(target.Host, target.Port, target.Model);
+                await EnsureStartedAsync(token).ConfigureAwait(false);
+                return await SendTelnetAsync(
+                        AgentApiRoutes.TelnetTestV4,
+                        target,
+                        target.RequestId,
+                        [],
+                        token)
+                    .ConfigureAwait(false);
+            },
+            cancellationToken);
 
-    public async Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+    public Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
         TelnetExecuteRequestDto request,
+        CancellationToken cancellationToken) =>
+        RunOperationAsync(
+            async token =>
+            {
+                ValidateTarget(request.Host, request.Port, request.Model);
+                var normalizedCommands = NormalizeCommands(request.Commands);
+                var normalizedRequest = request with { Commands = normalizedCommands };
+                await EnsureStartedAsync(token).ConfigureAwait(false);
+                return await SendTelnetAsync(
+                        AgentApiRoutes.TelnetExecuteV4,
+                        normalizedRequest,
+                        request.RequestId,
+                        normalizedCommands,
+                        token)
+                    .ConfigureAwait(false);
+            },
+            cancellationToken);
+
+    public Task<AgentSnapshotDto> GetSnapshotAsync(CancellationToken cancellationToken) =>
+        RunOperationAsync(
+            async token =>
+            {
+                var identity = await GetIdentityCoreAsync(token).ConfigureAwait(false);
+                return new AgentSnapshotDto(
+                    DateTimeOffset.UtcNow,
+                    AgentConnectionState.Connected,
+                    [],
+                    0,
+                    $"Agent {identity.AgentId} · API v4",
+                    "Viewer 주도형 Telnet 중계 준비",
+                    identity.AgentId,
+                    ApiVersion: 4,
+                    AgentChannelStatus: "connected",
+                    ApiChannelStatus: "available",
+                    RealtimeChannelStatus: "viewer-local",
+                    OperationalStatuses:
+                    [
+                        new("HTTPS_TOFU", "Agent HTTPS", "인증서 공개키를 Viewer가 자동 확인합니다.", DeviceHealth.Normal),
+                        new("STATELESS_AGENT", "장비 정보 보관", "장비와 계정은 Viewer에만 저장됩니다.", DeviceHealth.Normal)
+                    ],
+                    ReadOnlyQueriesEnabled: true,
+                    ReadOnlyQueryMaxCommandLength: 128,
+                    ReadOnlyQueryMaxOutputBytes: identity.MaxOutputBytes);
+            },
+            cancellationToken);
+
+    private async Task RunOperationAsync(
+        Func<CancellationToken, Task> operation,
         CancellationToken cancellationToken)
     {
-        ValidateTarget(request.Host, request.Port, request.Model);
-        var normalizedCommands = NormalizeCommands(request.Commands);
-        var normalizedRequest = request with { Commands = normalizedCommands };
-        await EnsureStartedAsync(cancellationToken).ConfigureAwait(false);
-        return await SendTelnetAsync(
-                AgentApiRoutes.TelnetExecuteV4,
-                normalizedRequest,
-                request.RequestId,
-                normalizedCommands,
-                cancellationToken)
-            .ConfigureAwait(false);
+        using var lease = EnterOperation();
+        using var linkedCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                _lifetimeCancellation.Token);
+        await operation(linkedCancellation.Token).ConfigureAwait(false);
     }
 
-    public async Task<AgentSnapshotDto> GetSnapshotAsync(CancellationToken cancellationToken)
+    private async Task<T> RunOperationAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken)
     {
-        var identity = await GetIdentityAsync(cancellationToken).ConfigureAwait(false);
-        return new AgentSnapshotDto(
-            DateTimeOffset.UtcNow,
-            AgentConnectionState.Connected,
-            [],
-            0,
-            $"Agent {identity.AgentId} · API v4",
-            "Viewer 주도형 Telnet 중계 준비",
-            identity.AgentId,
-            ApiVersion: 4,
-            AgentChannelStatus: "connected",
-            ApiChannelStatus: "available",
-            RealtimeChannelStatus: "viewer-local",
-            OperationalStatuses:
-            [
-                new("HTTPS_TOFU", "Agent HTTPS", "인증서 공개키를 Viewer가 자동 확인합니다.", DeviceHealth.Normal),
-                new("STATELESS_AGENT", "장비 정보 보관", "장비와 계정은 Viewer에만 저장됩니다.", DeviceHealth.Normal)
-            ],
-            ReadOnlyQueriesEnabled: true,
-            ReadOnlyQueryMaxCommandLength: 128,
-            ReadOnlyQueryMaxOutputBytes: identity.MaxOutputBytes);
+        using var lease = EnterOperation();
+        using var linkedCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                _lifetimeCancellation.Token);
+        return await operation(linkedCancellation.Token).ConfigureAwait(false);
     }
 
     public Task<IReadOnlyList<SwitchEventDto>> GetRecentEventsAsync(int limit, CancellationToken cancellationToken) =>
@@ -352,7 +397,6 @@ public sealed class HttpAgentClient : IAgentClient
 
     private async Task EnsureStartedAsync(CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
         if (HasValidatedIdentity())
         {
             return;
@@ -554,17 +598,135 @@ public sealed class HttpAgentClient : IAgentClient
         return handler;
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+    private OperationLease EnterOperation()
+    {
+        lock (_operationSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposeState != 0, this);
+            checked
+            {
+                _activeOperationCount++;
+            }
+
+            return new OperationLease(this);
+        }
+    }
+
+    private void ExitOperation()
+    {
+        TaskCompletionSource<bool>? drained = null;
+        lock (_operationSync)
+        {
+            if (_activeOperationCount <= 0)
+            {
+                throw new InvalidOperationException("HTTP_AGENT_OPERATION_COUNT_INVALID");
+            }
+
+            _activeOperationCount--;
+            if (_activeOperationCount == 0 && _disposeState != 0)
+            {
+                drained = _operationsDrained;
+            }
+        }
+
+        drained?.TrySetResult(true);
+    }
 
     public ValueTask DisposeAsync()
     {
-        if (_disposed) return ValueTask.CompletedTask;
-        _disposed = true;
+        Task drainTask;
+        TaskCompletionSource<bool> completion;
+        lock (_operationSync)
+        {
+            if (_disposeTask is not null)
+            {
+                return new ValueTask(_disposeTask);
+            }
+
+            _disposeState = 1;
+            if (_activeOperationCount == 0)
+            {
+                drainTask = Task.CompletedTask;
+            }
+            else
+            {
+                _operationsDrained ??= new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                drainTask = _operationsDrained.Task;
+            }
+
+            completion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _disposeTask = completion.Task;
+        }
+
+        _ = CompleteDisposeAsync(drainTask, completion);
+        return new ValueTask(completion.Task);
+    }
+
+    private async Task CompleteDisposeAsync(
+        Task drainTask,
+        TaskCompletionSource<bool> completion)
+    {
+        // Cancellation callbacks are allowed to run synchronously. Yield before
+        // cancelling so DisposeAsync itself always returns a task that callers
+        // can bound with WaitAsync, even if a handler callback is slow.
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+
+        Exception? cancellationFailure = null;
         Volatile.Write(ref _identityValidationReady, 0);
-        _httpClient.Dispose();
-        _queryHttpClient.Dispose();
-        _startGate.Dispose();
-        return ValueTask.CompletedTask;
+        try
+        {
+            _lifetimeCancellation.Cancel();
+        }
+        catch (Exception exception)
+        {
+            cancellationFailure = exception;
+        }
+
+        await drainTask.ConfigureAwait(false);
+
+        Exception? disposalFailure = cancellationFailure;
+        TryDispose(_httpClient, ref disposalFailure);
+        TryDispose(_queryHttpClient, ref disposalFailure);
+        TryDispose(_startGate, ref disposalFailure);
+        TryDispose(_lifetimeCancellation, ref disposalFailure);
+
+        lock (_operationSync)
+        {
+            _disposeState = 2;
+        }
+
+        if (disposalFailure is null)
+        {
+            completion.TrySetResult(true);
+        }
+        else
+        {
+            completion.TrySetException(disposalFailure);
+        }
+    }
+
+    private static void TryDispose(IDisposable disposable, ref Exception? firstFailure)
+    {
+        try
+        {
+            disposable.Dispose();
+        }
+        catch (Exception exception)
+        {
+            firstFailure ??= exception;
+        }
+    }
+
+    private sealed class OperationLease(HttpAgentClient owner) : IDisposable
+    {
+        private HttpAgentClient? _owner = owner;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _owner, null)?.ExitOperation();
+        }
     }
 }
 

@@ -472,19 +472,26 @@
                                             <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBox x:Name="ReadOnlyQueryTextBox" Height="38" Padding="10,6"
-                                                 VerticalContentAlignment="Center" FontFamily="Roboto Mono, Consolas"
-                                                 Text="{Binding ReadOnlyQueryCommand, UpdateSourceTrigger=PropertyChanged}"
-                                                 MaxLength="{Binding ReadOnlyQueryMaxCommandLength}"
-                                                 IsEnabled="{Binding CanEditReadOnlyQuery}"
-                                                 KeyDown="ReadOnlyQueryTextBox_OnKeyDown"
-                                                 AutomationProperties.Name="읽기 전용 show 명령"
-                                                 AutomationProperties.HelpText="Enter 실행, 위아래 화살표 최근 명령, 실행 중 Esc 취소" />
+                                        <StackPanel>
+                                            <TextBox x:Name="ReadOnlyQueryTextBox" Height="38" Padding="10,6"
+                                                     VerticalContentAlignment="Center" FontFamily="Roboto Mono, Consolas"
+                                                     Text="{Binding ReadOnlyQueryCommand, UpdateSourceTrigger=PropertyChanged}"
+                                                     MaxLength="{Binding ReadOnlyQueryMaxCommandLength}"
+                                                     IsEnabled="{Binding CanEditReadOnlyQuery}"
+                                                     KeyDown="ReadOnlyQueryTextBox_OnKeyDown"
+                                                     AutomationProperties.Name="읽기 전용 show 명령"
+                                                     AutomationProperties.HelpText="Enter 실행, 위아래 화살표 최근 명령, 실행 중 Esc 취소" />
+                                            <TextBlock Margin="2,5,0,0" FontSize="11"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       Text="자주 쓰는 명령: show port status · show sylog tail num 100" />
+                                        </StackPanel>
                                         <Button Grid.Column="1" Margin="8,0,0,0" MinWidth="76"
+                                                VerticalAlignment="Top"
                                                 Style="{StaticResource PrimaryButton}" Content="_실행"
                                                 Command="{Binding ExecuteReadOnlyQueryCommand}"
                                                 AutomationProperties.Name="장비 명령 실행" />
                                         <Button Grid.Column="2" Margin="8,0,0,0" MinWidth="76"
+                                                VerticalAlignment="Top"
                                                 Style="{StaticResource SecondaryButton}" Content="_취소"
                                                 Command="{Binding CancelReadOnlyQueryCommand}"
                                                 AutomationProperties.Name="장비 명령 취소" />

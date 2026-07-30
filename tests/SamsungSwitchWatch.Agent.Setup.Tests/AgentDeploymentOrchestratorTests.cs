@@ -181,6 +181,69 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task DeployAsync_UnexpectedServiceStartFailurePreservesSafeDiagnosticsAndRollsBack()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.StartException =
+            new IOException(@"sensitive C:\service-start detail");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.PrimaryFailureCode);
+        Assert.Equal(
+            SetupFailureStage.ServiceStart,
+            result.DiagnosticMetadata?.Failure?.Stage);
+        Assert.Equal(
+            SetupFailureCategory.Io,
+            result.DiagnosticMetadata?.Failure?.Category);
+        Assert.True(
+            result.DiagnosticMetadata?.Failure?.DurationMilliseconds >= 0);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains(
+                "sensitive",
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task DeployAsync_UnexpectedHealthProbeFailurePreservesReadinessStage()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var health = new FakeHealthProbe(
+            ready: false,
+            beforeResult: () => throw new TimeoutException(
+                "sensitive readiness detail"));
+
+        var result = await fixture.CreateOrchestrator(health).DeployAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            SetupFailureStage.Readiness,
+            result.DiagnosticMetadata?.Failure?.Stage);
+        Assert.Equal(
+            SetupFailureCategory.Timeout,
+            result.DiagnosticMetadata?.Failure?.Category);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+    }
+
+    [Fact]
     public async Task DeployAsync_FreshRollbackCleanupCanResumeAndNextDeploySucceeds()
     {
         using var folder = new TemporaryFolder();
@@ -977,6 +1040,77 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task Diagnostics_UnexpectedHealthFailurePreservesSafeStageAndCategory()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(
+                ready: false,
+                beforeResult: () => throw new InvalidOperationException(
+                    "sensitive health detail")),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            SetupFailureStage.Readiness,
+            result.DiagnosticMetadata?.Failure?.Stage);
+        Assert.Equal(
+            SetupFailureCategory.InvalidState,
+            result.DiagnosticMetadata?.Failure?.Category);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains(
+                "sensitive",
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Diagnostics_NotReadyAgentRemainsVisibleWithoutBlockingInstallPreflight()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(
+                ready: false,
+                failureCode: AgentHealthProbeCode.PayloadInvalid),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            AgentHealthProbeCode.PayloadInvalid.ToString(),
+            result.AgentHealthCode);
+        var readiness = Assert.Single(
+            result.Steps,
+            step => step.Code == "AGENT_NOT_READY");
+        Assert.Equal(SetupStepState.Information, readiness.State);
+        Assert.Contains(
+            AgentDeploymentOrchestrator.AgentHealthDisplayName(
+                AgentHealthProbeCode.PayloadInvalid),
+            readiness.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Diagnostics_ReportsExistingViewerRuleMismatchWithoutBlockingRepair()
     {
         using var folder = new TemporaryFolder();
@@ -1447,6 +1581,14 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Contains(
             result.Steps,
             step => step.Code == SetupErrorCodes.Unexpected);
+        Assert.Equal(
+            SetupFailureStage.Recovery,
+            result.DiagnosticMetadata?.Failure?.Stage);
+        Assert.Equal(
+            SetupFailureCategory.InvalidState,
+            result.DiagnosticMetadata?.Failure?.Category);
+        Assert.True(
+            result.DiagnosticMetadata?.Failure?.DurationMilliseconds >= 0);
         Assert.True(journalStore.Exists);
     }
 
@@ -1834,6 +1976,33 @@ public sealed class AgentDeploymentOrchestratorTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.AlreadyRunning, result.Code);
+        Assert.DoesNotContain("install", fixture.Services.Operations);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.Equal(1, fixture.MachineLock.AcquireCount);
+        Assert.Equal(0, fixture.MachineLock.ReleaseCount);
+    }
+
+    [Fact]
+    public async Task DeployAsync_UnexpectedMachineLockFailureReturnsStableDiagnosticResult()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.MachineLock.AcquireException =
+            new UnauthorizedAccessException("sensitive lock detail");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            SetupFailureStage.OperationLock,
+            result.DiagnosticMetadata?.Failure?.Stage);
+        Assert.Equal(
+            SetupFailureCategory.AccessDenied,
+            result.DiagnosticMetadata?.Failure?.Category);
         Assert.DoesNotContain("install", fixture.Services.Operations);
         Assert.DoesNotContain("apply", fixture.Firewall.Operations);
         Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));

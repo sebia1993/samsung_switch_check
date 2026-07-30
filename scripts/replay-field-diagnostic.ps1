@@ -260,7 +260,7 @@ function Assert-SswAgentSetupSchema {
         [hashtable]$Values
     )
 
-    $fixedKeys = @(
+    $legacyFixedKeys = @(
         'Component',
         'ProductVersion',
         'GeneratedUtc',
@@ -280,12 +280,42 @@ function Assert-SswAgentSetupSchema {
         'Readiness',
         'StageCount'
     )
+    $healthExtensionKeys = @(
+        'AgentHealthCode',
+        'AgentRestartObserved'
+    )
+    $failureExtensionKeys = @(
+        'PrimaryFailureCode',
+        'FailureCategory',
+        'FailureStageDurationMs'
+    )
+    $allowedFixedKeys = @(
+        $legacyFixedKeys
+        $healthExtensionKeys
+        $failureExtensionKeys
+    )
 
-    Assert-SswKeys -Values $Values -RequiredKeys $fixedKeys -IsAllowed {
+    Assert-SswKeys -Values $Values -RequiredKeys $legacyFixedKeys -IsAllowed {
         param($key)
-        return $fixedKeys -ccontains $key -or
+        return $allowedFixedKeys -ccontains $key -or
             $key -cmatch '^Stage\.[0-9]{2}\.(Code|Status|DurationMs|ElapsedMs)$'
     }
+
+    $hasHealthExtension = @(
+        $healthExtensionKeys |
+            Where-Object { $Values.ContainsKey($_) }
+    )
+    $hasFailureExtension = @(
+        $failureExtensionKeys |
+            Where-Object { $Values.ContainsKey($_) }
+    )
+    if ($hasHealthExtension.Count -notin @(0, $healthExtensionKeys.Count) -or
+        $hasFailureExtension.Count -notin @(0, $failureExtensionKeys.Count) -or
+        ($hasFailureExtension.Count -gt 0 -and
+         $hasHealthExtension.Count -eq 0)) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
     Assert-SswCommonFieldValues -Values $Values `
         -GeneratedUtcPattern '^[0-9]{8}T[0-9]{9}Z$' `
         -WindowsBuildPattern '^(UNAVAILABLE|WIN_[0-9]+_[0-9]+_[0-9]+_[0-9]+)$'
@@ -308,6 +338,25 @@ function Assert-SswAgentSetupSchema {
     Assert-SswPattern -Values $Values -Key 'Readiness' `
         -Pattern '^(PASS|FAIL|NOT_RUN)$'
 
+    if ($hasHealthExtension.Count -gt 0) {
+        Assert-SswPattern -Values $Values -Key 'AgentHealthCode' `
+            -Pattern '^[A-Z][A-Z0-9_]{1,63}$'
+        Assert-SswPattern -Values $Values -Key 'AgentRestartObserved' `
+            -Pattern '^(TRUE|FALSE)$'
+    }
+
+    if ($hasFailureExtension.Count -gt 0) {
+        Assert-SswPattern -Values $Values -Key 'PrimaryFailureCode' `
+            -Pattern '^[A-Z][A-Z0-9_]{1,63}$'
+        Assert-SswPattern -Values $Values -Key 'FailureCategory' `
+            -Pattern (
+                '^(NOT_RUN|CLASSIFIED|ACCESS_DENIED|IO|TIMEOUT|' +
+                'WINDOWS_API|INVALID_STATE|PLATFORM|UNKNOWN)$'
+            )
+        Assert-SswPattern -Values $Values -Key 'FailureStageDurationMs' `
+            -Pattern '^(unknown|[0-9]{1,8})$'
+    }
+
     if ($Values.Result -ceq 'SUCCESS') {
         if ($Values.ErrorCode -cne 'OK' -or $Values.FailedStage -cne 'NONE') {
             Stop-SswFieldDiagnostic -Code $script:SchemaError
@@ -319,7 +368,10 @@ function Assert-SswAgentSetupSchema {
 
     Assert-SswIntegerRange -Value $Values.StageCount -Minimum 0 -Maximum 64
     $stageCount = [int]$Values.StageCount
-    if ($Values.Count -ne ($fixedKeys.Count + (4 * $stageCount))) {
+    $expectedFixedKeyCount = $legacyFixedKeys.Count +
+        $hasHealthExtension.Count +
+        $hasFailureExtension.Count
+    if ($Values.Count -ne ($expectedFixedKeyCount + (4 * $stageCount))) {
         Stop-SswFieldDiagnostic -Code $script:SchemaError
     }
 

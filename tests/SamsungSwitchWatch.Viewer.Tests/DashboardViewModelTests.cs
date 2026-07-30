@@ -553,6 +553,110 @@ public sealed class DashboardViewModelTests
     }
 
     [Fact]
+    public async Task SwitchClient_SuccessfulSwapIgnoresPreviousClientDisposeFailure()
+    {
+        var folder = Path.Combine(
+            Path.GetTempPath(),
+            "SamsungSwitchWatch-ViewerTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var original = new FakeAgentClient
+            {
+                DisposeException = new IOException("old client cleanup failed")
+            };
+            var replacement = new FakeAgentClient();
+            var store = new ViewerSettingsStore(
+                Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings
+                {
+                    DemoMode = true,
+                    AgentUri = "http://original.example.test:18443"
+                },
+                store,
+                new QueueFactory(original, replacement));
+            await viewModel.InitializeAsync();
+
+            await viewModel.SwitchClientAsync(new ViewerSettings
+            {
+                DemoMode = true,
+                AgentUri = "http://replacement.example.test:18443"
+            });
+
+            Assert.Equal(
+                "https://replacement.example.test:18443",
+                viewModel.CurrentSettings.AgentUri);
+            Assert.Equal(
+                AgentConnectionState.Connected,
+                viewModel.ConnectionState);
+            Assert.True(original.DisposeCalled);
+            Assert.False(replacement.DisposeCalled);
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SwitchClient_FailedPreflightPreservesOriginalFailureWhenReplacementDisposeFails()
+    {
+        var folder = Path.Combine(
+            Path.GetTempPath(),
+            "SamsungSwitchWatch-ViewerTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var original = new FakeAgentClient();
+            var replacement = new FakeAgentClient
+            {
+                StartException = new HttpRequestException("hub unavailable"),
+                DisposeException = new IOException("replacement cleanup failed")
+            };
+            var store = new ViewerSettingsStore(
+                Path.Combine(folder, "settings.json"));
+            var viewModel = new DashboardViewModel(
+                new ViewerSettings
+                {
+                    DemoMode = true,
+                    AgentUri = "http://original.example.test:18443"
+                },
+                store,
+                new QueueFactory(original, replacement));
+            await viewModel.InitializeAsync();
+
+            var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
+                viewModel.SwitchClientAsync(new ViewerSettings
+                {
+                    DemoMode = true,
+                    AgentUri = "http://replacement.example.test:18443"
+                }));
+
+            Assert.Equal("hub unavailable", exception.Message);
+            Assert.Equal(
+                "https://original.example.test:18443",
+                viewModel.CurrentSettings.AgentUri);
+            Assert.False(original.DisposeCalled);
+            Assert.True(replacement.DisposeCalled);
+            await viewModel.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(folder))
+            {
+                Directory.Delete(folder, true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task SwitchClient_PostSwapCatchupFailureKeepsReplacementAndDisposesPrevious()
     {
         var folder = Path.Combine(Path.GetTempPath(), "SamsungSwitchWatch-ViewerTests", Guid.NewGuid().ToString("N"));
@@ -1101,7 +1205,9 @@ public sealed class DashboardViewModelTests
         Assert.Equal("현재 확인 정상 · 미감시 1대", viewModel.NormalSummaryCaption);
         viewModel.ReportOperation("test");
         fixture.Client.EmitState(AgentConnectionState.Offline);
-        Assert.Equal("마지막 확인 정상 · 미감시 1대", viewModel.NormalSummaryCaption);
+        Assert.Equal(
+            "현재 확인 불가 · 마지막 정상 · 미감시 1대",
+            viewModel.NormalSummaryCaption);
         await viewModel.DisposeAsync();
     }
 
@@ -1278,6 +1384,7 @@ public sealed class DashboardViewModelTests
         public TaskCompletionSource RecentBlocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ReleaseRecent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool DisposeCalled { get; private set; }
+        public Exception? DisposeException { get; set; }
         public string? LastExecutedDeviceId { get; private set; }
         public string? LastExecutedCommandId { get; private set; }
         public string? LastReadOnlyQueryDeviceId { get; private set; }
@@ -1395,6 +1502,10 @@ public sealed class DashboardViewModelTests
         public ValueTask DisposeAsync()
         {
             DisposeCalled = true;
+            if (DisposeException is not null)
+            {
+                return new ValueTask(Task.FromException(DisposeException));
+            }
             return ValueTask.CompletedTask;
         }
     }

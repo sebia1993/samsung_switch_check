@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.11 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.12 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.11-poc"
+VERSION = "0.10.12-poc"
 DOCUMENT_DATE = "2026-07-30"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -455,7 +455,14 @@ def add_body(doc, text, *, bold_prefix=None, center=False):
     return p
 
 
-def add_callout(doc, label, text, kind="info"):
+def add_callout(
+    doc,
+    label,
+    text,
+    kind="info",
+    *,
+    page_break_before=False,
+):
     palette = {
         "info": (LIGHT_BLUE, BLUE),
         "success": (PALE_GREEN, GREEN),
@@ -465,6 +472,7 @@ def add_callout(doc, label, text, kind="info"):
     fill, accent = palette[kind]
     p = doc.add_paragraph()
     set_paragraph_spacing(p, before=4, after=8, line=1.18)
+    p.paragraph_format.page_break_before = page_break_before
     p.paragraph_format.keep_together = True
     p.paragraph_format.left_indent = Inches(0.08)
     p.paragraph_format.right_indent = Inches(0.04)
@@ -852,6 +860,12 @@ Viewer PC IPv4 예     : 10.20.30.25
         "관리자에게 실패 코드를 전달하세요.",
         "danger",
     )
+    add_unnumbered_heading(
+        doc,
+        "설치 안정성과 진단",
+        level=2,
+        page_break_before=True,
+    )
     add_callout(
         doc,
         "업데이트 안정성",
@@ -897,6 +911,12 @@ Viewer PC IPv4 예     : 10.20.30.25
         "네트워크 주소로 자동 정규화되며 RFC1918 범위만 허용됩니다. 검사에서 서비스, TCP/18443 listener, "
         "방화벽, Agent 내부 Viewer 허용 주소, 활성 프로필과 live/ready를 확인합니다.",
         "info",
+    )
+    add_unnumbered_heading(
+        doc,
+        "설치·연결 오류 확인",
+        level=2,
+        page_break_before=True,
     )
     add_callout(
         doc,
@@ -968,6 +988,12 @@ Viewer PC IPv4 예     : 10.20.30.25
         alt_text="같은 PC 테스트 결과, 익명 진단 저장과 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
         caption="그림 3. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
     )
+    add_unnumbered_heading(
+        doc,
+        "연결 실패 화면과 확인 순서",
+        level=3,
+        page_break_before=True,
+    )
     add_image(
         doc,
         images_dir / "02-agent-connection-failed.png",
@@ -999,6 +1025,12 @@ Viewer PC IPv4 예     : 10.20.30.25
         "별도로 확인합니다. 실제 원격 배치 전에는 Agent Setup에 원격 Viewer 고정 IPv4를 다시 "
         "적용하고 원격 Viewer PC에서 연결 진단을 반복하세요.",
         "info",
+    )
+    add_unnumbered_heading(
+        doc,
+        "연결 진단과 지원 정보",
+        level=2,
+        page_break_before=True,
     )
     add_callout(
         doc,
@@ -1034,6 +1066,12 @@ Viewer PC IPv4 예     : 10.20.30.25
         title="장비 관리 창",
         alt_text="장비명, 모델, IPv4, 계정 ID, 로그인 비밀번호, enable 비밀번호와 감시 설정을 입력하는 창",
         caption="그림 5. Viewer가 보관하는 장비 및 계정 입력 화면",
+    )
+    add_unnumbered_heading(
+        doc,
+        "장비 입력 항목",
+        level=3,
+        page_break_before=True,
     )
     add_table(
         doc,

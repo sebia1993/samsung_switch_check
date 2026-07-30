@@ -62,9 +62,22 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         bool ExplicitlyUnsupported,
         string? ErrorCode);
     private sealed record DeviceLifecycleToken(string DeviceId, long Revision);
-    private sealed record MonitoringWorkItem(ManagedDeviceProfile Profile, long Revision)
+    private sealed record MonitoringWorkItem(
+        ManagedDeviceProfile Profile,
+        long Revision,
+        long ClientEpoch)
     {
         public DeviceLifecycleToken Token => new(Profile.Id, Revision);
+    }
+    private sealed record AutomaticCollectionFreshness(
+        long Revision,
+        AutomaticCollectionFreshnessState State,
+        DateTimeOffset? LastSuccessfulCollectionUtc);
+    private enum AutomaticCollectionFreshnessState
+    {
+        AwaitingFirstCollection,
+        Current,
+        Deferred
     }
     private enum AgentChannel { Http, Realtime }
 
@@ -99,6 +112,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private readonly Dictionary<string, SemaphoreSlim> _deviceOperationGates =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, long> _deviceLifecycleRevisions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AutomaticCollectionFreshness> _automaticCollectionFreshness =
+        new(StringComparer.Ordinal);
     private readonly SortedDictionary<long, AgentEventChangeDto> _changeBuffer = [];
     private readonly HashSet<long> _liveAlertSequences = [];
     private IAgentClient _client;
@@ -140,6 +155,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     private long _settingsGeneration;
     private long _feedResetCount;
     private long _nextDeviceLifecycleRevision;
+    private long _monitoringClientEpoch;
     private bool _hasSnapshot;
     private bool _allowLiveAlerts;
     private bool _initialized;
@@ -480,6 +496,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         var profiles = loadResult.Devices;
         _lastManagedDeviceProfiles = profiles;
+        lock (_deviceLifecycleSync)
+        {
+            SynchronizeAutomaticCollectionFreshnessUnsafe(profiles);
+        }
         ApplyManagedDeviceProfiles(profiles, preferredId);
         EnsureMonitorLoopStarted();
     }
@@ -870,6 +890,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public int WarningCount => HealthSummary.Warning;
     public int CriticalCount => HealthSummary.Critical;
     public int DisconnectedCount => HealthSummary.Disconnected;
+    public int LoadingCount => HealthSummary.Loading;
     public int UnmonitoredCount => HealthSummary.Unmonitored;
     public int MonitoredCount => HealthSummary.Monitored;
     public int CriticalDisplayCount => CriticalCount + DisconnectedCount;
@@ -885,13 +906,18 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     public string EventCountText => $"{UnacknowledgedDisplayText} · 표시 {VisibleEventCount:N0}건";
     public string ApiVersionText => $"API v{_apiVersion}";
     public string NormalSummaryCaption =>
-        $"{(ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo ? "현재 확인" : "마지막 확인")} 정상"
+        (ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
+            ? "현재 확인 정상"
+            : "현재 확인 불가 · 마지막 정상")
+        + (LoadingCount > 0 ? $" · 확인 대기 {LoadingCount}대" : string.Empty)
         + (UnmonitoredCount > 0 ? $" · 미감시 {UnmonitoredCount}대" : string.Empty);
     public string MiniCurrentStatusText => ConnectionState is AgentConnectionState.Connected or AgentConnectionState.Demo
         ? HasAutomaticMonitoringStoreFailure
             ? "Agent 연결됨 · 자동 감시 중지됨"
         : MonitoredCount == 0
             ? "Agent 연결됨 · 감시 대상 없음"
+        : LoadingCount > 0
+            ? $"장비 상태 확인 대기 {LoadingCount}대"
             : "현재 감시 상태 확인됨"
         : "현재 상태 미확인";
     public DeviceHealth MiniIssueHealth => ConnectionState switch
@@ -904,6 +930,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _ when WarningCount > 0 => DeviceHealth.Warning,
         _ when HasManagedDeviceStoreFailure => DeviceHealth.Warning,
         _ when MonitoredCount == 0 => DeviceHealth.Empty,
+        _ when LoadingCount > 0 => DeviceHealth.Loading,
         _ => DeviceHealth.Normal
     };
     public string MiniIssueTitle => ConnectionState switch
@@ -921,6 +948,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         _ when WarningCount > 0 => $"경고 장비 {WarningCount}대",
         _ when TotalCount == 0 => "등록된 장비 없음",
         _ when MonitoredCount == 0 => "주기 감시 대상 없음",
+        _ when LoadingCount > 0 => $"상태 확인 대기 {LoadingCount}대",
         _ when UnacknowledgedCount > 0 => $"현재 감시 장비 정상 · 확인 대기 {UnacknowledgedCount}건",
         _ => "현재 감시 장비 정상"
     };
@@ -932,6 +960,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             MonitoringStoreWarning() ?? "자동 감시 저장소를 사용할 수 없습니다.",
         AgentConnectionState.Connected or AgentConnectionState.Demo when MonitoredCount == 0 =>
             "장비 관리에서 접속 시험 후 주기 감시를 켜세요.",
+        AgentConnectionState.Connected or AgentConnectionState.Demo when LoadingCount > 0 =>
+            "첫 수집을 기다리거나 다른 장비 작업이 끝난 뒤 다시 확인합니다.",
         AgentConnectionState.Connected or AgentConnectionState.Demo =>
             $"새 로그 {NewLogCount}건 · 미확인 이벤트 {UnacknowledgedCount}건",
         AgentConnectionState.Connecting => "첫 상태를 기다리는 중",
@@ -1264,7 +1294,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     }
                     var oldClient = _client;
                     UnsubscribeClient(oldClient);
-                    _client = replacement;
+                    lock (_deviceLifecycleSync)
+                    {
+                        _client = replacement;
+                        _monitoringClientEpoch++;
+                        _automaticCollectionFreshness.Clear();
+                    }
                     _statelessV4 = true;
                     _currentAgentId = identity.AgentId;
                     SubscribeClient(replacement);
@@ -1301,8 +1336,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     EnsureMonitorLoopStarted();
                     if (!ReferenceEquals(oldClient, replacement))
                     {
-                        try { await oldClient.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false); }
-                        catch (Exception exception) when (exception is TimeoutException or OperationCanceledException) { }
+                        await DisposeClientBestEffortAsync(oldClient)
+                            .ConfigureAwait(false);
                     }
                     return;
                 }
@@ -1348,7 +1383,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     }
                     previous = _client;
                     UnsubscribeClient(previous);
-                    _client = replacement;
+                    lock (_deviceLifecycleSync)
+                    {
+                        _client = replacement;
+                        _monitoringClientEpoch++;
+                        _automaticCollectionFreshness.Clear();
+                    }
                     _currentAgentId = snapshot.AgentId;
                     Interlocked.Exchange(ref _changeCursor, replacementCursor);
                     lock (_changeSync)
@@ -1409,8 +1449,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     }
                     if (!ReferenceEquals(previous, replacement))
                     {
-                        try { await previous.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false); }
-                        catch (Exception exception) when (exception is TimeoutException or OperationCanceledException) { }
+                        await DisposeClientBestEffortAsync(previous)
+                            .ConfigureAwait(false);
                     }
                 }
                 if (synchronized && Interlocked.Read(ref _feedResetCount) == feedResetBefore)
@@ -1427,7 +1467,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         SafeMessage(exception),
                         "failed");
                 }
-                if (!ReferenceEquals(replacement, _client)) await replacement.DisposeAsync().ConfigureAwait(false);
+                if (!ReferenceEquals(replacement, _client))
+                {
+                    await DisposeClientBestEffortAsync(replacement)
+                        .ConfigureAwait(false);
+                }
                 throw;
             }
         }
@@ -1599,6 +1643,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try
         {
             if (!TryCaptureMonitoringWorkItems(
+                    out var client,
                     out var workItems,
                     out var deviceStoreErrorCode))
             {
@@ -1606,7 +1651,6 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     .ConfigureAwait(false);
                 return;
             }
-            var client = _client;
             try
             {
                 await client.StartAsync(linked.Token).ConfigureAwait(false);
@@ -2371,7 +2415,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         try
         {
             entered = await operationGate.WaitAsync(0, cancellationToken).ConfigureAwait(false);
-            if (!entered) return;
+            if (!entered)
+            {
+                if (!ReferenceEquals(client, _client)) return;
+                await SetAutomaticCollectionDeferredAsync(workItem).ConfigureAwait(false);
+                return;
+            }
 
             if (!TryLoadMonitoringContext(
                     workItem,
@@ -2427,6 +2476,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 {
                     return;
                 }
+                if (!TrySetAutomaticCollectionCurrent(workItem, tested.CompletedUtc))
+                {
+                    return;
+                }
                 await ApplyMonitoringResultToUiAsync(
                     workItem,
                     testRecoveries,
@@ -2477,6 +2530,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                          item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
                      cancellationToken).ConfigureAwait(false);
             }
+            if (!TrySetAutomaticCollectionCurrent(workItem, result.CompletedUtc))
+            {
+                return;
+            }
             await ApplyMonitoringResultToUiAsync(
                 workItem,
                 [],
@@ -2523,6 +2580,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
             if (!IsCurrentMonitoringWorkItem(workItem)) return;
             var authenticationFailure = IsAuthenticationFailure(code);
+            if (IsTransientBusy(code))
+            {
+                await SetAutomaticCollectionDeferredAsync(workItem).ConfigureAwait(false);
+                return;
+            }
             if (authenticationFailure && !TryBlockMonitoringForCredentialFailure(workItem))
             {
                 return;
@@ -2796,6 +2858,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                                          && !deviceStoreUnavailable
                                          && !credentialBlocked
                                          && !monitoringStoreUnavailable;
+        var freshness = effectiveMonitoringEnabled
+            ? GetAutomaticCollectionFreshness(profile)
+            : null;
+        var collectionPending = effectiveMonitoringEnabled
+                                && freshness?.State
+                                is not AutomaticCollectionFreshnessState.Current;
         var activeInterfaceIssues = effectiveMonitoringEnabled
             ? _monitoringStore?.GetActiveInterfaceConditionCount(profile.Id) ?? 0
             : 0;
@@ -2831,6 +2899,10 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         }
         var capabilityIssue = capabilities.Any(item =>
             !item.Supported || !item.State.Equals("Ready", StringComparison.OrdinalIgnoreCase));
+        var capabilityWarning = capabilities.Any(item =>
+            !item.Supported
+            || (!item.State.Equals("Ready", StringComparison.OrdinalIgnoreCase)
+                && !item.State.Equals("Initializing", StringComparison.OrdinalIgnoreCase)));
         var health = deviceStoreUnavailable
             ? DeviceHealth.Warning
             : activeFailure is not null
@@ -2838,10 +2910,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : monitoringStoreUnavailable
                      || credentialBlocked
                      || credentialCorrupt
-                     || !profile.ConnectionVerified
-                     || activeInterfaceIssues > 0
-                     || (effectiveMonitoringEnabled && capabilityIssue)
+                      || !profile.ConnectionVerified
+                      || activeInterfaceIssues > 0
+                      || (effectiveMonitoringEnabled && capabilityWarning)
                 ? DeviceHealth.Warning
+                : collectionPending
+                    ? DeviceHealth.Loading
                 : effectiveMonitoringEnabled ? DeviceHealth.Normal : DeviceHealth.Empty;
         var summary = deviceStoreUnavailable
             ? $"장비 목록 확인 불가 · {deviceStoreError}"
@@ -2857,8 +2931,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 ? $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}"
                 : activeInterfaceIssues > 0
                     ? $"포트 상태 변경 확인 필요 · {activeInterfaceIssues}개"
-                : effectiveMonitoringEnabled && capabilityIssue
+                : effectiveMonitoringEnabled && capabilityWarning
                     ? "주기 감시 중 · 일부 명령 확인 필요"
+                : collectionPending
+                    ? freshness?.State == AutomaticCollectionFreshnessState.Deferred
+                        ? "수집 보류 · 장비 작업 진행 중"
+                        : "첫 주기 감시 결과 대기"
                     : effectiveMonitoringEnabled ? "Viewer 실행 중 주기 감시" : "등록됨 · 주기 감시 꺼짐";
         var capabilityMetric = deviceStoreUnavailable || monitoringStoreUnavailable
             ? "확인 불가"
@@ -2879,8 +2957,12 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 ? "CredentialCorrupt"
             : activeInterfaceIssues > 0
                 ? "Degraded"
-            : effectiveMonitoringEnabled && capabilityIssue
+            : effectiveMonitoringEnabled && capabilityWarning
                 ? "Degraded"
+            : collectionPending
+                ? freshness?.State == AutomaticCollectionFreshnessState.Deferred
+                    ? "Deferred"
+                    : "Initializing"
                 : effectiveMonitoringEnabled ? "Monitoring" : "Registered";
         var collectionError = deviceStoreUnavailable
             ? deviceStoreError
@@ -2903,7 +2985,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             profile.Model,
             profile.Host,
             health,
-            profile.LastConnectionTestUtc ?? profile.UpdatedUtc,
+            freshness?.LastSuccessfulCollectionUtc
+            ?? profile.LastConnectionTestUtc
+            ?? profile.UpdatedUtc,
             summary,
             "-",
             [
@@ -2919,8 +3003,34 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         : credentialBlocked || deviceStoreUnavailable || monitoringStoreUnavailable
                             ? DeviceHealth.Warning
                             : DeviceHealth.Empty),
+                new(
+                    "현재 수집",
+                    deviceStoreUnavailable || monitoringStoreUnavailable
+                        ? "확인 불가"
+                        : !effectiveMonitoringEnabled
+                            ? "감시 꺼짐"
+                            : freshness?.State switch
+                            {
+                                AutomaticCollectionFreshnessState.Current => "최신 결과 반영",
+                                AutomaticCollectionFreshnessState.Deferred => "다른 작업 후 재확인",
+                                _ => "첫 결과 대기"
+                            },
+                    deviceStoreUnavailable || monitoringStoreUnavailable
+                        ? DeviceHealth.Warning
+                        : !effectiveMonitoringEnabled
+                            ? DeviceHealth.Empty
+                            : collectionPending
+                                ? DeviceHealth.Loading
+                                : DeviceHealth.Normal),
                 new("활성 포트 변경", $"{activeInterfaceIssues}개", activeInterfaceIssues > 0 ? DeviceHealth.Warning : DeviceHealth.Normal),
-                new("수집 기능", capabilityMetric, capabilityIssue ? DeviceHealth.Warning : DeviceHealth.Normal)
+                new(
+                    "수집 기능",
+                    capabilityMetric,
+                    capabilityWarning
+                        ? DeviceHealth.Warning
+                        : capabilityIssue
+                            ? DeviceHealth.Loading
+                            : DeviceHealth.Normal)
             ],
             capabilities,
             collectionState,
@@ -2944,12 +3054,125 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         NotifySummaryChanged();
     }
 
+    private AutomaticCollectionFreshness GetAutomaticCollectionFreshness(
+        ManagedDeviceProfile profile)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            var revision = GetOrCreateDeviceLifecycleRevisionUnsafe(profile.Id);
+            if (_automaticCollectionFreshness.TryGetValue(profile.Id, out var existing)
+                && existing.Revision == revision)
+            {
+                return existing;
+            }
+
+            var created = new AutomaticCollectionFreshness(
+                revision,
+                AutomaticCollectionFreshnessState.AwaitingFirstCollection,
+                null);
+            _automaticCollectionFreshness[profile.Id] = created;
+            return created;
+        }
+    }
+
+    private void SynchronizeAutomaticCollectionFreshnessUnsafe(
+        IReadOnlyList<ManagedDeviceProfile> profiles)
+    {
+        var eligibleProfiles = profiles
+            .Where(profile =>
+                profile.MonitoringEnabled
+                && profile.ConnectionVerified
+                && !IsMonitoringCredentialBlocked(profile.Id)
+                && IsMonitoringStoreOperational)
+            .ToArray();
+        var eligibleIds = eligibleProfiles
+            .Select(profile => profile.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var staleId in _automaticCollectionFreshness.Keys
+                     .Where(id => !eligibleIds.Contains(id))
+                     .ToArray())
+        {
+            _automaticCollectionFreshness.Remove(staleId);
+        }
+
+        foreach (var profile in eligibleProfiles)
+        {
+            var revision = GetOrCreateDeviceLifecycleRevisionUnsafe(profile.Id);
+            if (_automaticCollectionFreshness.TryGetValue(profile.Id, out var existing)
+                && existing.Revision == revision)
+            {
+                continue;
+            }
+
+            _automaticCollectionFreshness[profile.Id] =
+                new AutomaticCollectionFreshness(
+                    revision,
+                    AutomaticCollectionFreshnessState.AwaitingFirstCollection,
+                    null);
+        }
+    }
+
+    private bool TrySetAutomaticCollectionCurrent(
+        MonitoringWorkItem workItem,
+        DateTimeOffset completedUtc) =>
+        TrySetAutomaticCollectionFreshness(
+            workItem,
+            AutomaticCollectionFreshnessState.Current,
+            completedUtc);
+
+    private async Task SetAutomaticCollectionDeferredAsync(
+        MonitoringWorkItem workItem)
+    {
+        if (!TrySetAutomaticCollectionFreshness(
+                workItem,
+                AutomaticCollectionFreshnessState.Deferred,
+                null))
+        {
+            return;
+        }
+
+        await RunOnUiForDeviceRevisionAsync(
+                workItem.Token,
+                () => UpdateManagedDevicePresentation(workItem.Profile.Id))
+            .ConfigureAwait(false);
+    }
+
+    private bool TrySetAutomaticCollectionFreshness(
+        MonitoringWorkItem workItem,
+        AutomaticCollectionFreshnessState state,
+        DateTimeOffset? completedUtc)
+    {
+        lock (_deviceLifecycleSync)
+        {
+            if (!IsCurrentMonitoringWorkItemUnsafe(workItem, out _)) return false;
+
+            _automaticCollectionFreshness.TryGetValue(
+                workItem.Profile.Id,
+                out var existing);
+            var lastSuccessfulCollectionUtc =
+                state == AutomaticCollectionFreshnessState.Current
+                    ? completedUtc?.ToUniversalTime()
+                    : existing is { Revision: var revision }
+                      && revision == workItem.Revision
+                        ? existing.LastSuccessfulCollectionUtc
+                        : null;
+            _automaticCollectionFreshness[workItem.Profile.Id] =
+                new AutomaticCollectionFreshness(
+                    workItem.Revision,
+                    state,
+                    lastSuccessfulCollectionUtc);
+            return true;
+        }
+    }
+
     private bool TryCaptureMonitoringWorkItems(
+        out IAgentClient client,
         out MonitoringWorkItem[] workItems,
         out string errorCode)
     {
         lock (_deviceLifecycleSync)
         {
+            client = _client;
             var loadResult = _deviceStore!.LoadWithStatus();
             _managedDeviceLoadStatus = loadResult.Status;
             if (!IsManagedDeviceStoreOperational)
@@ -2961,6 +3184,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             }
 
             _lastManagedDeviceProfiles = loadResult.Devices;
+            SynchronizeAutomaticCollectionFreshnessUnsafe(
+                _lastManagedDeviceProfiles);
             workItems = loadResult.Devices
                 .Where(item =>
                     item.MonitoringEnabled
@@ -2968,7 +3193,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                     && !IsMonitoringCredentialBlocked(item.Id))
                 .Select(item => new MonitoringWorkItem(
                     item,
-                    GetOrCreateDeviceLifecycleRevisionUnsafe(item.Id)))
+                    GetOrCreateDeviceLifecycleRevisionUnsafe(item.Id),
+                    _monitoringClientEpoch))
                 .ToArray();
             errorCode = string.Empty;
             return true;
@@ -3029,7 +3255,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         out ManagedDeviceProfile profile)
     {
         profile = null!;
-        if (!_deviceLifecycleRevisions.TryGetValue(workItem.Profile.Id, out var revision)
+        if (workItem.ClientEpoch != _monitoringClientEpoch
+            || !_deviceLifecycleRevisions.TryGetValue(workItem.Profile.Id, out var revision)
             || revision != workItem.Revision)
         {
             return false;
@@ -3172,6 +3399,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
     {
         var revision = ++_nextDeviceLifecycleRevision;
         _deviceLifecycleRevisions[id] = revision;
+        _automaticCollectionFreshness.Remove(id);
         return revision;
     }
 
@@ -3652,6 +3880,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(WarningCount));
         OnPropertyChanged(nameof(CriticalCount));
         OnPropertyChanged(nameof(DisconnectedCount));
+        OnPropertyChanged(nameof(LoadingCount));
         OnPropertyChanged(nameof(UnmonitoredCount));
         OnPropertyChanged(nameof(MonitoredCount));
         OnPropertyChanged(nameof(CriticalDisplayCount));
@@ -3723,6 +3952,29 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         catch
         {
             // Connection diagnostics must never affect transport recovery.
+        }
+    }
+
+    private async Task DisposeClientBestEffortAsync(IAgentClient client)
+    {
+        try
+        {
+            await client.DisposeAsync()
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            TryWriteDiagnostic(
+                "client-dispose",
+                "VIEWER_CLIENT_DISPOSE_TIMEOUT");
+        }
+        catch
+        {
+            TryWriteDiagnostic(
+                "client-dispose",
+                "VIEWER_CLIENT_DISPOSE_FAILED");
         }
     }
 
@@ -3995,8 +4247,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             try { _monitoringStore?.EndSession(); } catch { }
         }
 
-        try { await _client.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); }
-        catch (Exception exception) when (exception is OperationCanceledException or TimeoutException) { }
+        await DisposeClientBestEffortAsync(_client).ConfigureAwait(false);
         Interlocked.Exchange(ref _readOnlyQueryCancellation, null)?.Dispose();
         lock (_settingsSync)
         {

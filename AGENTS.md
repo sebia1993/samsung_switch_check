@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.11-poc
+.\scripts\build-release.ps1 -Version 0.10.12-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -74,4 +74,13 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
   rollback dependencies or legacy moves are incomplete, block later file mutation and preserve
   snapshots, archives, backups and journal evidence.
 - Internal Actions artifacts contain six validation files; GitHub Release custom Assets contain only the versioned Agent and Viewer ZIP files.
+- Keep Setup preflight readiness compatible with the legacy API v4 minimum payload, but require
+  HTTPS protocol and the exact package version for install/update completion.
+- Keep unexpected Setup diagnostics limited to safe stage/category/timing values; never add exception
+  text, PID, address or path data.
+- Viewer automatic status must distinguish awaiting/deferred collection and current unavailable
+  from a confirmed current result. Dispose replaced HTTP clients without racing active requests.
+- Run the extracted executable smoke gate for Viewer, Mock Agent and Agent Setup in an elevated
+  Windows CI environment. This does not replace field checks for Samsung firmware, EDR, firewall
+  routing or the full native installation path.
 - Verify `git ls-files AGENTS.md` before GitHub handoff.

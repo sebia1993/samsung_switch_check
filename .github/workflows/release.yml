@@ -8,7 +8,7 @@ on:
       version:
         description: Build-only semantic version (manual runs never publish)
         required: true
-        default: 0.10.11-poc
+        default: 0.10.12-poc
         type: string
 
 permissions:
@@ -169,6 +169,11 @@ jobs:
           SSW_RELEASE_VERSION: ${{ needs.package.outputs.version }}
           SSW_EXPECTED_SOURCE_COMMIT: ${{ needs.package.outputs.source-commit }}
         run: .\scripts\test-package-contract.ps1 -ReleaseDirectory .\artifacts\release -Version $env:SSW_RELEASE_VERSION -ExpectedSourceCommit $env:SSW_EXPECTED_SOURCE_COMMIT
+      - name: Execute downloaded release binaries without installed runtimes
+        shell: powershell
+        env:
+          SSW_RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: .\scripts\test-release-executable-smoke.ps1 -ReleaseDirectory .\artifacts\release -Version $env:SSW_RELEASE_VERSION
 
   publish:
     if: github.event_name == 'push'

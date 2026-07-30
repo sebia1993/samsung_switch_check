@@ -59,6 +59,39 @@ public sealed class AgentHealthIdentityTests
         Assert.False(HttpsAgentHealthProbe.IsExpectedReadiness(json, "0.10.0-poc"));
     }
 
+    [Theory]
+    [InlineData(
+        """{"status":"ready","agentId":"legacy-agent","apiVersion":4,"utc":"2026-07-30T00:00:00Z"}""",
+        AgentHealthProbeCode.Ready)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":"https","productVersion":"0.9.0-poc"}""",
+        AgentHealthProbeCode.Ready)]
+    [InlineData(
+        """{"status":"ready","apiVersion":3,"protocol":"https","productVersion":"0.9.0-poc"}""",
+        AgentHealthProbeCode.ApiVersionMismatch)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":"http","productVersion":"0.9.0-poc"}""",
+        AgentHealthProbeCode.ProtocolMismatch)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":"https","productVersion":""}""",
+        AgentHealthProbeCode.PayloadInvalid)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":1}""",
+        AgentHealthProbeCode.PayloadInvalid)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"productVersion":1}""",
+        AgentHealthProbeCode.PayloadInvalid)]
+    public void ClassifyReadiness_WithoutExpectedVersionStillValidatesAgentContract(
+        string json,
+        AgentHealthProbeCode expected)
+    {
+        Assert.Equal(
+            expected,
+            HttpsAgentHealthProbe.ClassifyReadiness(
+                json,
+                expectedProductVersion: null));
+    }
+
     [Fact]
     public void AgentHealthProbeResult_ExposesOnlySafeClassificationAndRestartFlag()
     {
@@ -117,6 +150,62 @@ public sealed class AgentHealthIdentityTests
         Assert.False(result.RestartObserved);
         Assert.Equal([4321], observedProcessIds);
         Assert.Equal(["/health/ready"], handler.RequestPaths);
+    }
+
+    [Fact]
+    public async Task WaitUntilReadyAsync_WithoutExpectedVersionReadsAndValidatesReadyPayload()
+    {
+        var handler = RecordingHandler.Json(
+            """{"status":"ready","agentId":"legacy-agent","apiVersion":4,"utc":"2026-07-30T00:00:00Z"}""");
+        var probe = CreateProbe(
+            handler,
+            (_, _) => HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            expectedProductVersion: null,
+            () => RunningService(4321),
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+
+        Assert.True(result.Ready);
+        Assert.Equal(AgentHealthProbeCode.Ready, result.Code);
+        Assert.Equal(["/health/ready"], handler.RequestPaths);
+    }
+
+    [Theory]
+    [InlineData(
+        """{"status":"ready","apiVersion":3,"protocol":"https","productVersion":"0.9.0-poc"}""",
+        AgentHealthProbeCode.ApiVersionMismatch)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":"http","productVersion":"0.9.0-poc"}""",
+        AgentHealthProbeCode.ProtocolMismatch)]
+    [InlineData(
+        """{"status":"ready","apiVersion":4,"protocol":"https","productVersion":""}""",
+        AgentHealthProbeCode.PayloadInvalid)]
+    [InlineData("{}", AgentHealthProbeCode.PayloadInvalid)]
+    public async Task WaitUntilReadyAsync_WithoutExpectedVersionRejectsInvalidReadyPayload(
+        string payload,
+        AgentHealthProbeCode expected)
+    {
+        var handler = RecordingHandler.Json(payload);
+        var probe = CreateProbe(
+            handler,
+            (_, _) => HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            expectedProductVersion: null,
+            () => RunningService(4321),
+            TimeSpan.FromMilliseconds(50),
+            CancellationToken.None);
+
+        Assert.False(result.Ready);
+        Assert.Equal(expected, result.Code);
+        Assert.NotEmpty(handler.RequestPaths);
+        Assert.All(
+            handler.RequestPaths,
+            path => Assert.Equal("/health/ready", path));
     }
 
     [Fact]

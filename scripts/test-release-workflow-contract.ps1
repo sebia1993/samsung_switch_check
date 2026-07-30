@@ -5,6 +5,8 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $workflowPath = Join-Path $repoRoot '.github\workflows\release.yml'
 $buildScriptPath = Join-Path $repoRoot 'scripts\build-release.ps1'
 $packageContractPath = Join-Path $repoRoot 'scripts\test-package-contract.ps1'
+$executableSmokePath =
+    Join-Path $repoRoot 'scripts\test-release-executable-smoke.ps1'
 $releaseProcessPath = Join-Path $repoRoot 'docs\RELEASE_PROCESS_KO.md'
 $windowsCiPath = Join-Path $repoRoot '.github\workflows\windows-ci.yml'
 $agentsPath = Join-Path $repoRoot 'AGENTS.md'
@@ -15,6 +17,7 @@ foreach ($path in @(
     $workflowPath,
     $buildScriptPath,
     $packageContractPath,
+    $executableSmokePath,
     $releaseProcessPath,
     $windowsCiPath,
     $agentsPath,
@@ -28,6 +31,7 @@ foreach ($path in @(
 $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
 $buildScript = Get-Content -LiteralPath $buildScriptPath -Raw -Encoding UTF8
 $packageContract = Get-Content -LiteralPath $packageContractPath -Raw -Encoding UTF8
+$executableSmoke = Get-Content -LiteralPath $executableSmokePath -Raw -Encoding UTF8
 $releaseProcess = Get-Content -LiteralPath $releaseProcessPath -Raw -Encoding UTF8
 $windowsCi = Get-Content -LiteralPath $windowsCiPath -Raw -Encoding UTF8
 $agents = Get-Content -LiteralPath $agentsPath -Raw -Encoding UTF8
@@ -135,6 +139,51 @@ Assert-Pattern $workflow 'gh release verify-asset\s+\$tag' 'Every published rele
 Assert-Pattern $workflow '--method DELETE\s+`?\s*\r?\n\s*"repos/\$\(\$env:SSW_REPOSITORY\)/releases/\$releaseId"' 'Pre-publication cleanup must delete only the confirmed numeric release ID.'
 Assert-Pattern $workflow '\$draftCreated\s+-and\s+-not\s+\$publishAttempted' 'Automatic cleanup must be limited to failures before publication is attempted.'
 Assert-Pattern $workflow '-ExpectedSourceCommit\s+\$env:SSW_SOURCE_COMMIT' 'Published package validation must bind the manifest to the workflow commit.'
+
+$releaseVerifyStart =
+    $workflow.IndexOf("  verify-download:", [StringComparison]::Ordinal)
+$releasePublishStart =
+    $workflow.IndexOf("  publish:", [StringComparison]::Ordinal)
+if ($releaseVerifyStart -lt 0 -or $releasePublishStart -le $releaseVerifyStart) {
+    throw 'The downloaded release verification job boundary is missing.'
+}
+$releaseVerifyBlock = $workflow.Substring(
+    $releaseVerifyStart,
+    $releasePublishStart - $releaseVerifyStart)
+$releasePackageContractIndex = $releaseVerifyBlock.IndexOf(
+    '.\scripts\test-package-contract.ps1',
+    [StringComparison]::Ordinal)
+$releaseExecutableSmokeIndex = $releaseVerifyBlock.IndexOf(
+    '.\scripts\test-release-executable-smoke.ps1',
+    [StringComparison]::Ordinal)
+if ($releasePackageContractIndex -lt 0 -or
+    $releaseExecutableSmokeIndex -le $releasePackageContractIndex) {
+    throw 'Downloaded release executables must run only after the static package contract passes.'
+}
+Assert-PatternCount $releaseVerifyBlock `
+    ([regex]::Escape('.\scripts\test-release-executable-smoke.ps1')) 1 `
+    'The release download job must execute the packaged binaries exactly once.'
+
+$ciVerifyStart = $windowsCi.IndexOf(
+    "  verify-downloaded-artifact:",
+    [StringComparison]::Ordinal)
+if ($ciVerifyStart -lt 0) {
+    throw 'The Windows CI downloaded artifact verification job is missing.'
+}
+$ciVerifyBlock = $windowsCi.Substring($ciVerifyStart)
+$ciPackageContractIndex = $ciVerifyBlock.IndexOf(
+    '.\scripts\test-package-contract.ps1',
+    [StringComparison]::Ordinal)
+$ciExecutableSmokeIndex = $ciVerifyBlock.IndexOf(
+    '.\scripts\test-release-executable-smoke.ps1',
+    [StringComparison]::Ordinal)
+if ($ciPackageContractIndex -lt 0 -or
+    $ciExecutableSmokeIndex -le $ciPackageContractIndex) {
+    throw 'Windows CI must execute downloaded binaries only after the static package contract passes.'
+}
+Assert-PatternCount $ciVerifyBlock `
+    ([regex]::Escape('.\scripts\test-release-executable-smoke.ps1')) 1 `
+    'Windows CI must execute the packaged binaries exactly once.'
 
 if ($workflow -match "(?m)^\s*\`$arguments\s*=\s*@\('-Version'") {
     throw 'Array splatting cannot preserve named parameters for a PowerShell script.'
@@ -370,6 +419,33 @@ Assert-Pattern $packageContract "SamsungSwitchWatch\.Agent\.Setup\.exe" `
     'Package contract must require the native Agent Setup entrypoint.'
 Assert-Pattern $packageContract "\.Extension\s+-in\s+@\('\.ps1',\s*'\.cmd',\s*'\.bat'\)" `
     'Package contract must reject every public PowerShell, CMD and BAT file.'
+Assert-Pattern $executableSmoke `
+    'SamsungSwitchWatch-Agent-\$Version-win-x64\.zip' `
+    'Executable smoke must use the versioned Agent ZIP.'
+Assert-Pattern $executableSmoke `
+    'SamsungSwitchWatch-Viewer-\$Version-win-x64\.zip' `
+    'Executable smoke must use the versioned Viewer ZIP.'
+Assert-Pattern $executableSmoke "-Argument '--install-smoke-check'" `
+    'Executable smoke must run the Viewer package self-check.'
+Assert-Pattern $executableSmoke "-Argument '--package-smoke-check'" `
+    'Executable smoke must run the Agent Setup package self-check.'
+Assert-Pattern $executableSmoke "-ArgumentList '--service'" `
+    'Executable smoke must run the packaged service-only Agent runtime.'
+Assert-Pattern $executableSmoke "Agent__MockMode\s*=\s*'true'" `
+    'Executable smoke must isolate the Agent from real devices through MockMode.'
+Assert-Pattern $executableSmoke "commands\s*=\s*@\('show port status'\)" `
+    'Executable smoke must execute one allowlisted read-only query.'
+Assert-Pattern $executableSmoke 'DOTNET_ROOT_X64\s*=\s*\$runtimeProbeDirectory' `
+    'Executable smoke must not rely on the runner-installed .NET runtime.'
+Assert-Pattern $executableSmoke "HTTPS_PROXY\s*=\s*'http://127\.0\.0\.1:1'" `
+    'Executable smoke must fail closed for external network access.'
+Assert-Pattern $executableSmoke 'Test-SswAdministrator' `
+    'Agent Setup executable smoke must fail before showing UAC when the runner is not elevated.'
+Assert-Pattern $executableSmoke 'Remove-Item\s+-LiteralPath\s+\$smokeRoot\s+-Recurse\s+-Force' `
+    'Executable smoke must clean its extracted package and runtime state.'
+if ($executableSmoke -match '(?im)^\s*(?:&\s*)?dotnet(?:\.exe)?\s+') {
+    throw 'Executable smoke must launch only packaged EXEs, never the installed dotnet command.'
+}
 
 if ($workflow -notmatch 'default:\s*(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)') {
     throw 'Manual build default version is missing or invalid.'
