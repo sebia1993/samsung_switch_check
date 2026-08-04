@@ -686,6 +686,45 @@ public sealed class AgentHealthIdentityTests
     }
 
     [Fact]
+    public async Task WaitUntilReadyAsync_UsesFreshClosedHttp11ConnectionForEveryAttempt()
+    {
+        var handlers = new List<AttemptHandler>();
+        var attempt = 0;
+        var probe = new HttpsAgentHealthProbe(
+            () =>
+            {
+                var handler = new AttemptHandler(
+                    Interlocked.Increment(ref attempt));
+                handlers.Add(handler);
+                return handler;
+            },
+            (_, _) =>
+                HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess,
+            TimeSpan.FromMilliseconds(1));
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            "0.10.0-poc",
+            () => RunningService(4321),
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+
+        Assert.True(result.Ready);
+        Assert.Equal(2, result.HttpAttemptCount);
+        Assert.Equal(2, handlers.Count);
+        Assert.All(handlers, handler => Assert.True(handler.Disposed));
+        Assert.All(
+            handlers,
+            handler => Assert.Equal(HttpVersion.Version11, handler.RequestVersion));
+        Assert.All(
+            handlers,
+            handler => Assert.Equal(
+                HttpVersionPolicy.RequestVersionExact,
+                handler.VersionPolicy));
+        Assert.All(handlers, handler => Assert.True(handler.ConnectionClose));
+    }
+
+    [Fact]
     public async Task WaitUntilReadyAsync_PropagatesCallerCancellation()
     {
         var handler = RecordingHandler.Json(
@@ -742,6 +781,51 @@ public sealed class AgentHealthIdentityTests
         {
             RequestPaths.Add(request.RequestUri!.AbsolutePath);
             return response(request, cancellationToken);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            // Most existing tests intentionally reuse this recording double
+            // across retries. Production handlers are still disposed per
+            // attempt; disposal ownership is asserted by AttemptHandler.
+        }
+    }
+
+    private sealed class AttemptHandler(int attempt) : HttpMessageHandler
+    {
+        public bool Disposed { get; private set; }
+        public Version? RequestVersion { get; private set; }
+        public HttpVersionPolicy VersionPolicy { get; private set; }
+        public bool ConnectionClose { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestVersion = request.Version;
+            VersionPolicy = request.VersionPolicy;
+            ConnectionClose = request.Headers.ConnectionClose == true;
+            if (attempt == 1)
+            {
+                return Task.FromException<HttpResponseMessage>(
+                    new HttpRequestException(
+                        HttpRequestError.ConnectionError,
+                        "synthetic first-attempt failure"));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"status":"ready","apiVersion":4,"protocol":"https","productVersion":"0.10.0-poc"}""",
+                    Encoding.UTF8,
+                    "application/json")
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
         }
     }
 

@@ -71,11 +71,6 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             throw new ArgumentOutOfRangeException(nameof(timeout));
         }
 
-        using var handler = _handlerFactory();
-        using var client = new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromSeconds(5)
-        };
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
         var lastCode = AgentHealthProbeCode.DeadlineExceeded;
@@ -149,7 +144,17 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             {
                 httpAttemptCount++;
                 lastTransportPhase = AgentHealthTransportPhase.RequestStarted;
-                using var readyRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
+                using var handler = _handlerFactory();
+                using var client = new HttpClient(handler, disposeHandler: false)
+                {
+                    Timeout = TimeSpan.FromSeconds(5)
+                };
+                using var readyRequest = new HttpRequestMessage(HttpMethod.Get, endpoint)
+                {
+                    Version = HttpVersion.Version11,
+                    VersionPolicy = HttpVersionPolicy.RequestVersionExact
+                };
+                readyRequest.Headers.ConnectionClose = true;
                 using var readyResponse = await client.SendAsync(
                     readyRequest,
                     HttpCompletionOption.ResponseHeadersRead,
@@ -421,6 +426,7 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
     private static HttpMessageHandler CreateHandler() =>
         new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             UseProxy = false,
             ServerCertificateCustomValidationCallback = (_, _, _, _) => true
         };

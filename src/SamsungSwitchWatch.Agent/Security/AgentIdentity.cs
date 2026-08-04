@@ -202,7 +202,12 @@ public static class AgentIdentityStore
                 var certificate = X509CertificateLoader.LoadPkcs12(
                     exported,
                     password: null,
-                    X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
+                    // Windows Schannel cannot reliably use an ephemeral ECDSA
+                    // private key for a TLS server credential. Load it into the
+                    // service account's user key set for the lifetime of the
+                    // Agent process. Exportable and PersistKeySet are
+                    // intentionally not enabled.
+                    X509KeyStorageFlags.UserKeySet);
                 if (!certificate.HasPrivateKey ||
                     certificate.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(30))
                 {
