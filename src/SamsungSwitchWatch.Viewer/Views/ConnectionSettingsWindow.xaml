@@ -1,8 +1,9 @@
 <Window x:Class="SamsungSwitchWatch.Viewer.Views.ConnectionSettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Agent 연결" Width="620" Height="675" MinWidth="560" MinHeight="520"
+        Title="Agent 연결" Width="650" Height="600" MinWidth="560" MinHeight="520"
         ResizeMode="CanResize" WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="#F8FAFC"
         AutomationProperties.Name="Agent 연결 설정">
     <Grid Margin="24">
         <Grid.RowDefinitions>
@@ -12,160 +13,112 @@
         </Grid.RowDefinitions>
 
         <StackPanel>
-            <TextBlock Text="Agent 연결" FontSize="24" FontWeight="SemiBold"/>
-            <TextBlock Margin="0,6,0,18"
-                       Text="스위치에 접근할 수 있는 원격 PC의 Agent 주소를 입력하세요."
-                       Foreground="{StaticResource MutedTextBrush}"/>
+            <TextBlock Text="Agent 연결" FontSize="24" FontWeight="Bold" Foreground="#0F172A"/>
+            <TextBlock Margin="0,6,0,14"
+                       Text="Agent PC 주소만 입력하면 연결 확인과 저장을 한 번에 처리합니다."
+                       FontSize="13" Foreground="#64748B"/>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <StackPanel Margin="0,0,8,0">
-                <Border Style="{StaticResource CardStyle}">
+            <StackPanel>
+                <Border Padding="16" Background="White" BorderBrush="#E2E8F0"
+                        BorderThickness="1" CornerRadius="10">
                     <StackPanel x:Name="LiveSettingsPanel">
-                        <TextBlock Text="원격 Agent" FontSize="16" FontWeight="SemiBold"/>
+                        <TextBlock Text="Agent PC" FontSize="18" FontWeight="Bold" Foreground="#0F172A"/>
+                        <TextBlock Margin="0,10,0,0" Text="Agent PC 주소 (스위치 IP 아님)"
+                                   FontSize="13" FontWeight="SemiBold" Foreground="#0F172A"/>
+                        <TextBox x:Name="AgentAddressTextBox" Margin="0,7,0,0" Height="38" Padding="10,7"
+                                 TextChanged="AgentAddress_Changed"
+                                 AutomationProperties.Name="Agent를 설치한 PC의 IPv4 또는 DNS 주소"
+                                 AutomationProperties.HelpText="예: 10.10.10.20 또는 monitor-pc.corp.local"/>
+                        <TextBlock Margin="0,8,0,0" FontSize="12" Foreground="#64748B"
+                                   Text="HTTPS/TCP 18443은 자동으로 사용합니다."/>
 
-                        <Grid Margin="0,16,0,0">
+                        <Border Margin="0,12,0,0" Padding="14" Background="#EFF6FF" BorderBrush="#93C5FD"
+                                BorderThickness="1" CornerRadius="10">
                             <StackPanel>
-                                <TextBlock Text="Agent PC 주소 (스위치 IP 아님)" FontWeight="SemiBold"/>
-                                <TextBox x:Name="AgentAddressTextBox" Margin="0,7,0,0" Height="38" Padding="10,7"
-                                         TextChanged="AgentAddress_Changed"
-                                         AutomationProperties.Name="Agent를 설치한 PC의 IPv4 또는 DNS 주소"
-                                         AutomationProperties.HelpText="예: 10.10.10.20 또는 monitor-pc.corp.local"/>
+                                <TextBlock Text="추가 인증정보가 필요하지 않습니다"
+                                           FontSize="13" FontWeight="Bold" Foreground="#1E40AF"/>
+                                <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" FontSize="12" Foreground="#1E40AF"
+                                           Text="인증서 지문과 페어링 토큰 입력 없이 HTTPS 연결을 자동 확인합니다."/>
                             </StackPanel>
-                        </Grid>
+                        </Border>
 
-                        <TextBlock Margin="0,8,0,0" FontSize="12" Foreground="{StaticResource MutedTextBrush}"
-                                   Text="HTTPS 포트 18443을 자동 사용합니다. 주소에 https://나 포트를 붙이지 마세요."/>
-
-                        <Button x:Name="LocalPreflightButton" Margin="0,12,0,0" MinHeight="38"
-                                HorizontalAlignment="Left" MinWidth="238"
-                                Style="{StaticResource SecondaryButton}"
-                                Content="Agent와 Viewer가 같은 PC일 때 테스트"
-                                Click="LocalPreflight_Click"
-                                AutomationProperties.Name="Agent와 Viewer가 같은 PC일 때 테스트"
-                                AutomationProperties.HelpText="Agent와 Viewer를 같은 PC에 설치한 경우 이 PC의 사설 IPv4로 Agent 연결을 확인합니다."/>
-                        <TextBlock Margin="0,6,0,0" FontSize="12" TextWrapping="Wrap"
-                                   Foreground="{StaticResource MutedTextBrush}"
-                                   Text="Agent와 Viewer를 이 PC에 함께 설치한 경우에만 사용하세요. 자동으로 실행되지 않습니다."/>
-
-                        <Border Margin="0,18,0,0" Padding="13" Background="#F0FDF4" BorderBrush="#86EFAC"
-                                BorderThickness="1" CornerRadius="6">
+                        <Border Margin="0,10,0,0" Padding="14" Background="#F0FDF4" BorderBrush="#86EFAC"
+                                BorderThickness="1" CornerRadius="10">
                             <StackPanel>
-                                <TextBlock x:Name="TransportWarningText" Text="Agent 주소만 입력하세요"
-                                           FontWeight="SemiBold" Foreground="#166534"/>
-                                <TextBlock Margin="0,5,0,0" TextWrapping="Wrap" Foreground="#166534"
-                                           Text="HTTPS 보호는 자동 적용됩니다. 관리망 방화벽으로 Agent 접근을 제한하세요."/>
+                                <TextBlock x:Name="TransportWarningText" Text="API가 호환되면 연결합니다"
+                                           FontSize="13" FontWeight="Bold" Foreground="#166534"/>
+                                <TextBlock Margin="0,4,0,0" TextWrapping="Wrap" FontSize="12" Foreground="#166534"
+                                           Text="Agent API v4가 호환되면 제품 버전 차이는 경고만 표시하고 계속 연결합니다."/>
                             </StackPanel>
                         </Border>
 
                         <Border x:Name="ConnectionProgressPanel" Margin="0,14,0,0" Padding="13"
-                                Background="#F8FAFC" BorderBrush="{StaticResource BorderBrush}"
+                                Background="#F8FAFC" BorderBrush="#E2E8F0"
                                 BorderThickness="1" CornerRadius="6" Visibility="Collapsed"
                                 AutomationProperties.Name="Agent 연결 확인 단계">
                             <StackPanel>
                                 <TextBlock x:Name="ConnectionProgressTitleText"
                                            Text="연결 확인 단계" FontWeight="SemiBold"/>
                                 <TextBlock x:Name="AddressProbeText" Margin="0,9,0,0"
-                                           Text="○ 1. 주소 형식"
-                                           AutomationProperties.LiveSetting="Polite"/>
+                                           Text="○ 1. 주소 형식" AutomationProperties.LiveSetting="Polite"/>
                                 <TextBlock x:Name="DnsProbeText" Margin="0,5,0,0"
-                                           Text="○ 2. DNS 또는 IPv4"
-                                           AutomationProperties.LiveSetting="Polite"/>
+                                           Text="○ 2. DNS 또는 IPv4" AutomationProperties.LiveSetting="Polite"/>
                                 <TextBlock x:Name="TcpProbeText" Margin="0,5,0,0"
-                                           Text="○ 3. TCP/18443"
-                                           AutomationProperties.LiveSetting="Polite"/>
+                                           Text="○ 3. TCP/18443" AutomationProperties.LiveSetting="Polite"/>
                                 <TextBlock x:Name="HttpsProbeText" Margin="0,5,0,0"
-                                           Text="○ 4. HTTPS 보호"
-                                           AutomationProperties.LiveSetting="Polite"/>
+                                           Text="○ 4. HTTPS 보호" AutomationProperties.LiveSetting="Polite"/>
                                 <TextBlock x:Name="IdentityProbeText" Margin="0,5,0,0"
-                                           Text="○ 5. Agent API와 버전"
-                                           AutomationProperties.LiveSetting="Polite"/>
-                                <Border x:Name="SupportCodePanel"
-                                        Margin="0,12,0,0"
-                                        Padding="10,8"
-                                        Background="#FFFBEB"
-                                        BorderBrush="#D97706"
-                                        BorderThickness="1"
-                                        CornerRadius="6"
-                                        Visibility="Collapsed"
+                                           Text="○ 5. Agent API와 버전" AutomationProperties.LiveSetting="Polite"/>
+                                <Border x:Name="SupportCodePanel" Margin="0,12,0,0" Padding="10,8"
+                                        Background="#FFFBEB" BorderBrush="#D97706" BorderThickness="1"
+                                        CornerRadius="6" Visibility="Collapsed"
                                         AutomationProperties.Name="지원 코드">
                                     <StackPanel>
-                                        <TextBlock Text="지원 코드 · 이 코드만 전달하세요"
-                                                   FontSize="11"
-                                                   FontWeight="SemiBold"
-                                                   Foreground="#B45309"/>
-                                        <TextBox x:Name="SupportCodeTextBox"
-                                                 Margin="0,2,0,0"
-                                                 Padding="0"
-                                                 BorderThickness="0"
-                                                 Background="Transparent"
-                                                 FontFamily="Consolas"
-                                                 FontSize="12"
-                                                 IsReadOnly="True"
-                                                 IsReadOnlyCaretVisible="True"
-                                                 Text=""
+                                        <TextBlock Text="지원 코드 · 이 코드만 전달하세요" FontSize="11"
+                                                   FontWeight="SemiBold" Foreground="#B45309"/>
+                                        <TextBox x:Name="SupportCodeTextBox" Margin="0,2,0,0" Padding="0"
+                                                 BorderThickness="0" Background="Transparent" FontFamily="Consolas"
+                                                 FontSize="12" IsReadOnly="True" IsReadOnlyCaretVisible="True"
                                                  AutomationProperties.Name="지원 코드 값"/>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
                         </Border>
-
-                        <Border x:Name="LocalPreflightResultPanel" Margin="0,14,0,0" Padding="13"
-                                Background="#F0FDF4" BorderBrush="#86EFAC"
-                                BorderThickness="1" CornerRadius="6" Visibility="Collapsed"
-                                AutomationProperties.Name="동일 PC 사전 테스트 결과">
-                            <StackPanel>
-                                <TextBlock Text="동일 PC 사전 테스트 결과" FontWeight="SemiBold"
-                                           Foreground="#166534"/>
-                                <TextBlock x:Name="LocalAgentApiStatusText" Margin="0,8,0,0"
-                                           Text="✓ Agent 실행 및 API 연결: 정상"
-                                           Foreground="#166534"/>
-                                <TextBlock x:Name="LocalSwitchStatusText" Margin="0,5,0,0"
-                                           Text="○ 스위치 접속: 아직 확인하지 않음"
-                                           Foreground="#854D0E"/>
-                                <TextBlock x:Name="LocalRemotePathStatusText" Margin="0,5,0,0"
-                                           Text="○ 원격 Viewer 경로: 아직 확인하지 않음"
-                                           Foreground="#854D0E"/>
-                                <TextBlock Margin="0,8,0,0" TextWrapping="Wrap"
-                                           Foreground="{StaticResource MutedTextBrush}"
-                                           Text="저장 후 장비 관리 → 접속 시험에서 스위치를 별도로 확인하세요. 실제 원격 배치 전에는 원격 Viewer PC에서 다시 연결 확인해야 합니다."/>
-                            </StackPanel>
-                        </Border>
                     </StackPanel>
                 </Border>
 
-                <CheckBox x:Name="DemoModeCheckBox" Margin="2,16,0,0"
+                <CheckBox x:Name="DemoModeCheckBox" Margin="0,14,0,0"
                           Content="오프라인 데모 모드 사용"
-                          FontWeight="SemiBold" Checked="DemoMode_Changed" Unchecked="DemoMode_Changed"
+                          Checked="DemoMode_Changed" Unchecked="DemoMode_Changed"
                           AutomationProperties.Name="오프라인 데모 모드"/>
-
-                <CheckBox x:Name="StartMinimizedCheckBox" Margin="2,16,0,12"
+                <CheckBox x:Name="StartMinimizedCheckBox" Margin="0,14,0,12"
                           Content="Viewer 실행 시 트레이로 최소화"
                           AutomationProperties.Name="Viewer 실행 시 트레이로 최소화"/>
             </StackPanel>
         </ScrollViewer>
 
-        <Grid Grid.Row="2" Margin="0,18,0,0">
+        <Grid Grid.Row="2" Margin="0,16,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock x:Name="ValidationText" Margin="0,0,16,0" Foreground="#DC2626"
-                       TextWrapping="Wrap" VerticalAlignment="Center"
-                       AutomationProperties.LiveSetting="Assertive"/>
-            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Button x:Name="RetrustButton" MinWidth="132" Margin="0,0,8,0"
-                        Style="{StaticResource SecondaryButton}" Content="이 Agent로 다시 연결"
-                        Visibility="Collapsed" Click="Retrust_Click"/>
-                <Button x:Name="DiagnosticSaveButton" MinWidth="126" Margin="0,0,8,0"
-                        Style="{StaticResource SecondaryButton}" Content="익명 진단 저장"
-                        Visibility="Collapsed" Click="DiagnosticSave_Click"
+            <StackPanel Margin="0,0,16,0" VerticalAlignment="Center">
+                <TextBlock x:Name="ValidationText" TextWrapping="Wrap" Foreground="#DC2626"
+                           AutomationProperties.LiveSetting="Assertive"/>
+                <Button x:Name="DiagnosticSaveButton" Margin="0,8,0,0" MinWidth="126"
+                        HorizontalAlignment="Left" Style="{StaticResource SecondaryButton}"
+                        Content="익명 진단 저장" Visibility="Collapsed" Click="DiagnosticSave_Click"
                         AutomationProperties.Name="익명 진단 저장"
                         AutomationProperties.HelpText="주소, 계정, 경로 및 장비 출력이 제외된 연결 진단 TXT를 직접 저장합니다."/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
                 <Button x:Name="CancelButton" Width="86" Style="{StaticResource SecondaryButton}"
                         Content="취소" IsCancel="True"/>
-                <Button x:Name="SaveButton" MinWidth="138" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}"
-                        Content="연결 확인 및 저장" Click="Save_Click" IsDefault="True"/>
+                <Button x:Name="SaveButton" MinWidth="154" Margin="8,0,0,0"
+                        Style="{StaticResource PrimaryButton}" Content="연결 확인 및 저장"
+                        Click="Save_Click" IsDefault="True"/>
             </StackPanel>
         </Grid>
     </Grid>

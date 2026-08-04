@@ -60,7 +60,7 @@ public sealed class StatelessTelnetApiTests
         using var response = await PostTestAsync(host, new
         {
             requestId = "test-1",
-            host = "192.0.2.10",
+            host = "192.168.20.10",
             port = 23,
             model = "IES4224GP",
             username = "operator",
@@ -87,7 +87,7 @@ public sealed class StatelessTelnetApiTests
         using var response = await PostExecuteAsync(host, new
         {
             requestId = "manual-1",
-            host = "192.0.2.10",
+            host = "192.168.20.10",
             port = 23,
             model = "IES4226XP",
             username = "operator",
@@ -132,9 +132,9 @@ public sealed class StatelessTelnetApiTests
     [Theory]
     [InlineData("192.0.3.10", 23)]
     [InlineData("2001:db8::10", 23)]
-    [InlineData("192.0.2.10", 2323)]
+    [InlineData("192.168.20.10", 2323)]
     [InlineData("0300.0.2.10", 23)]
-    public async Task Execute_RejectsTargetsOutsideConfiguredExactIpv4Port23(
+    public async Task Execute_RejectsTargetsOutsidePrivateIpv4OrPort23(
         string address,
         int port)
     {
@@ -167,7 +167,7 @@ public sealed class StatelessTelnetApiTests
         using var response = await PostExecuteAsync(host, new
         {
             requestId = "manual-1",
-            host = "192.0.2.10",
+            host = "192.168.20.10",
             port = 23,
             model = "IES4224GP",
             username = "operator",
@@ -190,7 +190,7 @@ public sealed class StatelessTelnetApiTests
         var oversized = new
         {
             requestId = "manual-1",
-            host = "192.0.2.10",
+            host = "192.168.20.10",
             port = 23,
             model = "IES4224GP",
             username = "operator",
@@ -221,7 +221,7 @@ public sealed class StatelessTelnetApiTests
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal("ENABLE_FAILED", await ErrorCodeAsync(response));
-        Assert.DoesNotContain("192.0.2.10", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("192.168.20.10", body, StringComparison.Ordinal);
         Assert.DoesNotContain("login-secret", body, StringComparison.Ordinal);
         Assert.DoesNotContain("show system", body, StringComparison.Ordinal);
     }
@@ -249,7 +249,7 @@ public sealed class StatelessTelnetApiTests
     private static object ValidExecute(string command) => new
     {
         requestId = "manual-1",
-        host = "192.0.2.10",
+        host = "192.168.20.10",
         port = 23,
         model = "IES4224GP",
         username = "operator",

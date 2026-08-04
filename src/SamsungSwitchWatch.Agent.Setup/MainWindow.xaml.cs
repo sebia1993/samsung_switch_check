@@ -13,15 +13,11 @@ namespace SamsungSwitchWatch.Agent.Setup;
 
 public partial class MainWindow : Window
 {
-    private readonly INetworkDiscovery _networkDiscovery;
     private readonly SetupDiagnosticsService _diagnostics;
     private readonly AgentDeploymentOrchestrator _deployment;
     private readonly bool _diagnosticsOnly;
-    private readonly ObservableCollection<NetworkSelectionItem> _networks = [];
     private readonly ObservableCollection<ResultRow> _results = [];
     private CancellationTokenSource? _operationCancellation;
-    private IReadOnlyList<string> _initialTargetCidrs = [];
-    private SetupStepResult? _existingNetworksWarning;
     private PendingRecoveryInspection _recoveryInspection =
         PendingRecoveryInspection.None;
     private SetupOperationResult? _lastFailedOperation;
@@ -29,23 +25,18 @@ public partial class MainWindow : Window
     private string _lastOperationName = "none";
     private string _lastCompletedOperationName = "none";
     private TimeSpan _lastCompletedOperationDuration;
-    private bool _suppressNetworkSelectionEvent;
-    private bool _initialNetworksApplied;
     private bool _isBusy;
     private bool _closeRequested;
 
     public MainWindow(
-        INetworkDiscovery networkDiscovery,
         SetupDiagnosticsService diagnostics,
         AgentDeploymentOrchestrator deployment,
         bool diagnosticsOnly)
     {
-        _networkDiscovery = networkDiscovery;
         _diagnostics = diagnostics;
         _deployment = deployment;
         _diagnosticsOnly = diagnosticsOnly;
         InitializeComponent();
-        NetworkItemsControl.ItemsSource = _networks;
         ResultItemsControl.ItemsSource = _results;
 
         if (_diagnosticsOnly)
@@ -54,6 +45,7 @@ public partial class MainWindow : Window
             ModeDescription.Text = "읽기 전용 진단 모드입니다. 서비스와 방화벽 설정을 변경하지 않습니다.";
             InstallButton.IsEnabled = false;
             InstallButton.ToolTip = "진단 모드에서는 설치를 실행하지 않습니다.";
+            CheckButton.Visibility = Visibility.Visible;
         }
 
         Loaded += OnLoaded;
@@ -62,393 +54,8 @@ public partial class MainWindow : Window
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        RefreshNetworks();
         RefreshRecoveryState(
             preserveFailureDiagnostics: _lastFailedOperation is not null);
-    }
-
-    internal void InitializeExistingTargetNetworks(
-        IReadOnlyList<string> targetCidrs,
-        SetupStepResult? warning)
-    {
-        if (IsLoaded)
-        {
-            throw new InvalidOperationException(
-                "Existing management networks must be initialized before the window is shown.");
-        }
-
-        _initialTargetCidrs = targetCidrs.ToArray();
-        _existingNetworksWarning = warning;
-    }
-
-    private void RefreshNetworksButton_Click(object sender, RoutedEventArgs e)
-    {
-        RefreshNetworks();
-        RefreshRecoveryState(
-            preserveFailureDiagnostics:
-                _lastFailedOperation is { Succeeded: false });
-    }
-
-    private void ViewerIpTextBox_TextChanged(
-        object sender,
-        System.Windows.Controls.TextChangedEventArgs e)
-    {
-        if (IsInitialized)
-        {
-            HideSupportCode();
-        }
-    }
-
-    private void UseThisPcAddressButton_Click(object sender, RoutedEventArgs e)
-    {
-        IReadOnlyList<NetworkCandidate> candidates;
-        try
-        {
-            candidates = _networkDiscovery.DiscoverPrivateIpv4Networks();
-        }
-        catch
-        {
-            HideViewerAddressChoices();
-            ShowViewerAddressFeedback(
-                "이 PC의 네트워크 정보를 읽지 못했습니다. 활성 어댑터를 확인한 뒤 Viewer PC의 고정 사설 IPv4를 직접 입력하세요.",
-                Brushes.Firebrick);
-            return;
-        }
-
-        var suggestion = ViewerAddressSuggestion.Create(candidates);
-        switch (suggestion.Kind)
-        {
-            case ViewerAddressSuggestionKind.None:
-                HideViewerAddressChoices();
-                ShowViewerAddressFeedback(
-                    "사용할 수 있는 사설 IPv4를 찾지 못했습니다. 유선 또는 무선 어댑터 연결을 확인한 뒤 Viewer PC의 고정 사설 IPv4를 직접 입력하세요.",
-                    Brushes.Firebrick);
-                break;
-            case ViewerAddressSuggestionKind.Single:
-                HideViewerAddressChoices();
-                ApplyThisPcViewerAddress(suggestion.Choices[0]);
-                break;
-            case ViewerAddressSuggestionKind.Multiple:
-                ViewerAddressCandidatesComboBox.ItemsSource = suggestion.Choices;
-                ViewerAddressCandidatesComboBox.SelectedIndex = -1;
-                ViewerAddressCandidatesComboBox.Visibility = Visibility.Visible;
-                ShowViewerAddressFeedback(
-                    "사설 IPv4가 여러 개입니다. Viewer 연결에 사용할 어댑터 주소를 아래에서 선택하세요.",
-                    Brushes.DarkGoldenrod);
-                ViewerAddressCandidatesComboBox.Focus();
-                break;
-        }
-    }
-
-    private void ViewerAddressCandidatesComboBox_SelectionChanged(
-        object sender,
-        System.Windows.Controls.SelectionChangedEventArgs e)
-    {
-        if (ViewerAddressCandidatesComboBox.SelectedItem is ViewerAddressChoice choice)
-        {
-            ApplyThisPcViewerAddress(choice);
-        }
-    }
-
-    private void ApplyThisPcViewerAddress(ViewerAddressChoice choice)
-    {
-        ViewerIpTextBox.Text = choice.Address;
-        ShowViewerAddressFeedback(
-            $"이 PC 주소 {choice.Address}를 입력했습니다. 동일 PC 사전 테스트 후 원격 배치 전 실제 Viewer PC의 고정 IPv4로 바꾸세요.",
-            Brushes.DarkGoldenrod);
-    }
-
-    private void HideViewerAddressChoices()
-    {
-        ViewerAddressCandidatesComboBox.SelectedIndex = -1;
-        ViewerAddressCandidatesComboBox.ItemsSource = null;
-        ViewerAddressCandidatesComboBox.Visibility = Visibility.Collapsed;
-    }
-
-    private void ShowViewerAddressFeedback(string message, Brush brush)
-    {
-        ViewerAddressFeedbackText.Text = message;
-        ViewerAddressFeedbackText.Foreground = brush;
-        ViewerAddressFeedbackText.Visibility = Visibility.Visible;
-    }
-
-    private void RefreshNetworks()
-    {
-        var applyingInitialNetworks = !_initialNetworksApplied;
-        var selectedCidrs = _networks
-            .Where(item => item.IsSelected)
-            .Select(item => item.Cidr)
-            .ToHashSet(StringComparer.Ordinal);
-        var preservedManualItems = _networks
-            .Where(item => item.CanRemove)
-            .ToArray();
-
-        IReadOnlyList<NetworkCandidate> candidates;
-        try
-        {
-            candidates = _networkDiscovery.DiscoverPrivateIpv4Networks();
-        }
-        catch
-        {
-            candidates = [];
-            ShowSingleFailure(
-                SetupErrorCodes.Unexpected,
-                "관리망 검색",
-                "Windows 네트워크 어댑터 정보를 읽지 못했습니다.");
-        }
-
-        if (applyingInitialNetworks)
-        {
-            selectedCidrs.Clear();
-            if (_existingNetworksWarning is null)
-            {
-                selectedCidrs.UnionWith(_initialTargetCidrs);
-                if (_initialTargetCidrs.Count == 0)
-                {
-                    var discoveredCidrs = candidates
-                        .Select(candidate => candidate.Cidr)
-                        .Distinct(StringComparer.Ordinal)
-                        .ToArray();
-                    if (discoveredCidrs.Length == 1)
-                    {
-                        selectedCidrs.Add(discoveredCidrs[0]);
-                    }
-                }
-            }
-
-            _initialNetworksApplied = true;
-            ShowExistingNetworksStatus();
-        }
-
-        _networks.Clear();
-        foreach (var candidate in candidates)
-        {
-            _networks.Add(new NetworkSelectionItem(candidate)
-            {
-                IsSelected = selectedCidrs.Contains(candidate.Cidr)
-            });
-        }
-
-        var discovered = candidates
-            .Select(candidate => candidate.Cidr)
-            .ToHashSet(StringComparer.Ordinal);
-        var manualItems = preservedManualItems
-            .Where(item => !discovered.Contains(item.Cidr))
-            .ToDictionary(item => item.Cidr, StringComparer.Ordinal);
-        foreach (var cidr in selectedCidrs)
-        {
-            if (!discovered.Contains(cidr) && !manualItems.ContainsKey(cidr))
-            {
-                manualItems.Add(
-                    cidr,
-                    NetworkSelectionItem.FromSavedConfiguration(cidr));
-            }
-        }
-
-        foreach (var item in manualItems.Values.OrderBy(item => item.Cidr, StringComparer.Ordinal))
-        {
-            item.IsSelected = selectedCidrs.Contains(item.Cidr);
-            _networks.Add(item);
-        }
-
-        NoNetworksText.Visibility =
-            candidates.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void NetworkSelectionChanged(object sender, RoutedEventArgs e)
-    {
-        if (_suppressNetworkSelectionEvent)
-        {
-            return;
-        }
-
-        if (sender is not FrameworkElement
-            {
-                DataContext: NetworkSelectionItem selectedItem
-            })
-        {
-            return;
-        }
-
-        HideSupportCode();
-        var requestedState = selectedItem.IsSelected;
-        _suppressNetworkSelectionEvent = true;
-        try
-        {
-            foreach (var item in _networks.Where(item =>
-                         string.Equals(
-                             item.Cidr,
-                             selectedItem.Cidr,
-                             StringComparison.Ordinal)))
-            {
-                item.IsSelected = requestedState;
-            }
-
-            if (SelectedCidrCount() > 2)
-            {
-                foreach (var item in _networks.Where(item =>
-                             string.Equals(
-                                 item.Cidr,
-                                 selectedItem.Cidr,
-                                 StringComparison.Ordinal)))
-                {
-                    item.IsSelected = false;
-                }
-            }
-        }
-        finally
-        {
-            _suppressNetworkSelectionEvent = false;
-        }
-
-        if (requestedState && !selectedItem.IsSelected)
-        {
-            ShowManualNetworkFeedback(
-                "자동 선택과 직접 추가를 합해 최대 두 개까지 사용할 수 있습니다. 기존 항목을 먼저 해제하세요.",
-                Brushes.DarkGoldenrod);
-        }
-    }
-
-    private void AddManualNetworkButton_Click(object sender, RoutedEventArgs e) =>
-        AddManualNetwork();
-
-    private void ManualCidrTextBox_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Enter)
-        {
-            return;
-        }
-
-        e.Handled = true;
-        AddManualNetwork();
-    }
-
-    private void AddManualNetwork()
-    {
-        if (!Ipv4Input.TryNormalizePrivateCidr(
-                ManualCidrTextBox.Text,
-                out var canonicalCidr))
-        {
-            ShowManualNetworkFeedback(
-                "입력 오류: RFC1918 사설 IPv4 CIDR과 /0~32 범위를 확인하세요.",
-                Brushes.Firebrick);
-            return;
-        }
-
-        HideSupportCode();
-        var matchingItems = _networks
-            .Where(item => string.Equals(
-                item.Cidr,
-                canonicalCidr,
-                StringComparison.Ordinal))
-            .ToArray();
-        if (matchingItems.Length > 0)
-        {
-            if (matchingItems.Any(item => item.IsSelected))
-            {
-                ShowManualNetworkFeedback(
-                    $"이미 같은 관리망이 선택되어 있습니다: {canonicalCidr}",
-                    Brushes.RoyalBlue);
-                return;
-            }
-
-            if (SelectedCidrCount() >= 2)
-            {
-                ShowManualNetworkFeedback(
-                    "최대 두 개까지 선택할 수 있습니다. 기존 항목을 먼저 해제하세요.",
-                    Brushes.DarkGoldenrod);
-                return;
-            }
-
-            SetCidrSelected(canonicalCidr, true);
-            ManualCidrTextBox.Clear();
-            ShowManualNetworkFeedback(
-                $"기존 항목을 선택했습니다: {canonicalCidr}",
-                Brushes.SeaGreen);
-            return;
-        }
-
-        if (SelectedCidrCount() >= 2)
-        {
-            ShowManualNetworkFeedback(
-                "최대 두 개까지 선택할 수 있습니다. 기존 항목을 먼저 해제하세요.",
-                Brushes.DarkGoldenrod);
-            return;
-        }
-
-        var manualItem = NetworkSelectionItem.FromManualInput(canonicalCidr);
-        manualItem.IsSelected = true;
-        _networks.Add(manualItem);
-        ManualCidrTextBox.Clear();
-        ShowManualNetworkFeedback(
-            $"추가됨: {canonicalCidr} · 총 2개 중 {SelectedCidrCount()}개 선택",
-            Brushes.SeaGreen);
-    }
-
-    private void RemoveManualNetworkButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not FrameworkElement
-            {
-                DataContext: NetworkSelectionItem { CanRemove: true } item
-            })
-        {
-            return;
-        }
-
-        _networks.Remove(item);
-        HideSupportCode();
-        ShowManualNetworkFeedback(
-            $"직접 추가 관리망을 삭제했습니다: {item.Cidr}",
-            Brushes.RoyalBlue);
-    }
-
-    private int SelectedCidrCount() =>
-        _networks
-            .Where(item => item.IsSelected)
-            .Select(item => item.Cidr)
-            .Distinct(StringComparer.Ordinal)
-            .Count();
-
-    private void SetCidrSelected(string cidr, bool isSelected)
-    {
-        _suppressNetworkSelectionEvent = true;
-        try
-        {
-            foreach (var item in _networks.Where(item =>
-                         string.Equals(item.Cidr, cidr, StringComparison.Ordinal)))
-            {
-                item.IsSelected = isSelected;
-            }
-        }
-        finally
-        {
-            _suppressNetworkSelectionEvent = false;
-        }
-    }
-
-    private void ShowManualNetworkFeedback(string message, Brush brush)
-    {
-        ManualNetworkFeedbackText.Text = message;
-        ManualNetworkFeedbackText.Foreground = brush;
-    }
-
-    private void ShowExistingNetworksStatus()
-    {
-        if (_existingNetworksWarning is not null)
-        {
-            ExistingNetworksWarningText.Text =
-                $"{_existingNetworksWarning.Code}: {_existingNetworksWarning.Message}";
-            ExistingNetworksWarningText.Visibility = Visibility.Visible;
-            return;
-        }
-
-        ExistingNetworksWarningText.Visibility = Visibility.Collapsed;
-        if (_initialTargetCidrs.Count > 0)
-        {
-            ShowManualNetworkFeedback(
-                $"기존 설정의 관리망 {_initialTargetCidrs.Count}개를 불러왔습니다.",
-                Brushes.SeaGreen);
-        }
     }
 
     private void RefreshRecoveryState(bool preserveFailureDiagnostics)
@@ -656,15 +263,11 @@ public partial class MainWindow : Window
         }
 
         var request = CreateRequest();
-        var networks = request.TargetCidrs.Count == 0
-            ? "(선택 없음)"
-            : string.Join(", ", request.TargetCidrs);
         var confirmation = MessageBox.Show(
             this,
-            $"Viewer: {request.ViewerIpv4}/32\n스위치 관리망: {networks}\n\n" +
-            "기존의 다른 방화벽 규칙은 변경하지 않습니다.\n" +
-            "Agent 원격 업무 API가 입력한 Viewer IP만 허용하도록 설정합니다.\n\n" +
-            "Agent 서비스를 설치하거나 업데이트하시겠습니까?",
+            "창 없이 실행되는 Agent 서비스를 설치하거나 업데이트합니다.\n" +
+            "사설 Viewer 대역과 사설 스위치 관리망 범위는 자동으로 적용됩니다.\n\n" +
+            "계속하시겠습니까?",
             "Agent 설치 확인",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -708,13 +311,7 @@ public partial class MainWindow : Window
     }
 
     private SetupRequest CreateRequest() =>
-        new(
-            ViewerIpTextBox.Text.Trim(),
-            _networks
-                .Where(item => item.IsSelected)
-                .Select(item => item.Cidr)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray());
+        SetupConstants.CreateAutomaticRequest();
 
     private async Task<SetupOperationResult?> RunOperationAsync(
         string operationName,
@@ -823,13 +420,6 @@ public partial class MainWindow : Window
     private void SetBusy(bool busy)
     {
         _isBusy = busy;
-        ViewerIpTextBox.IsEnabled = !busy;
-        UseThisPcAddressButton.IsEnabled = !busy;
-        ViewerAddressCandidatesComboBox.IsEnabled = !busy;
-        RefreshNetworksButton.IsEnabled = !busy;
-        NetworkItemsControl.IsEnabled = !busy;
-        ManualCidrTextBox.IsEnabled = !busy;
-        AddManualNetworkButton.IsEnabled = !busy;
         CheckButton.IsEnabled = !busy;
         CopyDiagnosticsButton.IsEnabled = !busy;
         SaveFieldDiagnosticButton.IsEnabled =
@@ -1028,7 +618,7 @@ public partial class MainWindow : Window
         }
 
         _closeRequested = true;
-        OperationStateText.Text = "취소 및 안전 복구 중";
+        OperationStateText.Text = "취소 요청 처리 중";
         OperationStateText.Foreground = Brushes.DarkGoldenrod;
         _operationCancellation.Cancel();
     }

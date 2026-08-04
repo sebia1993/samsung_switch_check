@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.16 operator manual.
+"""Build the Korean Samsung Switch Watch v0.11.0 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.16-poc"
+VERSION = "0.11.0-poc"
 DOCUMENT_DATE = "2026-08-04"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -697,9 +697,9 @@ def build_manual(output_path: Path, images_dir: Path):
         doc,
         [
             "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
-            "Agent PC 주소가 아닌 원격 Viewer의 고정 IPv4를 입력하고 자동 검색된 관리망을 선택합니다. 같은 PC 시험이라면 '같은 PC 시험용 주소'로 실제 사설 IPv4를 사용합니다.",
+            "Agent Setup에는 Viewer IP나 관리망 CIDR을 입력하지 않습니다. 설치 내용을 확인하고 '설치 / 업데이트'를 누릅니다.",
             "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
-            "Viewer가 열리면 Agent PC 주소를 입력합니다. 같은 PC에서 먼저 확인할 때만 'Agent와 Viewer가 같은 PC일 때 테스트'를 직접 누릅니다.",
+            "Viewer의 Agent 연결에서 Agent PC 주소만 입력하고 '연결 확인 및 저장'을 누릅니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
             "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
@@ -730,8 +730,8 @@ Viewer PC                 Agent PC                    Samsung Switch
         doc,
         ["구간", "고정 통신", "운영 제한"],
         [
-            ("Viewer → Agent", "HTTPS/TCP 18443", "Viewer /32 방화벽과 Agent의 동일 IPv4 재검증"),
-            ("Agent → Switch", "Telnet/TCP 23", "설치 시 선택·추가한 관리망만 허용"),
+            ("Viewer → Agent", "HTTPS/TCP 18443", "10/8, 172.16/12, 192.168/16 사설 주소에서 접근"),
+            ("Agent → Switch", "Telnet/TCP 23", "같은 RFC1918 사설 주소의 장비만 허용"),
         ],
         [1900, 2100, 5360],
     )
@@ -766,11 +766,9 @@ Viewer PC                 Agent PC                    Samsung Switch
         [
             "Agent 릴리스 ZIP을 원격 PC의 임시 폴더에 압축 해제합니다.",
             "SamsungSwitchWatch.Agent.Setup.exe를 실행하고 UAC 관리자 승인을 합니다.",
-            "'허용할 Viewer PC 고정 IPv4 · Agent PC 주소 아님'에 원격 Viewer 주소를 입력합니다. 같은 PC 시험이라면 '같은 PC 시험용 주소'로 표시된 실제 RFC1918 사설 IPv4를 사용합니다.",
-            "자동 검색된 관리망을 선택합니다. 목록에 없으면 승인된 RFC1918 관리망을 IPv4/prefix로 직접 추가합니다.",
-            "직접 입력한 주소가 네트워크 주소로 정규화되었는지 확인하고, 자동 선택과 직접 추가를 합해 1~2개인지 확인합니다.",
+            "설치 내용을 확인합니다. Viewer와 스위치 허용 범위는 RFC1918 사설 대역으로 자동 적용되므로 별도 입력이 없습니다.",
             "Setup이 중단된 이전 설치 기록을 발견하면 설치/업데이트가 잠깁니다. '이전 상태 복구'를 먼저 누르고 새 작업 기록 검사까지 완료됐는지 확인합니다.",
-            "정리 대상과 작업 기록이 모두 사라진 경우에만 복구 성공으로 표시됩니다. 별도로 '설치 / 업데이트'를 누른 뒤 SamsungSwitchWatchAgent 서비스가 실행 중인지 확인합니다.",
+            "'설치 / 업데이트'를 누르면 자동 점검과 설치가 이어집니다. 완료 또는 '설치 완료 · 연결 확인 필요' 경고를 확인합니다.",
         ],
     )
     add_image(
@@ -778,18 +776,16 @@ Viewer PC                 Agent PC                    Samsung Switch
         images_dir / "00-agent-setup.png",
         width=4.5,
         title="Agent Setup 화면",
-        alt_text="중단된 이전 설치 기록을 감지하여 이전 상태 복구 버튼만 활성화하고 설치 업데이트 버튼은 비활성화한 Agent Setup 화면",
-        caption="그림 1. 이전 상태 복구가 필요한 안전 대기 화면",
+        alt_text="Viewer IP와 관리망 CIDR 입력 없이 설치 내용과 설치 버튼을 보여 주는 Agent Setup 화면",
+        caption="그림 1. 별도 네트워크 입력이 없는 Agent Setup 화면",
     )
     add_callout(
         doc,
-        "복구 대기 화면",
-        "Setup은 시작할 때 이전 작업의 journal을 읽기 전용으로 확인합니다. 안전하게 복구할 수 있는 "
-        "기록이면 '이전 상태 복구'만 활성화하고 설치/업데이트는 비활성화합니다. 이 확인만으로 "
-        "파일·서비스·방화벽을 변경하거나 복구를 자동 실행하지 않습니다. 검증된 정리 대상이 실제로 "
-        "사라지고 새 journal 검사에서도 미완료 작업이 없어야만 복구 성공과 설치 버튼 활성화를 "
-        "표시합니다. 설치는 자동으로 이어지지 않으므로 운영자가 별도로 시작합니다.",
-        "warning",
+        "입력 없이 설치",
+        "Setup은 제품 파일, Windows 서비스와 방화벽 규칙을 준비합니다. Viewer IP와 스위치 CIDR은 "
+        "요구하지 않습니다. Agent는 10/8, 172.16/12, 192.168/16에서 들어오는 Viewer 요청과 "
+        "같은 사설 대역의 Telnet/23 장비만 자동으로 허용합니다.",
+        "info",
     )
     add_image(
         doc,
@@ -827,48 +823,44 @@ Viewer PC                 Agent PC                    Samsung Switch
         "기존 TCP/18443 허용 규칙 경고",
         "다른 프로그램이 만든 인바운드 허용 규칙이 있으면 "
         "FIREWALL_OVERLAP_PROTECTED 경고를 표시하지만 해당 규칙은 변경하지 않고 설치를 "
-        "계속합니다. 설치 후 제품 소유 Viewer /32 규칙과 Agent 내부 Viewer IPv4 검증을 "
-        "함께 적용합니다.",
+        "계속합니다. 제품 규칙은 RFC1918 사설 원격 주소, Domain/Private 프로필과 TCP/18443을 "
+        "대상으로 시도합니다.",
         "warning",
     )
     add_callout(
         doc,
         "방화벽 확인 경고는 Agent 설치 실패가 아님",
-        "제품 Viewer /32 규칙의 적용·재조회 또는 회사 GPO 확인이 실패하면 "
-        "FIREWALL_REMOTE_ACCESS_UNCONFIRMED 경고와 '설치 완료 · 원격 Viewer 연결 확인 필요'를 "
-        "표시합니다. 로컬 HTTPS/API/버전이 정상인 Agent 서비스와 프로그램은 유지하며, "
-        "방화벽 변경분만 설치 전 상태로 복원을 시도하고 결과를 경고에 남깁니다. Viewer에서 연결 테스트를 실행하고 TCP/18443이 "
-        "실패할 때만 Windows 관리자에게 방화벽·GPO 경로를 요청하세요. Setup은 Any, LocalSubnet "
-        "또는 넓은 대역 규칙을 대신 만들지 않습니다.",
+        "제품 규칙의 적용·재조회 또는 회사 GPO 확인이 실패해도 Agent 서비스와 프로그램은 "
+        "설치된 상태로 유지됩니다. 화면에는 설치 실패가 아니라 연결 확인 경고가 표시됩니다. "
+        "Viewer에서 연결 테스트를 실행하고 TCP/18443이 실패할 때만 Windows 관리자에게 "
+        "방화벽·GPO 경로 확인을 요청하세요.",
         "warning",
     )
     add_callout(
         doc,
-        "Windows의 /32 표시 차이는 자동 처리",
-        "Windows가 같은 Viewer 단일 호스트를 IP, IP/32 또는 "
-        "IP/255.255.255.255로 반환해도 Setup은 같은 주소인지 의미 기준으로 확인합니다. "
-        "다른 prefix, 주소 목록·범위, Any, LocalSubnet과 IPv6는 허용하지 않습니다. "
-        "Enabled·Inbound·Allow·TCP·18443·Domain/Private·Edge Traversal 비활성 조건도 "
-        "모두 그대로 확인합니다.",
+        "방화벽은 보조 수단",
+        "방화벽 규칙은 원격 연결을 돕기 위한 최선 노력 단계입니다. 규칙 생성 실패가 프로그램 "
+        "파일과 서비스 설치를 취소하지 않습니다. Agent 자체도 Viewer와 장비 주소가 RFC1918 "
+        "사설 범위인지 다시 확인합니다.",
         "info",
     )
     add_code_block(
         doc,
         """
-Viewer PC IPv4 예     : 10.20.30.25
-자동 검색 관리망     : 10.50.0.0/24
-직접 추가 입력       : 172.20.40.25/24
-정규화 결과          : 172.20.40.0/24
 서비스 이름          : SamsungSwitchWatchAgent
 서비스 계정          : NT SERVICE\\SamsungSwitchWatchAgent
 통신 포트            : HTTPS/TCP 18443
+Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
+장비 허용 범위        : 10/8, 172.16/12, 192.168/16 · Telnet/23
         """,
     )
     add_callout(
         doc,
         "고정 설치 위치",
-        "Agent 프로그램은 %ProgramFiles%\\SamsungSwitchWatch\\Agent, HTTPS 신원과 데이터는 "
-        "%ProgramData%\\SamsungSwitchWatch에 둡니다. Setup이 경로 신뢰 검사를 통과하지 못하면 "
+        "Agent 프로그램은 %ProgramFiles%\\SamsungSwitchWatch\\Agent에 둡니다. 실행할 때마다 "
+        "새 HTTPS 인증서를 만들고 Windows Schannel용 임시 사용자 키 컨테이너를 프로세스 수명 동안만 "
+        "사용합니다. Agent 종료 시 이를 정리하며 영구 인증서 지문이나 페어링 자료는 저장하지 않습니다. "
+        "Setup이 경로 신뢰 검사를 통과하지 못하면 "
         "설치를 중단합니다. 폴더를 강제로 삭제하거나 소유권을 바꿔 우회하지 말고 Windows "
         "관리자에게 실패 코드를 전달하세요.",
         "danger",
@@ -883,17 +875,18 @@ Viewer PC IPv4 예     : 10.20.30.25
         doc,
         "업데이트 안정성",
         "Setup은 BUILD-MANIFEST.json과 Agent 실행 파일 SHA-256을 확인하고, Program Files의 "
-        "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램 또는 로컬 "
-        "HTTPS/API/버전 확인이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 방화벽·GPO·규칙 "
-        "적용/재조회만 실패하면 방화벽 변경분 복원을 시도하고 Agent 설치는 경고 상태로 유지합니다. "
+        "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 패키지·파일·서비스 변경 자체가 "
+        "실패한 경우에만 설치 전 상태로 되돌리기를 시도합니다. 서비스가 설치·시작된 뒤 로컬 "
+        "HTTPS/API/버전 또는 방화벽 준비 상태를 확인하지 못한 경우에는 설치를 되돌리지 않고 "
+        "AGENT_LOCAL_CONNECTION_UNCONFIRMED 경고로 남깁니다. "
         "다음 실행에서 완료되지 않은 "
         "journal이 남아 있으면 자동 복구하지 않고 별도의 '이전 상태 복구' 작업을 요구합니다. "
-        "새 서비스의 자동 재시작은 readiness 성공 뒤에만 적용하고, 검사 중에는 현재 서비스 "
+        "검사 중에는 현재 서비스 "
         "PID와 TCP/18443 소유를 매번 다시 확인합니다. rollback 전에는 관찰한 서비스 프로세스 "
         "종료를 확인하고 프로그램 폴더의 일시적 잠금만 최대 5회 제한적으로 재시도합니다. "
         "staging·backup·failed·journal 정리가 잠시 실패하면 정확히 검증된 대상만 최대 3회 "
         "시도하고 실패한 시도 사이 250ms 대기한 뒤 삭제 결과를 확인합니다. "
-        "복구까지 실패하면 최초 설치 실패 코드를 별도로 유지하고 SETUP_ROLLBACK_FAILED와 "
+        "변경 자체의 복구까지 실패하면 최초 설치 실패 코드를 별도로 유지하고 SETUP_ROLLBACK_FAILED와 "
         "실패한 ROLLBACK_* 단계를 함께 표시합니다.",
         "info",
     )
@@ -914,9 +907,10 @@ Viewer PC IPv4 예     : 10.20.30.25
         "HTTPS_TLS_FAILED, HTTPS_REQUEST_TIMEOUT, HTTPS_CONNECTION_RESET, HTTPS_EOF, "
         "HTTPS_CONNECT_FAILED는 Setup → 127.0.0.1:18443 → Agent 서비스 사이의 로컬 "
         "준비 상태 확인 실패입니다. 이 다섯 코드는 Viewer IP나 스위치 관리망 문제를 뜻하지 "
-        "않습니다. 같은 설치를 반복하기보다 코드와 아래 안전 관측값을 확인한 뒤 Agent PC의 "
-        "Windows 이벤트, TLS 정책, 백신·EDR 개입 여부를 점검하세요.",
-        "danger",
+        "않으며 설치된 서비스와 파일을 되돌리는 사유도 아닙니다. Viewer 연결 테스트로 실제 "
+        "사용 가능 여부를 확인하고 실패하면 Agent PC의 Windows 이벤트, TLS 정책과 백신·EDR "
+        "개입 여부를 점검하세요.",
+        "warning",
     )
     add_table(
         doc,
@@ -937,27 +931,18 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_code_block(
         doc,
         """
-SSW_FIELD_DIAGNOSTIC/2
-Component=AGENT_SETUP
-ProductVersion=0.10.16-poc
-Environment=20260804T120000000Z|WIN_10_0_26100_0|X64
-Run=INSTALL|FAILURE|64182
-FailedStage=READINESS
-ErrorCode=SETUP_HEALTH_FAILED
-Failure=SETUP_HEALTH_FAILED|CLASSIFIED|62011
-Action=CHECK_AGENT_READINESS
-State=PASS|NONE|CONFIGURED|CONFIGURED|PASS|FAIL
-Health=HTTPS_REQUEST_TIMEOUT|FTT|3|REQUEST_STARTED
-Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
+화면 상태 : 설치 완료 · 연결 확인 필요
+경고 코드 : AGENT_LOCAL_CONNECTION_UNCONFIRMED
+설치 결과 : Agent 서비스와 프로그램은 유지
+다음 조치 : Viewer에서 Agent 연결 확인 및 저장
         """,
     )
     add_callout(
         doc,
         "진단만 세분화됨",
-        "SERVICE_STARTED → SETUP_HEALTH_FAILED → ROLLBACK_COMPLETED 순서와 각 단계 소요 시간은 "
-        "실패 위치를 구분하기 위한 기록입니다. 설치, 방화벽, Agent 신원, rollback과 보안 검증 "
-        "흐름은 바뀌지 않습니다. Health의 세 글자는 재시작·서비스·listener 순서이며 T는 검사 중 "
-        "관찰함, F는 관찰하지 못함을 뜻합니다. 이 값은 현재 상태를 영구 보장하지 않습니다.",
+        "설치 완료 경고는 파일·서비스 설치 완료와 연결 준비 미확인을 구분합니다. 이 경우 "
+        "rollback은 실행하지 않습니다. 익명 진단의 Health 값과 단계 시간은 원인 분류용이며 "
+        "현재 상태를 영구 보장하지 않습니다.",
         "info",
     )
     add_callout(
@@ -973,11 +958,10 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
     )
     add_callout(
         doc,
-        "네트워크 정책 변경",
-        "Viewer PC 주소나 스위치 관리망이 바뀌면 같은 Release의 Agent Setup을 다시 열어 "
-        "고정 Viewer IPv4와 자동 검색 또는 직접 추가 관리망을 검토합니다. 직접 입력은 "
-        "네트워크 주소로 자동 정규화되며 RFC1918 범위만 허용됩니다. 검사에서 서비스, TCP/18443 listener, "
-        "방화벽, Agent 내부 Viewer 허용 주소, 활성 프로필과 live/ready를 확인합니다.",
+        "네트워크 정책은 자동 적용",
+        "Viewer PC 주소나 스위치 관리망이 바뀌어도 CIDR을 다시 입력하지 않습니다. Viewer와 "
+        "스위치가 10/8, 172.16/12 또는 192.168/16에 있고 Agent까지 라우팅 가능한지 확인합니다. "
+        "공인 주소와 그 밖의 특수 주소는 허용되지 않습니다.",
         "info",
     )
     add_unnumbered_heading(
@@ -989,18 +973,16 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
     add_callout(
         doc,
         "설치 경고와 Viewer 연결 거부",
-        "Agent Setup에 FIREWALL_REMOTE_ACCESS_UNCONFIRMED가 표시되면 Agent 설치는 완료됐지만 "
-        "제품 방화벽 규칙의 적용·재조회 또는 회사 GPO를 확인하지 못했다는 뜻입니다. Viewer에서 "
+        "Agent Setup에 AGENT_LOCAL_CONNECTION_UNCONFIRMED 또는 FIREWALL_REMOTE_ACCESS_UNCONFIRMED가 "
+        "표시되면 Agent 서비스와 프로그램은 설치됐지만 연결 준비를 확인하지 못했다는 뜻입니다. Viewer에서 "
         "연결 테스트를 실행하고, TCP/18443이 실패할 때 Windows 관리자에게 확인하세요. 규칙을 "
-        "Any, LocalSubnet 또는 넓은 대역으로 수동 확대하지 마세요. "
         "AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP나 localhost가 아니라 "
-        "Agent를 설치한 PC의 실제 주소를 입력했는지 먼저 확인하세요. 동일 PC 사전 테스트도 "
-        "localhost 대신 이 PC의 실제 RFC1918 사설 IPv4를 사용합니다. 그 다음 "
-        "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
+        "Agent를 설치한 PC의 실제 주소를 입력했는지 먼저 확인하세요. 같은 PC 시험에서는 "
+        "해당 PC의 사설 IPv4 또는 localhost를 사용할 수 있습니다. 그 다음 "
+        "Windows 서비스에서 SamsungSwitchWatchAgent가 Running인지 확인하고 TCP/18443을 점검합니다. "
         "TCP 단계는 성공하고 HTTPS 단계가 실패하면 방화벽이 아니라 Agent PC의 로컬 HTTPS/TLS "
         "준비 상태를 확인합니다. "
-        "AGENT_CLIENT_NOT_ALLOWED이면 현재 Viewer PC의 고정 IPv4를 Agent Setup에 다시 "
-        "입력하고 설치/업데이트합니다. "
+        "AGENT_CLIENT_NOT_ALLOWED이면 Viewer 주소가 RFC1918 사설 범위인지 확인합니다. "
         f"서비스를 수동 등록하지 말고 {VERSION} Agent Setup을 사용하세요.",
         "danger",
     )
@@ -1014,7 +996,8 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         "삭제합니다. 이어 shell:programs에서도 같은 이름의 이전 시작 메뉴 바로 가기를 "
         "삭제하고 새 Viewer를 다시 실행하세요. 기존 Agent 연결과 장비 정보는 유지됩니다. "
         f"창이 바로 보이지 않으면 알림 영역에서 대시보드를 열고 실행 경로가 새 {VERSION} "
-        "폴더인지 확인하세요.",
+        "폴더인지 확인하세요. API v4가 호환되면 Agent와 Viewer의 세부 버전이 달라도 경고만 "
+        "표시하고 연결됩니다.",
         "warning",
     )
     add_steps(
@@ -1030,7 +1013,8 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         "프로그램과 사용자 데이터 분리",
         "Viewer는 압축 해제한 폴더에서 실행합니다. 장비 목록, DPAPI 자격 증명, 감시 이력과 화면 설정은 "
         "%LOCALAPPDATA%\\SamsungSwitchWatch에 보존됩니다. Viewer 폴더를 교체해도 자료는 유지되지만 "
-        "항상 Agent와 같은 Release를 사용하세요.",
+        "문제 재현과 지원을 단순하게 하려면 Agent와 같은 Release 사용을 권장합니다. API v4가 "
+        "호환되면 세부 버전이 달라도 연결은 유지되고 경고만 표시됩니다.",
         "info",
     )
     add_callout(
@@ -1054,8 +1038,8 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         images_dir / "02-agent-connection.png",
         width=3.5,
         title="Agent 연결 창",
-        alt_text="같은 PC 테스트 결과, 익명 진단 저장과 원격 Agent 주소 입력을 함께 보여 주는 연결 설정 창",
-        caption="그림 3. 같은 PC Agent/API 테스트, 익명 진단 저장과 원격 연결 설정",
+        alt_text="Agent PC 주소 하나와 자동 HTTPS 연결 단계, 연결 확인 및 저장 버튼을 보여 주는 연결 설정 창",
+        caption="그림 3. Agent 주소만 입력하는 연결 설정",
     )
     add_unnumbered_heading(
         doc,
@@ -1076,23 +1060,20 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         [
             "Agent를 설치한 원격 PC의 IPv4 또는 사내 DNS 이름만 입력합니다. 스위치 IP나 Viewer PC 주소를 "
             "입력하지 않습니다.",
-            "Agent와 Viewer가 같은 PC여도 localhost, localhost. 또는 127.x.x.x를 사용하지 않고 실제 "
-            "RFC1918 사설 IPv4를 사용합니다.",
-            "https://, 포트, 인증서 지문과 페어링 토큰은 입력하지 않습니다. 정상 Agent 교체나 재설치가 "
-            "확실할 때만 '이 Agent로 다시 연결'을 사용합니다.",
+            "Agent와 Viewer가 같은 PC라면 localhost 또는 해당 PC의 사설 IPv4를 사용할 수 있습니다.",
+            "https://, 포트, 인증서 지문과 페어링 토큰은 입력하지 않습니다. HTTPS/TCP 18443과 "
+            "Agent 인증서 확인은 프로그램이 자동 처리합니다.",
         ],
         bullet_num_id,
     )
     add_callout(
         doc,
         "동일 PC에서 먼저 확인",
-        "Agent와 Viewer를 같은 PC에 설치했다면 Viewer의 'Agent와 Viewer가 같은 PC일 때 테스트'를 "
-        "직접 누릅니다. "
-        "이 기능은 자동으로 실행되지 않으며 사설 IPv4 후보를 최대 6개, 후보당 7초, 전체 30초 "
-        "안에서 확인합니다. 성공은 Agent 서비스, TCP/18443, HTTPS, Agent API와 같은 버전만 "
-        "뜻합니다. 스위치 자격 증명과 명령은 사용하지 않으며, 장비는 저장 후 '장비 관리 → 접속 시험'에서 "
-        "별도로 확인합니다. 실제 원격 배치 전에는 Agent Setup에 원격 Viewer 고정 IPv4를 다시 "
-        "적용하고 원격 Viewer PC에서 연결 진단을 반복하세요.",
+        "Agent와 Viewer를 같은 PC에 설치했다면 Agent PC 주소에 localhost 또는 해당 PC의 사설 "
+        "IPv4를 입력하고 일반 연결 확인을 실행합니다. 성공은 Agent 서비스, TCP/18443, HTTPS와 "
+        "Agent API만 뜻합니다. 스위치 자격 증명과 명령은 사용하지 않으며, 장비는 저장 후 "
+        "'장비 관리 → 접속 시험'에서 별도로 확인합니다. 실제 원격 배치 전에는 원격 Viewer PC에서 "
+        "Agent PC 주소로 연결 확인을 다시 실행하세요.",
         "info",
     )
     add_unnumbered_heading(
@@ -1104,9 +1085,9 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
     add_callout(
         doc,
         "Agent 연결 익명 진단",
-        "일반 연결과 같은 PC 테스트가 성공 또는 실패로 끝나면 '익명 진단 저장'을 사용할 수 "
-        "있습니다. 사진 한 장용 최대 12줄 TXT에는 주소·DNS·TCP/18443·HTTPS·Identity 단계 상태와 "
-        "제한된 소요 시간, 후보 수와 확인된 Agent/API 버전만 기록하며 입력 주소, DNS 이름, "
+        "Agent 연결 확인이 성공 또는 실패로 끝나면 '익명 진단 저장'을 사용할 수 "
+        "있습니다. 사진 한 장용 최대 12줄 TXT에는 주소·DNS·TCP/18443·HTTPS·Agent API 단계 상태와 "
+        "제한된 소요 시간과 확인된 Agent/API 버전만 기록하며 입력 주소, DNS 이름, "
         "PC·사용자명, 계정, 경로, 예외 원문과 장비 명령·출력은 제외합니다. 연결 성공 뒤 창은 "
         "저장 결과를 보여 주며, 필요하면 진단을 저장한 다음 닫습니다.",
         "info",
@@ -1148,7 +1129,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         [
             ("장비명", "예", "운영자가 구분하기 쉬운 표시 이름"),
             ("모델", "예", "IES4224GP, IES4028XP, IES4226XP"),
-            ("장비 IPv4", "예", "Agent Setup에서 선택한 관리망에 속한 스위치 관리 IPv4"),
+            ("장비 IPv4", "예", "10/8, 172.16/12 또는 192.168/16의 스위치 관리 IPv4"),
             ("계정 ID", "예", "Telnet 로그인 계정"),
             ("로그인 PW", "예", "현재 Windows 사용자 DPAPI로 보호"),
             ("enable PW", "아니요", "로그인 후 프롬프트가 >인 장비에서만 사용"),
@@ -1160,7 +1141,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         doc,
         "접속 시험 실패",
         "실패한 장비도 저장할 수 있지만 '접속 미확인'으로 표시되고 주기 감시는 강제로 꺼집니다. "
-        "주소, Agent 허용 IP, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 시험하세요.",
+        "주소가 사설 대역인지, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 시험하세요.",
         "warning",
     )
     add_heading(doc, "장비 show 명령 실행", 1, heading_num_id)
@@ -1342,14 +1323,14 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
             ("주기 감시 기준 해시·이벤트", "Viewer 사용자 프로필", "원문 없이 로컬 저장"),
             ("수동 show 입력·출력", "Viewer 프로세스 메모리", "복사 가능, 종료 시 소멸"),
             (
-                "Agent HTTPS 신원",
-                "%ProgramData%\\\nSamsungSwitchWatch",
-                "DPAPI LocalMachine + SYSTEM/Administrators/서비스 SID ACL",
+                "Agent HTTPS 인증서",
+                "Agent 프로세스 메모리",
+                "서비스 시작마다 새로 생성, 종료 시 소멸",
             ),
             (
                 "Agent 실행 설정",
                 "%ProgramFiles%\\SamsungSwitchWatch\\Agent",
-                "Viewer 주소와 선택 관리망에 맞춰 Setup이 생성",
+                "RFC1918 Viewer/장비 정책과 TCP 포트",
             ),
             ("장비 계정·스위치 출력", "Agent", "저장하지 않음"),
         ],
@@ -1360,10 +1341,10 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         [
             "Viewer 설정을 다른 PC나 Windows 사용자에게 복사해도 계정은 복호화되지 않으며, 진단 파일에는 "
             "IP·ID·비밀번호·호스트명·수동 명령 원문을 넣지 않습니다.",
-            "기존 Agent HTTPS 신원과 유효한 실행 설정은 같은 PC의 업데이트에서 보존합니다.",
-            "제품 소유 방화벽 규칙과 Agent 원격 업무 API는 같은 고정 Viewer IPv4를 허용합니다. "
-            "외부 방화벽 규칙은 변경하지 않으며, Agent PC의 로컬 준비 상태 점검만 예외입니다. "
-            "Agent는 Setup에서 선택하거나 직접 추가해 확정한 관리망의 Telnet/23만 사용합니다.",
+            "Viewer는 Agent 인증서 지문이나 페어링 토큰을 저장하지 않습니다. HTTPS는 전송 내용을 "
+            "암호화하지만 Agent PC 신원을 별도로 인증하는 구조는 아닙니다.",
+            "제품 방화벽 규칙과 Agent 업무 API는 RFC1918 사설 Viewer 주소를 허용합니다. "
+            "Agent는 RFC1918 사설 장비의 Telnet/23만 사용합니다.",
         ],
         bullet_num_id,
     )
@@ -1385,19 +1366,17 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         ["표시 코드/증상", "확인 순서"],
         [
             ("AGENT_DNS_FAILED", "입력한 Agent PC 이름 → 사내 DNS → IPv4 직접 입력"),
-            ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → Agent Setup 검사 → 고정 Viewer IP → 원격 TCP/18443"),
-            ("AGENT_CLIENT_NOT_ALLOWED", "Agent PC에서 Setup 재실행 → 현재 Viewer 고정 IPv4 입력 → 설치/업데이트"),
+            ("AGENT_CONNECTION_REFUSED", "실제 Agent PC 주소 → 서비스 Running → 원격 TCP/18443"),
+            ("AGENT_CLIENT_NOT_ALLOWED", "Viewer 주소가 10/8, 172.16/12 또는 192.168/16인지 확인"),
             ("AGENT_UNREACHABLE", "Viewer와 Agent PC 사이 라우팅 → 방화벽 → EDR 차단"),
-            ("AGENT_VERSION_MISMATCH", "같은 Release의 Agent ZIP과 Viewer ZIP으로 함께 업데이트"),
-            ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
-            ("AGENT_PROTOCOL_MISMATCH / TLS_IDENTITY_INVALID", "TCP 성공 확인 → Agent PC의 로컬 HTTPS/TLS 준비 상태 → PC 교체 여부와 HTTPS 신원"),
+            ("Agent/Viewer 버전 차이 경고", "API v4 호환이면 그대로 연결 가능. 문제 재현 시 같은 Release로 맞춤"),
+            ("AGENT_PROTOCOL_MISMATCH", "Agent API가 v4인지 확인하고 같은 Release로 업데이트"),
             ("SETUP_PACKAGE_NOT_FOUND", "Agent ZIP 전체 압축 해제 → Setup과 Agent EXE·BUILD-MANIFEST 존재 확인"),
             ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
-            ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
+            ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → 설치 계속 → Viewer 연결 테스트"),
             ("FIREWALL_REMOTE_ACCESS_UNCONFIRMED", "Agent 설치 유지 확인 → Viewer 연결 테스트 → TCP 실패 시 방화벽 서비스·Domain/Private·회사 GPO 확인"),
-            ("SETUP_FIREWALL_FAILED", "이전 버전/복구 호환 경로 → 안전한 불일치 코드와 rollback 상태 확인"),
-            ("SETUP_HEALTH_FAILED", "Agent PC 내부 Setup → 127.0.0.1:18443 → Agent 서비스 구간 확인 → AgentHealthCode와 안전 관측값 확인 → 같은 설치 반복 대신 Windows 이벤트·TLS 정책·EDR 확인"),
+            ("AGENT_LOCAL_CONNECTION_UNCONFIRMED", "설치는 유지됨 → Viewer 연결 테스트 → 실패 시 Agent 서비스·로컬 HTTPS·EDR 확인"),
             ("SETUP_RECOVERY_REQUIRED", "설치/업데이트를 누르지 말고 '이전 상태 복구' 실행 → 복구 완료 확인 → 설치/업데이트를 별도로 시작"),
             ("SETUP_ROLLBACK_FAILED", "'진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계 확인 → 증거 폴더를 그대로 보존 → Windows 관리자에게 전달"),
             ("ROLLBACK_STATE_MISMATCH", "복구 기록과 현재 설치 상태가 다름. 복구·설치 재시도와 파일 수동 정리를 중지"),
@@ -1408,8 +1387,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
             ("ROLLBACK_JOURNAL_WRITE_FAILED / ROLLBACK_EVIDENCE_CLEANUP_FAILED", "journal 또는 복구 증거 정리 단계 실패. 아래 대상별 안전 코드를 확인하고 남은 기록·폴더는 보존"),
             ("ROLLBACK_STAGING_CLEANUP_FAILED / ROLLBACK_BACKUP_CLEANUP_FAILED", "현재 작업의 staging 또는 backup 자료 정리 실패. 수동 삭제 없이 익명 진단 전달"),
             ("ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED / ROLLBACK_JOURNAL_CLEANUP_FAILED", "현재 작업의 failed 자료 또는 journal 정리·삭제 확인 실패. 설치는 잠긴 상태로 유지"),
-            ("SETUP_EXISTING_NETWORKS_NOT_LOADED", "기존 관리망을 자동 복원하지 못함. 승인된 관리망을 다시 선택하거나 IPv4/prefix로 직접 추가"),
-            ("TARGET_NOT_ALLOWED", "장비 IPv4가 Setup에서 선택·추가한 관리망 내부인지 확인. 필요하면 승인된 사설 CIDR을 Setup에서 추가"),
+            ("TARGET_NOT_ALLOWED", "장비 IPv4가 10/8, 172.16/12 또는 192.168/16인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
@@ -1461,17 +1439,15 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         doc,
         "방화벽 검증 실패 시",
         "FIREWALL_REMOTE_ADDRESS_MISMATCH 같은 코드는 어떤 필드가 안전 기준과 달랐는지만 "
-        "알려 주며 실제 Viewer 주소나 규칙 원문은 포함하지 않습니다. Windows의 정상적인 "
-        "IP/32와 IP/255.255.255.255 표기 차이는 자동 처리됩니다. "
+        "알려 주며 실제 주소나 규칙 원문은 포함하지 않습니다. "
         "FIREWALL_REMOTE_ACCESS_UNCONFIRMED이면 Agent 설치는 유지되며 Viewer 연결 테스트로 "
-        "원격 TCP/18443을 확인합니다. 실패하면 코드만 Windows 관리자에게 전달하고, 규칙을 "
-        "직접 넓혀 우회하지 마세요.",
+        "원격 TCP/18443을 확인합니다. 실패하면 코드만 Windows 관리자에게 전달하세요.",
         "warning",
     )
     add_heading(doc, "현장 진단", 2, heading_num_id)
     add_body(
         doc,
-        "Agent PC에서는 Agent Setup을 다시 열고 검사를 실행합니다. Viewer에서는 Agent 연결 "
+        "Agent PC에서는 Windows 서비스에서 Agent 상태를 확인하고 필요하면 Agent Setup을 다시 실행합니다. Viewer에서는 Agent 연결 "
         "진단을 실행합니다. 두 화면의 단계와 안정 오류 코드만 기록하고 실제 IP, 계정, 비밀번호와 "
         "장비 원문은 외부로 전달하지 않습니다.",
     )
@@ -1481,11 +1457,11 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         [
             (
                 "Viewer",
-                "Agent 연결에 실제 Agent PC 주소를 입력합니다. 동일 PC와 원격 구성 모두 localhost나 스위치 IP를 사용하지 않습니다.",
+                "Agent 연결에 Agent PC 주소를 입력합니다. 원격 구성에서는 스위치 IP나 Viewer PC 주소를 사용하지 않습니다.",
             ),
             (
                 "Agent PC",
-                "Agent Setup의 사전 점검에서 패키지, 서비스, 방화벽과 Agent 준비 상태를 확인합니다.",
+                "Agent Setup의 설치/업데이트 결과에서 패키지, 서비스, 방화벽과 Agent 준비 상태를 확인합니다.",
             ),
             (
                 "Viewer PC",
@@ -1493,7 +1469,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
             ),
             (
                 "동일 PC 시험",
-            "Agent와 Viewer가 같은 PC일 때 테스트는 Agent/API까지만 확인합니다. 스위치와 원격 Viewer 경로는 별도 확인합니다.",
+            "Agent 주소에 localhost 또는 해당 PC의 사설 IPv4를 입력해 Agent/API까지만 확인합니다. 스위치와 원격 Viewer 경로는 별도 확인합니다.",
             ),
         ],
         [1900, 7460],
@@ -1519,7 +1495,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         doc,
         [
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
-            "Agent PC에서 SamsungSwitchWatch.Agent.Setup.exe를 실행합니다. 기존 신원과 유효한 정책은 보존됩니다.",
+            "Agent PC에서 SamsungSwitchWatch.Agent.Setup.exe를 실행합니다. 입력 없이 설치/업데이트를 진행합니다.",
             "Viewer PC에서 새 Viewer 패키지의 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
             "Agent 연결, 장비 목록, 접속 시험, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
@@ -1528,14 +1504,13 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
     add_body(
         doc,
         "서비스와 방화벽을 변경하므로 Agent 제거는 사내 Windows 관리자가 승인된 관리 절차로 "
-        "수행합니다. 공개 패키지에는 제거 스크립트를 포함하지 않습니다. HTTPS 신원과 "
-        "%ProgramData% 데이터의 영구 삭제는 Viewer의 신원 변경 경고를 발생시키므로 별도 승인 없이 "
-        "삭제하지 않습니다.",
+        "수행합니다. 공개 패키지에는 제거 스크립트를 포함하지 않습니다. 설치 폴더와 서비스는 "
+        "별도 승인 없이 수동 삭제하지 않습니다.",
     )
     add_callout(
         doc,
-        "데이터 삭제",
-        "Agent HTTPS 신원과 설치 데이터를 삭제하면 복구할 수 없고 이후 Viewer에서 신원 변경 경고가 발생합니다.",
+        "설치 자료 삭제",
+        "Program Files의 Agent 폴더와 Windows 서비스를 수동 삭제하면 업데이트와 복구가 어려워질 수 있습니다.",
         "danger",
     )
     add_heading(
@@ -1549,7 +1524,7 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         doc,
         [
             "Agent 서비스가 창 없이 Running이고 Viewer가 실제 사설 IPv4로 HTTPS 연결되는지 확인",
-            "동일 PC 사전 테스트 성공 뒤 원격 Viewer 고정 IPv4를 Setup에 다시 적용하고 원격 PC에서 재검증",
+            "동일 PC 연결 확인 뒤 실제 원격 Viewer에서 Agent PC 주소로 다시 연결 확인",
             "계정은 Viewer에만 저장되고 접속 시험 실패 장비의 주기 감시는 꺼지는지 확인",
             "show port status와 syslog 명령이 모델별로 동작하는지 확인",
             "민감 출력 비저장·Viewer 재실행·장애/복구·중복 억제는 모의 검증 후 사내 장비로 확인",

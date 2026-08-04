@@ -70,6 +70,17 @@ internal static class SetupInstallCompletionPolicy
             .ToArray();
         if (warnings.Any(step => string.Equals(
                 step.Code,
+                SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+                StringComparison.Ordinal)))
+        {
+            return new SetupInstallCompletionState(
+                SetupInstallCompletionSeverity.Warning,
+                "설치 완료 · 연결 확인 필요",
+                "Agent는 설치되어 실행 중입니다. Viewer에서 Agent 연결 테스트를 실행하세요.");
+        }
+
+        if (warnings.Any(step => string.Equals(
+                step.Code,
                 SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
                 StringComparison.Ordinal)))
         {
@@ -646,6 +657,8 @@ internal static class SetupFieldDiagnosticFormatter
             SetupErrorCodes.ConfigurationInvalid,
             SetupErrorCodes.ServiceFailed,
             SetupErrorCodes.FirewallFailed,
+            SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+            SetupErrorCodes.AgentLocalConnectionUnconfirmed,
             SetupErrorCodes.HealthFailed,
             SetupErrorCodes.RollbackFailed,
             SetupErrorCodes.RecoveryRequired,
@@ -705,6 +718,7 @@ internal static class SetupFieldDiagnosticFormatter
             "FIREWALL_UPDATE_REQUIRED",
             "FIREWALL_NOT_INSTALLED",
             "FIREWALL_CONFIGURED",
+            SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
             SetupErrorCodes.FirewallFailed,
             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed,
             SetupErrorCodes.RollbackLegacyFirewallRestoreFailed,
@@ -739,6 +753,9 @@ internal static class SetupFieldDiagnosticFormatter
             resultCode);
         var failure = SetupFailureDiagnosticProjection.Create(context.Result);
         var stages = BuildStages(context.Result);
+        var diagnosticCode = context.Result.Succeeded
+            ? SuccessWarningCode(context.Result)
+            : resultCode;
         var lines = new List<string>
         {
             "SSW_FIELD_DIAGNOSTIC/2",
@@ -749,13 +766,11 @@ internal static class SetupFieldDiagnosticFormatter
             $"FailedStage={
                 (context.Result.Succeeded ? "NONE" : failure.Stage)}",
             $"ErrorCode={
-                (context.Result.Succeeded ? SetupErrorCodes.Ok : resultCode)}",
+                diagnosticCode}",
             $"Failure={(context.Result.Succeeded ? "NONE" : primaryCode)}|{(context.Result.Succeeded ? NotRun : failure.Category)}|{(context.Result.Succeeded ? "unknown" : MillisecondsToken(failure.DurationMilliseconds))}",
             $"Action={
                 RecommendedActionCode(
-                    context.Result.Succeeded
-                        ? SetupErrorCodes.Ok
-                        : resultCode)}",
+                    diagnosticCode)}",
             $"State={PackageValidation(context.Result, stages)}|{RecoveryJournal(context.Recovery)}|{ServiceStatus(context.Result, context.Recovery, stages)}|{FirewallSummary(context.Result, stages)}|{LocalTcpStatus(context.Result, context.Recovery, stages)}|{ReadinessStatus(context.Result, stages)}",
             $"Health={AgentHealthCode(context.Result, context.Recovery)}|{ObservationFlags(context.Result, context.Recovery)}|{AttemptCountToken(Math.Max(context.Result.AgentHttpAttemptCount, context.Recovery.AgentHttpAttemptCount))}|{TransportPhaseToken(LastTransportPhase(context.Result, context.Recovery))}",
             CompactStages(stages)
@@ -920,6 +935,13 @@ internal static class SetupFieldDiagnosticFormatter
                 SetupErrorCodes.RollbackLegacyFirewallRestoreFailed))
         {
             return "FAIL";
+        }
+
+        if (decisions.Contains(
+                SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+                StringComparer.Ordinal))
+        {
+            return "NOT_CONFIRMED";
         }
 
         for (var index = decisions.Length - 1; index >= 0; index--)
@@ -1112,6 +1134,13 @@ internal static class SetupFieldDiagnosticFormatter
             return "PASS";
         }
 
+        if (HasStage(
+                stages,
+                SetupErrorCodes.AgentLocalConnectionUnconfirmed))
+        {
+            return "NOT_CONFIRMED";
+        }
+
         if (result.AgentListenerOwnedObserved ||
             recovery.AgentListenerOwnedObserved)
         {
@@ -1131,6 +1160,13 @@ internal static class SetupFieldDiagnosticFormatter
         if (HasStage(stages, "AGENT_READY"))
         {
             return "PASS";
+        }
+
+        if (HasStage(
+                stages,
+                SetupErrorCodes.AgentLocalConnectionUnconfirmed))
+        {
+            return "NOT_CONFIRMED";
         }
 
         return result.Code == SetupErrorCodes.HealthFailed ||
@@ -1156,8 +1192,12 @@ internal static class SetupFieldDiagnosticFormatter
             SetupErrorCodes.PathNotWritable => "CHECK_INSTALL_PERMISSIONS",
             SetupErrorCodes.ConfigurationInvalid => "REVIEW_CONFIGURATION",
             SetupErrorCodes.ServiceFailed => "CHECK_WINDOWS_SERVICE",
-            SetupErrorCodes.FirewallFailed => "CHECK_FIREWALL_POLICY",
-            SetupErrorCodes.HealthFailed => "CHECK_AGENT_READINESS",
+            SetupErrorCodes.FirewallFailed or
+            SetupErrorCodes.FirewallRemoteAccessUnconfirmed =>
+                "CHECK_FIREWALL_POLICY",
+            SetupErrorCodes.HealthFailed or
+            SetupErrorCodes.AgentLocalConnectionUnconfirmed =>
+                "CHECK_AGENT_READINESS",
             SetupErrorCodes.RollbackFailed or
             SetupErrorCodes.RecoveryRequired or
             SetupErrorCodes.RollbackStateMismatch or
@@ -1180,6 +1220,28 @@ internal static class SetupFieldDiagnosticFormatter
                 "CHOOSE_WRITABLE_LOCATION",
             _ => "COLLECT_DIAGNOSTIC"
         };
+
+    private static string SuccessWarningCode(SetupOperationResult result)
+    {
+        if (result.Steps.Any(step =>
+                step.State == SetupStepState.Warning &&
+                string.Equals(
+                    step.Code,
+                    SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+                    StringComparison.Ordinal)))
+        {
+            return SetupErrorCodes.AgentLocalConnectionUnconfirmed;
+        }
+
+        return result.Steps.Any(step =>
+            step.State == SetupStepState.Warning &&
+            string.Equals(
+                step.Code,
+                SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+                StringComparison.Ordinal))
+            ? SetupErrorCodes.FirewallRemoteAccessUnconfirmed
+            : SetupErrorCodes.Ok;
+    }
 
     private static bool HasStage(
         IReadOnlyList<SetupStageDiagnostic> stages,

@@ -109,10 +109,13 @@ public sealed class WindowsFirewallManager : IFirewallManager
             dynamic rules = rulesObject;
             dynamic rule = ruleObject;
             rule.Name = ruleName;
-            rule.Description = "Owned by SamsungSwitchWatchAgent native setup v1";
+            rule.Description = "Owned by SamsungSwitchWatchAgent native setup v2";
             rule.Protocol = TcpProtocol;
             rule.LocalPorts = port.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            rule.RemoteAddresses = $"{viewerIpv4}/32";
+            rule.RemoteAddresses = viewerIpv4.Contains(',', StringComparison.Ordinal) ||
+                                   viewerIpv4.Contains('/', StringComparison.Ordinal)
+                ? viewerIpv4
+                : $"{viewerIpv4}/32";
             rule.Direction = NetFwRuleDirectionIn;
             rule.Enabled = true;
             rule.Profiles = NetFwProfileDomain | NetFwProfilePrivate;
@@ -267,7 +270,12 @@ public sealed class WindowsFirewallManager : IFirewallManager
     public bool IsExactViewerRule(string ruleName, int port, string viewerIpv4)
     {
         var snapshot = Capture(ruleName);
-        return FirewallRuleVerifier.Evaluate(snapshot, port, viewerIpv4).IsExact;
+        return string.Equals(
+                viewerIpv4,
+                SetupConstants.PrivateNetworkFirewallRemoteAddresses,
+                StringComparison.Ordinal)
+            ? FirewallRuleVerifier.EvaluatePrivateNetworks(snapshot, port).IsExact
+            : FirewallRuleVerifier.Evaluate(snapshot, port, viewerIpv4).IsExact;
     }
 
     public FirewallSecurityAssessment AssertSecurityGate(
@@ -376,7 +384,7 @@ public sealed class WindowsFirewallManager : IFirewallManager
                     new FirewallSecurityWarning(
                         FirewallOverlapWarningCode,
                         $"TCP/{port}을 허용하는 다른 인바운드 방화벽 규칙 {externalOverlapCount}개가 있습니다. " +
-                        "해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")
+                        "해당 규칙은 변경하지 않으며 Agent 업무 API는 loopback과 RFC1918 사설 IPv4 요청만 허용합니다.")
                 ]);
         }
         catch (SetupException)
@@ -433,7 +441,7 @@ public sealed class WindowsFirewallManager : IFirewallManager
             {
                 throw new SetupException(
                     SetupErrorCodes.FirewallFailed,
-                    "그룹 정책이 로컬 방화벽 규칙 병합을 차단하고 있어 Viewer 전용 규칙을 보장할 수 없습니다.");
+                    "그룹 정책이 로컬 방화벽 규칙 병합을 차단하고 있어 제품의 사설 Viewer 대역 규칙을 보장할 수 없습니다.");
             }
         }
     }
@@ -587,6 +595,7 @@ public sealed class WindowsFirewallManager : IFirewallManager
         {
             SetupConstants.FirewallRuleName =>
                 snapshot.Description is
+                    "Owned by SamsungSwitchWatchAgent native setup v2" or
                     "Owned by SamsungSwitchWatchAgent native setup v1" or
                     "Owned by SamsungSwitchWatchAgent installer v3" or
                     "Owned by SamsungSwitchWatchAgent installer v1" &&

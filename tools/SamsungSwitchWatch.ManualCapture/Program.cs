@@ -19,7 +19,7 @@ namespace SamsungSwitchWatch.ManualCapture;
 
 internal static class Program
 {
-    private const string ManualProductVersion = "0.10.16-poc";
+    private const string ManualProductVersion = "0.11.0-poc";
 
     private static readonly string[] ExpectedScreenshotNames =
     [
@@ -125,14 +125,13 @@ internal static class Program
                 new WindowsMachineDeploymentLock(),
                 setupPaths);
             using (var setupLifetime = new WindowLifetime(
-                       new AgentSetupWindow(
-                           new ManualNetworkDiscovery(),
-                           setupDiagnostics,
-                           setupDeployment,
-                           diagnosticsOnly: false)
+                new AgentSetupWindow(
+                            setupDiagnostics,
+                            setupDeployment,
+                            diagnosticsOnly: false)
                        {
                             Width = 760,
-                            Height = 900,
+                            Height = 700,
                            ShowInTaskbar = previewAgentSetup,
                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 48,
@@ -140,48 +139,34 @@ internal static class Program
                        }))
             {
                 ShowAndLayout(setupLifetime.Window);
-                var useThisPcAddress = (Button)setupLifetime.Window.FindName(
-                    "UseThisPcAddressButton");
-                useThisPcAddress.RaiseEvent(
-                    new RoutedEventArgs(Button.ClickEvent));
-                var manualCidrInput = (TextBox)setupLifetime.Window.FindName(
-                    "ManualCidrTextBox");
-                manualCidrInput.Text = "172.20.40.25/24";
-                var addManualNetwork = (Button)setupLifetime.Window.FindName(
-                    "AddManualNetworkButton");
-                addManualNetwork.RaiseEvent(
-                    new RoutedEventArgs(Button.ClickEvent));
                 var resultItems = (ItemsControl)setupLifetime.Window.FindName(
                     "ResultItemsControl");
                 resultItems.ItemsSource = new[]
                 {
                     SamsungSwitchWatch.Agent.Setup.ResultRow.From(
                         new SetupStepResult(
-                            "SETUP_RECOVERY_REQUIRED",
-                            "이전 상태 복구 필요",
+                            "SERVICE_CONFIGURED",
+                            "Agent 서비스",
+                            SetupStepState.Succeeded,
+                            "창 없는 Windows 서비스 설치와 시작을 완료했습니다.")),
+                    SamsungSwitchWatch.Agent.Setup.ResultRow.From(
+                        new SetupStepResult(
+                            SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+                            "연결 준비 확인",
                             SetupStepState.Warning,
-                            "중단된 이전 설치 기록을 안전하게 확인했습니다. 먼저 이전 상태 복구를 실행하세요."))
+                            "Agent는 설치되어 실행 중입니다. Viewer에서 Agent 연결 테스트를 실행하세요."))
                 };
                 var recoveryStatusBorder = (Border)setupLifetime.Window.FindName(
                     "RecoveryStatusBorder");
-                recoveryStatusBorder.Visibility = Visibility.Visible;
-                recoveryStatusBorder.Background =
-                    new SolidColorBrush(Color.FromRgb(255, 251, 235));
-                recoveryStatusBorder.BorderBrush =
-                    new SolidColorBrush(Color.FromRgb(245, 158, 11));
+                recoveryStatusBorder.Visibility = Visibility.Collapsed;
                 var recoveryStatusTitle = (TextBlock)setupLifetime.Window.FindName(
                     "RecoveryStatusTitle");
-                recoveryStatusTitle.Text = "이전 설치 상태를 먼저 복구하세요";
-                recoveryStatusTitle.Foreground = Brushes.DarkGoldenrod;
                 var recoveryStatusText = (TextBlock)setupLifetime.Window.FindName(
                     "RecoveryStatusText");
-                recoveryStatusText.Text =
-                    "중단된 이전 설치 기록을 안전하게 확인했습니다.\n" +
-                    "복구 완료 후 설치/업데이트는 자동으로 시작되지 않습니다.";
                 var actionGuidance = (TextBlock)setupLifetime.Window.FindName(
                     "ActionGuidanceText");
                 actionGuidance.Text =
-                    "1) 이전 상태 복구  2) 복구 완료 확인  3) 설치 / 업데이트";
+                    "설치는 유지됩니다. Viewer에서 Agent 연결 테스트를 실행하세요.";
                 var copyDiagnostics = (Button)setupLifetime.Window.FindName(
                     "CopyDiagnosticsButton");
                 copyDiagnostics.Visibility = Visibility.Collapsed;
@@ -190,26 +175,26 @@ internal static class Program
                 diagnosticsFeedback.Visibility = Visibility.Collapsed;
                 var recoverButton = (Button)setupLifetime.Window.FindName(
                     "RecoverButton");
-                recoverButton.Visibility = Visibility.Visible;
-                recoverButton.IsEnabled = true;
+                recoverButton.Visibility = Visibility.Collapsed;
                 var installButton = (Button)setupLifetime.Window.FindName(
                     "InstallButton");
-                installButton.IsEnabled = false;
+                installButton.IsEnabled = true;
                 var operationState = (TextBlock)setupLifetime.Window.FindName(
                     "OperationStateText");
-                operationState.Text = "복구 필요";
+                operationState.Text = "설치 완료 · 연결 확인 필요";
                 operationState.Foreground = Brushes.DarkGoldenrod;
                 RefreshLayout(setupLifetime.Window);
                 Capture(
                     setupLifetime.Window,
                     Path.Combine(outputDirectory, "00-agent-setup.png"),
-                    "중단된 이전 설치 기록을 읽기 전용으로 감지해 이전 상태 복구 버튼만 활성화하고 설치 업데이트 버튼은 비활성화한 Agent Setup 화면");
+                    "Viewer IP와 관리망 CIDR 입력 없이 Agent 서비스 설치 완료와 연결 확인 경고를 보여 주는 Agent Setup 화면");
 
+                setupLifetime.Window.Height = 900;
                 resultItems.ItemsSource = new[]
                 {
                     SamsungSwitchWatch.Agent.Setup.ResultRow.From(
                         new SetupStepResult(
-                            "SETUP_FIREWALL_FAILED",
+                            SetupErrorCodes.ServiceFailed,
                             "최초 설치 실패",
                             SetupStepState.Failed,
                             "설치 단계의 최초 실패 원인은 그대로 보존됩니다.")),
@@ -224,6 +209,7 @@ internal static class Program
                     new SolidColorBrush(Color.FromRgb(254, 242, 242));
                 recoveryStatusBorder.BorderBrush =
                     new SolidColorBrush(Color.FromRgb(220, 38, 38));
+                recoveryStatusBorder.Visibility = Visibility.Visible;
                 recoveryStatusTitle.Text =
                     "이전 상태를 완전히 복구하지 못했습니다";
                 recoveryStatusTitle.Foreground = Brushes.Firebrick;
@@ -244,6 +230,9 @@ internal static class Program
                 agentSupportCodeTextBox.Text = agentSupportCode;
                 agentSupportCodeBorder.Visibility = Visibility.Visible;
                 recoverButton.Content = "복구 다시 시도";
+                recoverButton.Visibility = Visibility.Visible;
+                recoverButton.IsEnabled = true;
+                installButton.IsEnabled = false;
                 operationState.Text =
                     "복구 실패 · SETUP_ROLLBACK_FAILED";
                 operationState.Foreground = Brushes.Firebrick;
@@ -295,11 +284,10 @@ internal static class Program
                        new ConnectionSettingsWindow(
                            connectionSettings,
                            (_, _) => Task.CompletedTask,
-                           new NeverCalledAgentConnectionProbe(),
-                           new ManualLocalAgentPreflight())
+                           new ManualSuccessfulAgentConnectionProbe())
                        {
-                            Width = 620,
-                            Height = 850,
+                            Width = 650,
+                            Height = 820,
                             ShowInTaskbar = false,
                             WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 80,
@@ -307,20 +295,24 @@ internal static class Program
                        }))
             {
                 ShowAndLayout(connectionLifetime.Window);
-                var localPreflightButton = (Button)connectionLifetime.Window.FindName(
-                    "LocalPreflightButton");
-                var localPreflightResult = (Border)connectionLifetime.Window.FindName(
-                    "LocalPreflightResultPanel");
-                localPreflightButton.RaiseEvent(
+                var saveButton = (Button)connectionLifetime.Window.FindName(
+                    "SaveButton");
+                var progressPanel = (Border)connectionLifetime.Window.FindName(
+                    "ConnectionProgressPanel");
+                saveButton.RaiseEvent(
                     new RoutedEventArgs(Button.ClickEvent));
                 WaitUntil(
-                    () => localPreflightResult.Visibility == Visibility.Visible,
+                    () => progressPanel.Visibility == Visibility.Visible
+                          && !string.IsNullOrWhiteSpace(
+                              ((TextBlock)connectionLifetime.Window.FindName(
+                                  "ValidationText")).Text),
                     TimeSpan.FromSeconds(3));
                 RefreshLayout(connectionLifetime.Window);
+                ScrollAllToTop(connectionLifetime.Window);
                 Capture(
                     connectionLifetime.Window,
                     Path.Combine(outputDirectory, "02-agent-connection.png"),
-                    "이 PC의 실제 사설 IPv4로 Agent 서비스, HTTPS 18443, API와 버전을 확인하고 스위치와 원격 경로는 미확인으로 구분하는 연결 설정 창");
+                    "Agent PC 주소 하나만 입력하고 HTTPS 18443, Agent API와 호환 버전을 자동 확인한 연결 설정 창");
             }
 
             using (var connectionFailureLifetime = new WindowLifetime(
@@ -329,8 +321,8 @@ internal static class Program
                            (_, _) => Task.CompletedTask,
                            new ManualFailingAgentConnectionProbe())
                        {
-                           Width = 720,
-                           Height = 850,
+                           Width = 650,
+                           Height = 820,
                            ShowInTaskbar = false,
                            WindowStartupLocation = WindowStartupLocation.Manual,
                            Left = 80,
@@ -371,6 +363,7 @@ internal static class Program
                 }
 
                 RefreshLayout(connectionFailureLifetime.Window);
+                ScrollAllToTop(connectionFailureLifetime.Window);
                 Capture(
                     connectionFailureLifetime.Window,
                     Path.Combine(
@@ -512,27 +505,44 @@ internal static class Program
         }
     }
 
-    private sealed class ManualNetworkDiscovery : INetworkDiscovery
-    {
-        public IReadOnlyList<NetworkCandidate> DiscoverPrivateIpv4Networks() =>
-        [
-            new(
-                "manual-ethernet:10.50.0.10",
-                "Ethernet",
-                "10.50.0.10",
-                "10.50.0.0/24",
-                "Sanitized management network")
-        ];
-    }
-
-    private sealed class NeverCalledAgentConnectionProbe : IAgentConnectionProbe
+    private sealed class ManualSuccessfulAgentConnectionProbe : IAgentConnectionProbe
     {
         public Task<AgentConnectionProbeResult> ProbeAsync(
             ViewerSettings settings,
             IProgress<AgentConnectionProbeUpdate>? progress,
-            CancellationToken cancellationToken) =>
-            throw new InvalidOperationException(
-                "The deterministic manual capture must use the local preflight fixture.");
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var (stage, detail) in new[]
+                     {
+                         (AgentConnectionProbeStage.Address, "Agent 주소 형식을 확인했습니다."),
+                         (AgentConnectionProbeStage.Dns, "Agent PC IPv4를 확인했습니다."),
+                         (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
+                         (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
+                         (AgentConnectionProbeStage.Identity, $"Agent {ManualProductVersion} · API v4 확인")
+                     })
+            {
+                progress?.Report(new AgentConnectionProbeUpdate(
+                    stage,
+                    AgentConnectionProbeState.Succeeded,
+                    detail));
+            }
+
+            var identity = new AgentIdentityDto(
+                4,
+                "manual-agent",
+                "manual-instance",
+                new string('A', 64),
+                "https",
+                8,
+                65_536)
+            {
+                ProductVersion = ManualProductVersion
+            };
+            return Task.FromResult(AgentConnectionProbeResult.Success(
+                identity,
+                $"Agent {ManualProductVersion} · API v4 호환"));
+        }
     }
 
     private sealed class ManualFailingAgentConnectionProbe : IAgentConnectionProbe
@@ -580,61 +590,6 @@ internal static class Program
                             12)
                     ]
                 });
-        }
-    }
-
-    private sealed class ManualLocalAgentPreflight : ILocalAgentPreflight
-    {
-        public Task<LocalAgentPreflightResult> RunAsync(
-            ViewerSettings baseSettings,
-            IProgress<LocalAgentPreflightUpdate>? progress,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            const string address = "10.50.0.10";
-            var candidate = ViewerSettingsSanitizer.Copy(baseSettings);
-            candidate.DemoMode = false;
-            candidate.AgentUri = $"https://{address}:18443";
-
-            progress?.Report(new LocalAgentPreflightUpdate(address, 1, 1, null));
-            foreach (var (stage, detail) in new[]
-                     {
-                         (AgentConnectionProbeStage.Address, "HTTPS 포트 18443을 사용합니다."),
-                         (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
-                         (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
-                         (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
-                         (AgentConnectionProbeStage.Identity, $"Agent {ManualProductVersion} · API v4 확인")
-                     })
-            {
-                progress?.Report(new LocalAgentPreflightUpdate(
-                    address,
-                    1,
-                    1,
-                    new AgentConnectionProbeUpdate(
-                        stage,
-                        AgentConnectionProbeState.Succeeded,
-                        detail)));
-            }
-
-            var identity = new AgentIdentityDto(
-                4,
-                "manual-agent",
-                "manual-instance",
-                new string('A', 64),
-                "https",
-                8,
-                65_536)
-            {
-                ProductVersion = ManualProductVersion
-            };
-            var probeResult = AgentConnectionProbeResult.Success(
-                identity,
-                $"Agent {ManualProductVersion} · API v4 확인");
-            return Task.FromResult(new LocalAgentPreflightResult(
-                true,
-                candidate,
-                probeResult,
-                1));
         }
     }
 
@@ -739,7 +694,7 @@ internal static class Program
             "복구 자료 정리를 완료하지 못했습니다.",
             [
                 new SetupStepResult(
-                    SetupErrorCodes.FirewallFailed,
+                    SetupErrorCodes.ServiceFailed,
                     "최초 설치 실패",
                     SetupStepState.Failed,
                     "설치 단계의 최초 실패 원인은 그대로 보존됩니다."),
@@ -751,7 +706,7 @@ internal static class Program
             ])
         with
         {
-            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            PrimaryFailureCode = SetupErrorCodes.ServiceFailed,
             RollbackFailureCodes =
             [
                 SetupErrorCodes.RollbackJournalCleanupFailed
@@ -765,7 +720,7 @@ internal static class Program
         {
             JournalFormatVersion = 1,
             JournalStage = "rollback-completed",
-            PrimaryFailureCode = SetupErrorCodes.FirewallFailed,
+            PrimaryFailureCode = SetupErrorCodes.ServiceFailed,
             RollbackFailureCodes =
             [
                 SetupErrorCodes.RollbackJournalCleanupFailed
@@ -854,6 +809,27 @@ internal static class Program
         window.UpdateLayout();
         DrainDispatcher();
         window.UpdateLayout();
+    }
+
+    private static void ScrollAllToTop(Window window)
+    {
+        Keyboard.ClearFocus();
+        DrainDispatcher();
+
+        var scrollViewers = FindVisualChildren<ScrollViewer>(window).ToArray();
+        foreach (var scrollViewer in scrollViewers)
+        {
+            scrollViewer.ScrollToTop();
+        }
+
+        // Focus and BringIntoView requests can be queued by validation UI updates.
+        // Drain them, then restore the deterministic top-of-form capture position.
+        DrainDispatcher();
+        foreach (var scrollViewer in scrollViewers)
+        {
+            scrollViewer.ScrollToTop();
+        }
+        DrainDispatcher();
     }
 
     private static void WaitUntil(Func<bool> predicate, TimeSpan timeout)

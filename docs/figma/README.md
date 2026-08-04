@@ -5,8 +5,10 @@
 - Current Viewer dashboard: node `33:205`
 - Current device-management dialog: node `37:4`
 - Current device-command dashboard: node `37:333`
-- Current HTTPS Agent connection and same-PC preflight dialog: node `52:123`
-- Current Agent Setup same-PC address helper screen: node `54:363`
+- Current simplified Agent connection dialog: node `73:72`
+- Current no-input Agent Setup screen: node `73:362`
+- Previous HTTPS Agent connection and same-PC preflight dialog: node `52:123`
+- Previous Agent Setup same-PC address helper screen: node `54:363`
 - Current Agent Setup recovery-failed screen: node `58:120`
 - Current Agent Setup sanitized field-diagnostic screen: node `60:340`
 - Current Viewer connection sanitized field-diagnostic screen: node `62:99`
@@ -34,7 +36,7 @@ not a published library. Handoff therefore uses Figma variables, component
 descriptions, node IDs, screenshots, and `get_design_context`; no false Code
 Connect mapping is created.
 
-## v6 operator flow
+## Current core operator flow
 
 The current design follows the user-approved Agent/Viewer boundary:
 
@@ -58,12 +60,21 @@ accepts one `show` command, shows common commands such as `show port status` and
 `show sylog tail num 100`, displays the returned output, and clearly states
 that the raw output is not saved.
 
+## Superseded connection and Setup input history (v7-v10)
+
+The following connection, network-input, and firewall-gate frames document
+earlier decisions only. They are retained for traceability and must not be used
+as current setup or connection instructions. The current implementation source
+of truth is the v0.11 section below.
+
 Node `36:2` established the removal of the historical fingerprint,
 pairing-token, `SSW1:` pairing, and Bearer-token flows. Node `52:123` preserves
 that simplified Agent address and fixed HTTPS port `18443`; access control
 belongs to the management network and Windows Firewall rules.
 
-Node `52:123` established the v10 connection layout. The current operator must
+### v10 connection layout
+
+Node `52:123` established the v10 connection layout. The v10 operator had to
 explicitly press `Agent와 Viewer가 같은 PC일 때 테스트`; the Viewer never starts this check
 automatically. It searches only real private IPv4 addresses on the current PC,
 not `localhost` or `127/8`, and separately reports these three scopes:
@@ -74,7 +85,7 @@ not `localhost` or `127/8`, and separately reports these three scopes:
 3. A same-PC success does not prove the route or firewall from the actual
    remote Viewer PC.
 
-Node `46:72` remains the source of truth for the Agent Setup
+Node `46:72` was the source of truth for the historical Agent Setup
 management-network portion. Automatic RFC1918 management-network discovery
 remains the default, while an approved routed network that is absent from the
 list may be added as `IPv4/prefix`. A host address is normalized to its
@@ -89,17 +100,17 @@ be restored safely, Setup shows `SETUP_EXISTING_NETWORKS_NOT_LOADED`, preloads
 no network, and asks the operator to select or add the approved networks again.
 
 Node `54:363` established the initial Viewer-address step while preserving that
-management-network behavior. The current `같은 PC 시험용 주소` action fills a single
+management-network behavior. The historical `같은 PC 시험용 주소` action filled a single
 detected private IPv4 immediately or lets the operator select among multiple
 private IPv4 candidates. If no suitable address exists, Setup shows actionable
 feedback instead of inventing a loopback address. Before remote deployment, the
-operator must run Setup again with the actual Viewer PC fixed IPv4 so the Agent
+v10 operator had to run Setup again with the actual Viewer PC fixed IPv4 so the Agent
 API and product-owned Windows Firewall rule return to the intended exact `/32`
 scope.
 
 The v8 screen preserves the v7 firewall behavior: another program's inbound
 TCP/18443 Allow rule is shown as a warning and is never changed or removed.
-The existing `설치 / 업데이트` flow creates the product-owned Viewer `/32`
+The historical `설치 / 업데이트` flow created the product-owned Viewer `/32`
 rule and configures the Agent to allow only the fixed Viewer IPv4 at the
 remote-work API boundary. Local `/health/live` and `/health/ready` checks remain
 the only loopback exception, and no separate auto-fix button is added.
@@ -113,11 +124,13 @@ safe mismatch category such as `FIREWALL_REMOTE_ADDRESS_MISMATCH`, and restores
 the pre-install state if verification still fails. The operator is explicitly
 warned not to broaden the firewall scope manually.
 
+## Current supporting states
+
 Node `33:205` keeps the three-column operational dashboard while adding clear
 entry points for Agent connection and device management. It explicitly states
 that monitoring is Viewer-owned and stops when the Viewer is closed.
 
-## v11 Agent Setup recovery flow
+### v11 Agent Setup recovery flow
 
 Nodes `58:72`, `58:97`, `58:120`, and `58:147` are the source of truth for
 interrupted Agent Setup recovery.
@@ -141,7 +154,7 @@ The four frames cover recovery required (`58:72`), recovery completed
 (`58:97`), retryable recovery failure with diagnostic-copy feedback
 (`58:120`), and unsafe recovery state (`58:147`).
 
-## v13 recovery evidence cleanup state
+### v13 recovery evidence cleanup state
 
 Node `58:120` was updated in place as `Agent Setup / Recovery Failed v13`.
 It is the current source of truth when `ROLLBACK_EVIDENCE_CLEANUP_FAILED`
@@ -166,7 +179,7 @@ prevents a recovery from being verified.
    `ROLLBACK_EVIDENCE_CLEANUP_FAILED` remains a diagnostic classification; no
    path or file name is shown.
 
-## v12 sanitized field diagnostic flow
+### v12 sanitized field diagnostic flow
 
 Nodes `60:340` and `62:99` are the source of truth for manually saved field
 diagnostics.
@@ -180,10 +193,10 @@ diagnostics.
    retained. IP/CIDR, PC and user names, credentials, certificate details,
    paths, raw firewall data, exception text and switch command output are
    excluded.
-5. `같은 PC 시험용 주소` and
-   `Agent와 Viewer가 같은 PC일 때 테스트` make the local test boundary
-   explicit. A same-PC success still does not prove the remote Viewer route or
-   switch access.
+5. On the same PC, the operator enters `localhost`, `127.0.0.1`, or a private
+   IPv4 address in the normal Agent-address field and runs the standard
+   connection check. A same-PC success still does not prove the remote Viewer
+   route or switch access.
 6. Existing failure-only clipboard diagnostics remain available in Agent
    Setup. The new TXT action does not replace them.
 
@@ -191,7 +204,7 @@ Node `60:340` covers the Agent Setup completed-check state and node `62:99`
 covers the Viewer connection-check state. Both preserve the established
 compact WPF layout and Noto Sans KR Figma typography.
 
-## v14 failure-only support-code flow
+### v14 failure-only support-code flow
 
 Nodes `58:120` and `62:99` now include the failure context in which the
 short support code is used. Component source frames `68:340` and `69:341`
@@ -227,3 +240,30 @@ Historical frames remain for decision traceability only. Certificate
 fingerprints, pairing tokens, `SSW1:` strings, Bearer-token input, Agent-side
 device credentials, and Agent-side monitoring schedules must not be
 reintroduced into the current flow.
+
+## v0.11 operability-first flow
+
+Nodes `73:72` and `73:362` are the implementation source of truth for the
+current release.
+
+1. Viewer asks only for the Agent PC IPv4 or internal DNS name. HTTPS/TCP
+   `18443` is fixed and no certificate fingerprint, pairing token, same-PC
+   helper, or trust-reset action is exposed.
+2. Viewer accepts the Agent's current self-signed TLS certificate automatically.
+   API v4 compatibility is the connection gate; a product-version difference is
+   shown as a warning and does not block a compatible connection.
+3. Agent Setup has no Viewer IPv4 or management-CIDR input. It installs the
+   hidden Windows service and applies the three RFC1918 ranges automatically.
+4. The product-owned Domain/Private firewall rule is best effort. A firewall,
+   local HTTPS, API, or version readiness failure after the service is installed
+   is an actionable warning, not a reason to remove the installed Agent.
+5. Device credentials remain Viewer-owned, Agent remains stateless, monitoring
+   runs only while Viewer is open, and the Agent still accepts one validated
+   single-line `show` command per request for Telnet/TCP `23` targets in RFC1918
+   space.
+
+This design intentionally prioritizes reliable operation on restricted company
+PCs. HTTPS still encrypts the transport, but automatic certificate acceptance
+does not authenticate the Agent endpoint. The UI therefore describes the
+network boundary plainly instead of presenting the connection as strongly
+authenticated.

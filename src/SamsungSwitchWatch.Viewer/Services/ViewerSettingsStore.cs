@@ -126,8 +126,7 @@ public static class ViewerSettingsSanitizer
 {
     public const int DefaultAgentPort = 18443;
     public const string LoopbackAgentAddressReason =
-        "localhost 또는 127.0.0.1은 Viewer 연결에 사용할 수 없습니다. "
-        + "'Agent와 Viewer가 같은 PC일 때 테스트'를 눌러 이 PC의 실제 사설 IPv4를 찾으세요.";
+        "localhost 또는 127.0.0.1은 Agent와 Viewer를 같은 PC에서 시험할 때 사용할 수 있습니다.";
 
     public static ViewerSettings Sanitize(ViewerSettings? input)
     {
@@ -180,12 +179,6 @@ public static class ViewerSettingsSanitizer
             reason = "Agent를 설치한 PC의 IPv4 주소 또는 DNS 이름만 입력해 주세요.";
             return false;
         }
-        if (IsLoopbackHost(address))
-        {
-            reason = LoopbackAgentAddressReason;
-            return false;
-        }
-
         try
         {
             agentUri = new UriBuilder(Uri.UriSchemeHttps, address, port).Uri
@@ -226,12 +219,6 @@ public static class ViewerSettingsSanitizer
             reason = "Agent 주소를 확인해 주세요.";
             return false;
         }
-        if (IsLoopbackHost(uri.Host))
-        {
-            reason = LoopbackAgentAddressReason;
-            return false;
-        }
-
         reason = string.Empty;
         return true;
     }
@@ -338,8 +325,8 @@ public sealed class ViewerSettingsStore
                 return new ViewerSettings();
             }
 
-            // Legacy manually-entered fingerprint and token fields are ignored.
-            // v0.8 and later store only automatic per-Agent trust pins.
+            // Valid legacy trust-pin entries are retained for settings-file
+            // compatibility, but v0.11 transport does not consult or mutate them.
             var settings = JsonSerializer.Deserialize<ViewerSettings>(storedJson, JsonOptions)
                            ?? throw new ViewerSettingsFormatException();
             settings = ViewerSettingsSanitizer.Sanitize(settings);

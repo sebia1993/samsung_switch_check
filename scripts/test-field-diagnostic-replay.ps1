@@ -250,6 +250,48 @@ function New-SswAgentSetupV2Diagnostic {
     ) -join "`r`n"
 }
 
+function New-SswAgentSetupWarningV2Diagnostic {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'AGENT_LOCAL_CONNECTION_UNCONFIRMED',
+            'FIREWALL_REMOTE_ACCESS_UNCONFIRMED')]
+        [string]$WarningCode
+    )
+
+    $isLocalWarning =
+        $WarningCode -ceq 'AGENT_LOCAL_CONNECTION_UNCONFIRMED'
+    return @(
+        'SSW_FIELD_DIAGNOSTIC/2',
+        'Component=AGENT_SETUP',
+        'ProductVersion=0.11.0-poc',
+        'Environment=20260804T010203000Z|WIN_10_0_26100_0|X64',
+        'Run=INSTALL|SUCCESS|60000',
+        'FailedStage=NONE',
+        ('ErrorCode=' + $WarningCode),
+        'Failure=NONE|NOT_RUN|unknown',
+        $(if ($isLocalWarning) {
+            'Action=CHECK_AGENT_READINESS'
+        }
+        else {
+            'Action=CHECK_FIREWALL_POLICY'
+        }),
+        $(if ($isLocalWarning) {
+            'State=PASS|NONE|CONFIGURED|NONE|NOT_CONFIRMED|NOT_CONFIRMED'
+        }
+        else {
+            'State=PASS|NONE|CONFIGURED|NOT_CONFIRMED|NOT_RUN|NOT_RUN'
+        }),
+        $(if ($isLocalWarning) {
+            'Health=HTTPS_REQUEST_TIMEOUT|FTF|2|REQUEST_STARTED'
+        }
+        else {
+            'Health=NOT_RUN|FFF|0|NOT_STARTED'
+        }),
+        ('Stages=3|' + $WarningCode + ':W')
+    ) -join "`r`n"
+}
+
 function Invoke-SswReplay {
     param(
         [Parameter(Mandatory = $true)]
@@ -464,6 +506,38 @@ try {
     Assert-SswEqual -Expected $healthScenario -Actual $agentV2Result.Output `
         -Message 'Agent Setup v2 selected the wrong existing fake scenario.'
 
+    $agentLocalWarningScenario =
+        'AgentDeploymentOrchestratorTests.DeployAsync_AutomaticRequest_HealthFailureKeepsInstalledServiceAndWarns'
+    $agentLocalWarningFixture = Write-SswFixture `
+        -Name 'agent-v2-local-warning-valid.txt' `
+        -Bom $true `
+        -Content (New-SswAgentSetupWarningV2Diagnostic `
+            -WarningCode 'AGENT_LOCAL_CONNECTION_UNCONFIRMED')
+    $agentLocalWarningResult = Invoke-SswReplay `
+        -FixturePath $agentLocalWarningFixture
+    Assert-SswEqual -Expected 0 -Actual $agentLocalWarningResult.ExitCode `
+        -Message 'Agent Setup local warning v2 input must succeed.'
+    Assert-SswEqual `
+        -Expected $agentLocalWarningScenario `
+        -Actual $agentLocalWarningResult.Output `
+        -Message 'Agent Setup local warning selected the wrong fake scenario.'
+
+    $agentFirewallWarningScenario =
+        'AgentDeploymentOrchestratorTests.DeployAsync_AutomaticRequest_FirewallFailureKeepsInstalledServiceAndWarns'
+    $agentFirewallWarningFixture = Write-SswFixture `
+        -Name 'agent-v2-firewall-warning-valid.txt' `
+        -Bom $true `
+        -Content (New-SswAgentSetupWarningV2Diagnostic `
+            -WarningCode 'FIREWALL_REMOTE_ACCESS_UNCONFIRMED')
+    $agentFirewallWarningResult = Invoke-SswReplay `
+        -FixturePath $agentFirewallWarningFixture
+    Assert-SswEqual -Expected 0 -Actual $agentFirewallWarningResult.ExitCode `
+        -Message 'Agent Setup firewall warning v2 input must succeed.'
+    Assert-SswEqual `
+        -Expected $agentFirewallWarningScenario `
+        -Actual $agentFirewallWarningResult.Output `
+        -Message 'Agent Setup firewall warning selected the wrong fake scenario.'
+
     $settingsScenario =
         'ViewerSettingsTests.SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow'
     $settingsFixture = Write-SswFixture `
@@ -532,7 +606,7 @@ try {
         "ViewerSettingsTests)" +
         "\.[A-Za-z0-9_]+)'"
     ) | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
-    Assert-SswEqual -Expected 13 -Actual $scenarioNames.Count `
+    Assert-SswEqual -Expected 15 -Actual $scenarioNames.Count `
         -Message 'The replay scenario allowlist changed without a contract update.'
     foreach ($scenario in $scenarioNames) {
         $className = $scenario.Substring(0, $scenario.IndexOf('.'))

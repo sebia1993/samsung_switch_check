@@ -11,13 +11,15 @@ namespace SamsungSwitchWatch.Agent.Tests;
 public sealed class ViewerIpAccessMiddlewareTests
 {
     [Theory]
-    [InlineData("192.168.10.25")]
-    [InlineData("::ffff:192.168.10.25")]
-    public async Task Production_AllowsExactViewerAddressIncludingMappedIpv4(
-        string remoteAddress)
+    [InlineData("10.0.0.1")]
+    [InlineData("10.255.255.254")]
+    [InlineData("172.16.0.1")]
+    [InlineData("172.31.255.254")]
+    [InlineData("192.168.1.10")]
+    [InlineData("::ffff:192.168.1.10")]
+    public async Task Runtime_AllowsRfc1918ViewerSources(string remoteAddress)
     {
         var result = await InvokeAsync(
-            ProductionOptions(),
             IPAddress.Parse(remoteAddress),
             "/api/v4/identity");
 
@@ -26,13 +28,29 @@ public sealed class ViewerIpAccessMiddlewareTests
     }
 
     [Theory]
-    [InlineData("192.168.10.26")]
-    [InlineData("10.0.0.10")]
-    public async Task Production_DeniesOtherAddressesWithoutDisclosingAddress(
+    [InlineData("127.0.0.1", "/api/v4/identity")]
+    [InlineData("::1", "/api/v4/telnet/test")]
+    [InlineData("127.0.0.1", "/health/ready")]
+    public async Task Runtime_AllowsLoopbackOnEveryEndpoint(
+        string remoteAddress,
+        string path)
+    {
+        var result = await InvokeAsync(IPAddress.Parse(remoteAddress), path);
+
+        Assert.True(result.NextInvoked);
+        Assert.Equal(StatusCodes.Status204NoContent, result.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("192.0.2.10")]
+    [InlineData("172.15.255.254")]
+    [InlineData("172.32.0.1")]
+    [InlineData("169.254.10.20")]
+    [InlineData("2001:db8::10")]
+    public async Task Runtime_DeniesNonPrivateNonLoopbackSourcesWithoutDisclosure(
         string remoteAddress)
     {
         var result = await InvokeAsync(
-            ProductionOptions(),
             IPAddress.Parse(remoteAddress),
             "/api/v4/identity");
 
@@ -40,16 +58,12 @@ public sealed class ViewerIpAccessMiddlewareTests
         Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
         Assert.Equal(AgentErrorCodes.ClientNotAllowed, ReadErrorCode(result.Body));
         Assert.DoesNotContain(remoteAddress, result.Body, StringComparison.Ordinal);
-        Assert.DoesNotContain("192.168.10.25", result.Body, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Production_DeniesRequestWithoutRemoteAddress()
+    public async Task Runtime_DeniesRequestWithoutRemoteAddress()
     {
-        var result = await InvokeAsync(
-            ProductionOptions(),
-            remoteAddress: null,
-            "/api/v4/identity");
+        var result = await InvokeAsync(null, "/api/v4/identity");
 
         Assert.False(result.NextInvoked);
         Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
@@ -57,195 +71,60 @@ public sealed class ViewerIpAccessMiddlewareTests
     }
 
     [Fact]
-    public async Task Production_IgnoresForwardedForWhenConnectionAddressIsDenied()
+    public async Task Runtime_IgnoresForwardedForHeader()
     {
-        var result = await InvokeAsync(
-            ProductionOptions(),
-            IPAddress.Parse("192.168.10.26"),
+        var denied = await InvokeAsync(
+            IPAddress.Parse("192.0.2.10"),
             "/api/v4/identity",
             forwardedFor: "192.168.10.25");
-
-        Assert.False(result.NextInvoked);
-        Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
-        Assert.Equal(AgentErrorCodes.ClientNotAllowed, ReadErrorCode(result.Body));
-    }
-
-    [Fact]
-    public async Task Production_IgnoresForwardedForWhenConnectionAddressIsAllowed()
-    {
-        var result = await InvokeAsync(
-            ProductionOptions(),
+        var allowed = await InvokeAsync(
             IPAddress.Parse("192.168.10.25"),
             "/api/v4/identity",
-            forwardedFor: "192.168.10.26");
+            forwardedFor: "192.0.2.10");
 
-        Assert.True(result.NextInvoked);
-        Assert.Equal(StatusCodes.Status204NoContent, result.StatusCode);
-    }
-
-    [Theory]
-    [InlineData("127.0.0.1", "/health/live", true)]
-    [InlineData("::1", "/health/ready", true)]
-    [InlineData("127.0.0.1", "/api/v4/identity", false)]
-    [InlineData("::1", "/api/v4/telnet/test", false)]
-    public async Task Production_LimitsLoopbackToHealthEndpoints(
-        string remoteAddress,
-        string path,
-        bool expectedAllowed)
-    {
-        var result = await InvokeAsync(
-            ProductionOptions(),
-            IPAddress.Parse(remoteAddress),
-            path);
-
-        Assert.Equal(expectedAllowed, result.NextInvoked);
-        Assert.Equal(
-            expectedAllowed
-                ? StatusCodes.Status204NoContent
-                : StatusCodes.Status403Forbidden,
-            result.StatusCode);
-    }
-
-    [Theory]
-    [InlineData("127.0.0.1")]
-    [InlineData("::1")]
-    public async Task MockMode_AllowsLoopbackOnAllEndpoints(string remoteAddress)
-    {
-        var result = await InvokeAsync(
-            new AgentOptions { MockMode = true },
-            IPAddress.Parse(remoteAddress),
-            "/api/v4/telnet/execute");
-
-        Assert.True(result.NextInvoked);
-        Assert.Equal(StatusCodes.Status204NoContent, result.StatusCode);
+        Assert.False(denied.NextInvoked);
+        Assert.True(allowed.NextInvoked);
     }
 
     [Fact]
-    public async Task MockMode_AllowsOptionalConfiguredViewer()
+    public void Configuration_IgnoresLegacyViewerAndTargetAuthorities()
     {
-        var result = await InvokeAsync(
-            new AgentOptions
+        var folder = NewTemporaryFolder();
+        try
+        {
+            var options = new AgentOptions
             {
-                MockMode = true,
-                AllowedViewerIpv4 = "10.20.30.40"
-            },
-            IPAddress.Parse("10.20.30.40"),
-            "/api/v4/identity");
+                ListenUrl = "https://0.0.0.0:18443",
+                DataDirectory = folder,
+                AllowedViewerIpv4 = "not-an-address",
+                AllowedTargetCidrs = ["203.0.113.0/24"]
+            };
 
-        Assert.True(result.NextInvoked);
-        Assert.Equal(StatusCodes.Status204NoContent, result.StatusCode);
-    }
-
-    [Fact]
-    public async Task MockMode_DeniesUnconfiguredNonLoopbackAddress()
-    {
-        var result = await InvokeAsync(
-            new AgentOptions { MockMode = true },
-            IPAddress.Parse("10.20.30.41"),
-            "/api/v4/identity");
-
-        Assert.False(result.NextInvoked);
-        Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
-    }
-
-    [Theory]
-    [InlineData("10.0.0.1")]
-    [InlineData("172.16.0.1")]
-    [InlineData("172.31.255.254")]
-    [InlineData("192.168.1.10")]
-    public void Configuration_AcceptsExactRfc1918ViewerAddress(string viewerAddress)
-    {
-        var (options, folder) = NewConfiguration(viewerAddress, mockMode: false);
-        try
-        {
-            AgentOptionsValidator.ValidateAndNormalize(options, folder);
-
-            Assert.Equal(viewerAddress, options.AllowedViewerIpv4);
-        }
-        finally
-        {
-            Directory.Delete(folder, true);
-        }
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("192.0.2.10")]
-    [InlineData("127.0.0.1")]
-    [InlineData("169.254.10.20")]
-    [InlineData("192.168.001.10")]
-    [InlineData("192.168.1.0/24")]
-    [InlineData("2001:db8::10")]
-    public void Configuration_RejectsMissingOrNonPrivateProductionViewerAddress(
-        string viewerAddress)
-    {
-        var (options, folder) = NewConfiguration(viewerAddress, mockMode: false);
-        try
-        {
-            var exception = Assert.Throws<AgentConfigurationException>(() =>
-                AgentOptionsValidator.ValidateAndNormalize(options, folder));
-
-            Assert.Equal(AgentErrorCodes.ConfigurationInvalid, exception.Code);
-        }
-        finally
-        {
-            Directory.Delete(folder, true);
-        }
-    }
-
-    [Fact]
-    public void Configuration_MockModeMayOmitViewerAddress()
-    {
-        var (options, folder) = NewConfiguration(string.Empty, mockMode: true);
-        try
-        {
             AgentOptionsValidator.ValidateAndNormalize(options, folder);
 
             Assert.Equal(string.Empty, options.AllowedViewerIpv4);
+            Assert.Equal(
+                AgentOptions.AutomaticPrivateNetworkCidrs,
+                options.AllowedTargetCidrs);
         }
         finally
         {
             Directory.Delete(folder, true);
         }
     }
-
-    [Fact]
-    public void Configuration_MockModeRejectsPublicViewerAddress()
-    {
-        var (options, folder) = NewConfiguration("192.0.2.10", mockMode: true);
-        try
-        {
-            var exception = Assert.Throws<AgentConfigurationException>(() =>
-                AgentOptionsValidator.ValidateAndNormalize(options, folder));
-
-            Assert.Equal(AgentErrorCodes.ConfigurationInvalid, exception.Code);
-        }
-        finally
-        {
-            Directory.Delete(folder, true);
-        }
-    }
-
-    private static AgentOptions ProductionOptions() => new()
-    {
-        AllowedViewerIpv4 = "192.168.10.25"
-    };
 
     private static async Task<InvocationResult> InvokeAsync(
-        AgentOptions options,
         IPAddress? remoteAddress,
         string path,
         string? forwardedFor = null)
     {
         var nextInvoked = false;
-        var middleware = new ViewerIpAccessMiddleware(
-            context =>
-            {
-                nextInvoked = true;
-                context.Response.StatusCode = StatusCodes.Status204NoContent;
-                return Task.CompletedTask;
-            },
-            options);
+        var middleware = new ViewerIpAccessMiddleware(context =>
+        {
+            nextInvoked = true;
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return Task.CompletedTask;
+        });
         var context = new DefaultHttpContext();
         context.Connection.RemoteIpAddress = remoteAddress;
         context.Request.Path = path;
@@ -260,11 +139,10 @@ public sealed class ViewerIpAccessMiddlewareTests
         await middleware.InvokeAsync(context);
 
         body.Position = 0;
-        var bodyText = Encoding.UTF8.GetString(body.ToArray());
         return new InvocationResult(
             nextInvoked,
             context.Response.StatusCode,
-            bodyText);
+            Encoding.UTF8.GetString(body.ToArray()));
     }
 
     private static string ReadErrorCode(string body)
@@ -276,25 +154,14 @@ public sealed class ViewerIpAccessMiddlewareTests
             .GetString()!;
     }
 
-    private static (AgentOptions Options, string Folder) NewConfiguration(
-        string viewerAddress,
-        bool mockMode)
+    private static string NewTemporaryFolder()
     {
         var folder = Path.Combine(
             Path.GetTempPath(),
             "SamsungSwitchWatch-AgentViewerIpTests",
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
-        return (new AgentOptions
-        {
-            ListenUrl = mockMode
-                ? "http://127.0.0.1:0"
-                : "https://0.0.0.0:18443",
-            DataDirectory = folder,
-            MockMode = mockMode,
-            AllowedViewerIpv4 = viewerAddress,
-            AllowedTargetCidrs = ["192.0.2.0/24"]
-        }, folder);
+        return folder;
     }
 
     private sealed record InvocationResult(

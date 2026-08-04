@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using SamsungSwitchWatch.Agent.Configuration;
 using SamsungSwitchWatch.Agent.Security;
 
@@ -108,42 +109,75 @@ public sealed class AgentHttpsCertificateIntegrationTests
     }
 
     [Fact]
-    public async Task ProductionIdentity_CompletesWindowsTlsServerHandshakeAndByteExchange()
+    public void EphemeralIdentity_IsRsaAndRotatesForEachRuntimeCreation()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
+        using var first = EphemeralAgentIdentityFactory.Create();
+        using var second = EphemeralAgentIdentityFactory.Create();
+        using var firstKey = first.Certificate.GetRSAPrivateKey();
+        using var secondKey = second.Certificate.GetRSAPrivateKey();
 
+        Assert.NotNull(firstKey);
+        Assert.NotNull(secondKey);
+        Assert.NotEqual(first.InstanceId, second.InstanceId);
+        Assert.NotEqual(
+            first.CertificatePublicKeySha256,
+            second.CertificatePublicKeySha256);
+        Assert.Matches("^[0-9A-F]{64}$", first.CertificatePublicKeySha256);
+    }
+
+    [Fact]
+    public async Task ProductionBuild_IgnoresLegacyIdentityArtifacts()
+    {
         var dataDirectory = NewDataDirectory();
-
         try
         {
-            var options = new AgentOptions
-            {
-                ListenUrl = "https://127.0.0.1:18443",
-                DataDirectory = dataDirectory,
-                AllowedViewerIpv4 = "192.168.10.20",
-                AllowedTargetCidrs = ["192.0.2.0/24"]
-            };
-            AgentOptionsValidator.ValidateAndNormalize(options, dataDirectory);
+            File.WriteAllText(
+                Path.Combine(dataDirectory, AgentIdentityStore.MetadataFileName),
+                "invalid legacy metadata");
+            File.WriteAllText(
+                Path.Combine(dataDirectory, AgentIdentityStore.CertificateFileName),
+                "invalid legacy certificate");
 
-            using var identity = AgentIdentityStore.LoadOrCreate(options);
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await using var app = AgentApplication.Build(
+                ["--service"],
+                ProductionOverrides(dataDirectory));
+            var identity = app.Services.GetRequiredService<AgentIdentity>();
+            using var key = identity.Certificate.GetRSAPrivateKey();
 
-            var server = RunTlsServerAsync(
-                listener,
-                identity.Certificate,
-                timeout.Token);
+            Assert.NotNull(key);
+            Assert.Matches("^[0-9A-F]{64}$", identity.CertificatePublicKeySha256);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
 
-            using var client = new TcpClient(AddressFamily.InterNetwork);
-            await client.ConnectAsync(IPAddress.Loopback, port, timeout.Token);
-            await using var clientTls = new SslStream(
-                client.GetStream(),
-                leaveInnerStreamOpen: false);
+    [Fact]
+    public async Task EphemeralProductionIdentity_CompletesTlsServerHandshakeAndByteExchange()
+    {
+        using var identity = EphemeralAgentIdentityFactory.Create();
+        using (var key = identity.Certificate.GetRSAPrivateKey())
+        {
+            Assert.NotNull(key);
+        }
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var server = RunTlsServerAsync(
+            listener,
+            identity.Certificate,
+            timeout.Token);
+
+        using var client = new TcpClient(AddressFamily.InterNetwork);
+        await client.ConnectAsync(IPAddress.Loopback, port, timeout.Token);
+        await using var clientTls = new SslStream(
+            client.GetStream(),
+            leaveInnerStreamOpen: false);
+        try
+        {
             await clientTls.AuthenticateAsClientAsync(
                 new SslClientAuthenticationOptions
                 {
@@ -154,20 +188,21 @@ public sealed class AgentHttpsCertificateIntegrationTests
                         static (_, _, _, _) => true
                 },
                 timeout.Token);
-
-            await clientTls.WriteAsync(new byte[] { 0x2A }, timeout.Token);
-            await clientTls.FlushAsync(timeout.Token);
-            var response = new byte[1];
-            await clientTls.ReadExactlyAsync(response, timeout.Token);
-
-            Assert.Equal(SslProtocols.Tls12, clientTls.SslProtocol);
-            Assert.Equal(0x7E, response[0]);
-            await server;
         }
-        finally
+        catch
         {
-            Directory.Delete(dataDirectory, recursive: true);
+            await server;
+            throw;
         }
+
+        await clientTls.WriteAsync(new byte[] { 0x2A }, timeout.Token);
+        await clientTls.FlushAsync(timeout.Token);
+        var response = new byte[1];
+        await clientTls.ReadExactlyAsync(response, timeout.Token);
+
+        Assert.Equal(SslProtocols.Tls12, clientTls.SslProtocol);
+        Assert.Equal(0x7E, response[0]);
+        await server;
     }
 
     private static async Task RunTlsServerAsync(
@@ -234,8 +269,8 @@ public sealed class AgentHttpsCertificateIntegrationTests
             ["Agent:ListenUrl"] = "https://127.0.0.1:18443",
             ["Agent:DataDirectory"] = dataDirectory,
             ["Agent:MockMode"] = "false",
-            ["Agent:AllowedViewerIpv4"] = "192.168.10.20",
-            ["Agent:AllowedTargetCidrs:0"] = "192.0.2.0/24"
+            ["Agent:AllowedViewerIpv4"] = "legacy-viewer-value",
+            ["Agent:AllowedTargetCidrs:0"] = "203.0.113.0/24"
         };
 
     private static string[] GetWindowsUserKeyFiles()

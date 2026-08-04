@@ -164,11 +164,6 @@ public sealed class HttpAgentClient : IAgentClient
                     requestCancellation.Token)
                 .ConfigureAwait(false);
             var identity = AgentContractMapper.MapIdentityV4(json);
-            if (!_certificateValidator.CompleteTrust(identity.CertificatePublicKeySha256))
-            {
-                PublishConnectionState(AgentConnectionState.Stale);
-                throw new AgentClientException("AGENT_IDENTITY_CHANGED", AgentConnectionState.Stale);
-            }
             Volatile.Write(ref _identity, identity);
             Volatile.Write(ref _identityValidationReady, 1);
             PublishConnectionState(AgentConnectionState.Connected);
@@ -275,7 +270,7 @@ public sealed class HttpAgentClient : IAgentClient
                     RealtimeChannelStatus: "viewer-local",
                     OperationalStatuses:
                     [
-                        new("HTTPS_TOFU", "Agent HTTPS", "인증서 공개키를 Viewer가 자동 확인합니다.", DeviceHealth.Normal),
+                        new("HTTPS_AUTOMATIC", "Agent HTTPS", "인증서 입력 없이 암호화 연결을 자동 확인합니다.", DeviceHealth.Normal),
                         new("STATELESS_AGENT", "장비 정보 보관", "장비와 계정은 Viewer에만 저장됩니다.", DeviceHealth.Normal)
                     ],
                     ReadOnlyQueriesEnabled: true,
@@ -470,11 +465,6 @@ public sealed class HttpAgentClient : IAgentClient
         }
         catch (Exception exception)
         {
-            if (_certificateValidator.IdentityChanged)
-            {
-                PublishConnectionState(AgentConnectionState.Stale);
-                throw new AgentClientException("AGENT_IDENTITY_CHANGED", AgentConnectionState.Stale, exception);
-            }
             var typed = AgentClientErrors.Translate(exception);
             PublishConnectionState(typed.SuggestedConnectionState);
             throw typed;
@@ -732,19 +722,19 @@ public sealed class HttpAgentClient : IAgentClient
 
 internal sealed class CertificatePinValidator
 {
-    private readonly ViewerSettings _settings;
     private readonly Action? _certificateAccepted;
     private int _certificateAcceptedReported;
-    private int _identityChanged;
-    private string? _observedPin;
 
     public CertificatePinValidator(ViewerSettings settings, Action? certificateAccepted = null)
     {
-        _settings = settings;
+        ArgumentNullException.ThrowIfNull(settings);
         _certificateAccepted = certificateAccepted;
     }
 
-    public bool IdentityChanged => Volatile.Read(ref _identityChanged) != 0;
+    // Kept for binary/test compatibility with earlier releases. v0.11 accepts
+    // the Agent's ephemeral self-signed certificate for encrypted transport and
+    // no longer treats a changed public key as a connection failure.
+    public bool IdentityChanged => false;
 
     public bool Validate(
         HttpRequestMessage request,
@@ -753,42 +743,14 @@ internal sealed class CertificatePinValidator
         SslPolicyErrors errors)
     {
         if (certificate is null) return false;
-        string pin;
-        try { pin = GetSpkiSha256(certificate); }
-        catch (CryptographicException) { return false; }
-
-        Volatile.Write(ref _observedPin, pin);
-        if (!_settings.TryGetAgentTrustPin(out var expected))
-        {
-            ReportCertificateAccepted();
-            return true;
-        }
-        var matches = FixedTimeEquals(expected, pin);
-        if (!matches)
-        {
-            Interlocked.Exchange(ref _identityChanged, 1);
-        }
-        else
-        {
-            ReportCertificateAccepted();
-        }
-        return matches;
+        ReportCertificateAccepted();
+        return true;
     }
 
     public bool CompleteTrust(string identityPin)
     {
-        var observedPin = Volatile.Read(ref _observedPin);
-        if (observedPin is null || !FixedTimeEquals(observedPin, identityPin))
-        {
-            Interlocked.Exchange(ref _identityChanged, 1);
-            return false;
-        }
-        if (_settings.TryGetAgentTrustPin(out var expected) && !FixedTimeEquals(expected, identityPin))
-        {
-            Interlocked.Exchange(ref _identityChanged, 1);
-            return false;
-        }
-        _settings.SetAgentTrustPin(identityPin.ToUpperInvariant());
+        // The API field remains in the v4 contract for wire compatibility, but
+        // it is not a trust/pairing requirement in the simplified connection.
         return true;
     }
 
@@ -827,13 +789,6 @@ internal sealed class CertificatePinValidator
         return Convert.ToHexString(SHA256.HashData(spki));
     }
 
-    private static bool FixedTimeEquals(string left, string right)
-    {
-        if (left.Length != right.Length) return false;
-        return CryptographicOperations.FixedTimeEquals(
-            Encoding.ASCII.GetBytes(left.ToUpperInvariant()),
-            Encoding.ASCII.GetBytes(right.ToUpperInvariant()));
-    }
 }
 
 internal static class ApiCompatibilityPolicy

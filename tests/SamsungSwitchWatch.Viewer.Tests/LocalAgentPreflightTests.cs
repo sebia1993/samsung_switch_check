@@ -30,7 +30,7 @@ public sealed class LocalAgentPreflightTests
     }
 
     [Fact]
-    public async Task RunAsync_TriesCandidatesSequentiallyAndReturnsOnlySuccessfulTrust()
+    public async Task RunAsync_TriesCandidatesSequentiallyWithoutCreatingTrustPins()
     {
         var discovery = new FakeDiscovery("10.1.2.3", "192.168.5.6");
         var probe = new SequencedProbe(failuresBeforeSuccess: 1);
@@ -50,9 +50,7 @@ public sealed class LocalAgentPreflightTests
         Assert.Empty(original.AgentTrustPins);
         var successful = Assert.IsType<ViewerSettings>(result.SuccessfulSettings);
         Assert.Equal("https://192.168.5.6:18443", successful.AgentUri);
-        Assert.True(successful.TryGetAgentTrustPin(out var pin));
-        Assert.Equal(new string('B', 64), pin);
-        Assert.Single(successful.AgentTrustPins);
+        Assert.Empty(successful.AgentTrustPins);
         Assert.True(successful.StartMinimizedToTray);
     }
 
@@ -300,7 +298,6 @@ public sealed class LocalAgentPreflightTests
             cancellationToken.ThrowIfCancellationRequested();
             AgentUris.Add(settings.AgentUri);
             var call = Interlocked.Increment(ref _calls);
-            settings.SetAgentTrustPin(new string(call == 1 ? 'A' : 'B', 64));
             if (call <= failuresBeforeSuccess)
             {
                 return Task.FromResult(AgentConnectionProbeResult.Failure(
@@ -333,7 +330,6 @@ public sealed class LocalAgentPreflightTests
             IProgress<AgentConnectionProbeUpdate>? progress,
             CancellationToken cancellationToken)
         {
-            settings.SetAgentTrustPin(new string('C', 64));
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new InvalidOperationException("Unreachable");
         }

@@ -3641,9 +3641,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         else if (_statelessV4)
         {
             OperationalStatuses.Add(new OperationalStatusDto(
-                "HTTPS_TOFU",
+                "HTTPS_AUTOMATIC",
                 "HTTPS 보호",
-                "Agent 주소 기준으로 서버 인증 정보를 자동 확인합니다.",
+                "인증서 입력 없이 Agent와 암호화 통신합니다.",
                 DeviceHealth.Normal));
         }
 

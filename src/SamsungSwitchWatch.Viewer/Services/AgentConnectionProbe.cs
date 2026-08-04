@@ -212,7 +212,7 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
 
         var httpsReported = 0;
         Report(progress, AgentConnectionProbeStage.Https, AgentConnectionProbeState.Running,
-            "HTTPS 보호와 저장된 Agent 신뢰 정보를 확인하고 있습니다.");
+            "Agent HTTPS 암호화 연결을 확인하고 있습니다.");
         try
         {
             var identity = await _identity.GetIdentityAsync(
@@ -261,25 +261,7 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
                     identity);
             }
 
-            // The probe uses a sanitized snapshot so malformed settings cannot
-            // leak into the transport. Copy only the validated TOFU pin back to
-            // the candidate that SwitchClientAsync will use for its second
-            // connection. This closes the gap where a certificate could change
-            // between probing and applying settings and be trusted again.
-            if (!clean.TryGetAgentTrustPin(out var validatedPin))
-            {
-                const string code = "AGENT_RESPONSE_INVALID";
-                var pinDetail = ViewerConnectionMessages.ForCode(code);
-                Report(progress, AgentConnectionProbeStage.Identity, AgentConnectionProbeState.Failed,
-                    pinDetail, code);
-                return AgentConnectionProbeResult.Failure(
-                    AgentConnectionProbeStage.Identity,
-                    code,
-                    pinDetail);
-            }
-            settings.SetAgentTrustPin(validatedPin);
-
-            var detail = $"Agent {identity.ProductVersion} · API v{identity.ApiVersion} 확인";
+            var detail = versionDetail;
             Report(progress, AgentConnectionProbeStage.Identity, AgentConnectionProbeState.Succeeded, detail);
             return AgentConnectionProbeResult.Success(identity, detail);
         }
@@ -490,8 +472,8 @@ internal static class AgentProductVersionPolicy
         if (normalizedAgent.Length == 0)
         {
             detail =
-                "Agent가 제품 버전 정보를 제공하지 않습니다. Agent를 먼저 같은 릴리스 버전으로 업데이트해 주세요.";
-            return false;
+                "경고 · Agent 제품 버전을 확인할 수 없지만 API v4가 호환되어 연결합니다.";
+            return true;
         }
 
         if (normalizedViewer.Length > 0
@@ -501,8 +483,9 @@ internal static class AgentProductVersionPolicy
             return true;
         }
 
-        detail = $"Agent {normalizedAgent}와 Viewer {normalizedViewer} 버전이 다릅니다. 같은 릴리스의 두 프로그램을 사용해 주세요.";
-        return false;
+        detail =
+            $"경고 · Agent {normalizedAgent}와 Viewer {normalizedViewer} 버전이 다르지만 API v4가 호환되어 연결합니다.";
+        return true;
     }
 
     public static string Normalize(string? value)

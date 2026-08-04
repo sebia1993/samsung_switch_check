@@ -19,14 +19,14 @@ public sealed class ViewerSettingsTests
     }
 
     [Fact]
-    public void ExplicitLocalhost_IsPreservedForMigrationButRejectedForLiveConnection()
+    public void ExplicitLocalhost_IsPreservedAndAllowedForSamePcOperation()
     {
         var settings = new ViewerSettings { AgentUri = "https://localhost:18443" };
         var clean = ViewerSettingsSanitizer.Sanitize(settings);
 
         Assert.Equal("https://localhost:18443", clean.AgentUri);
-        Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason));
-        Assert.Contains("Agent와 Viewer가 같은 PC일 때 테스트", reason, StringComparison.Ordinal);
+        Assert.True(ViewerSettingsSanitizer.IsValidForLiveConnection(clean, out var reason));
+        Assert.Empty(reason);
         Assert.True(ViewerSettingsSanitizer.IsLoopbackAgentUri(clean.AgentUri));
         ViewerSettingsSanitizer.SplitAgentUri(clean.AgentUri, out var address, out _);
         Assert.Equal("localhost", address);
@@ -43,7 +43,7 @@ public sealed class ViewerSettingsTests
         var loaded = store.Load();
 
         Assert.Equal("https://localhost:18443", loaded.AgentUri);
-        Assert.False(ViewerSettingsSanitizer.IsValidForLiveConnection(loaded, out _));
+        Assert.True(ViewerSettingsSanitizer.IsValidForLiveConnection(loaded, out _));
         Assert.Equal(1, persistence.WriteCount);
         Assert.Equal(storedJson, persistence.Content);
     }
@@ -98,6 +98,8 @@ public sealed class ViewerSettingsTests
     [Theory]
     [InlineData("10.10.10.20", "18443", "https://10.10.10.20:18443")]
     [InlineData("monitor-pc.corp.local", "18443", "https://monitor-pc.corp.local:18443")]
+    [InlineData("localhost", "18443", "https://localhost:18443")]
+    [InlineData("127.0.0.1", "18443", "https://127.0.0.1:18443")]
     public void ConnectionInput_AcceptsIpv4OrDnsAndPort(string address, string port, string expected)
     {
         Assert.True(ViewerSettingsSanitizer.TryBuildAgentUri(address, port, out var uri, out var reason));
@@ -107,10 +109,6 @@ public sealed class ViewerSettingsTests
 
     [Theory]
     [InlineData("http://monitor", "18443")]
-    [InlineData("localhost", "18443")]
-    [InlineData("LOCALHOST.", "18443")]
-    [InlineData("127.0.0.1", "18443")]
-    [InlineData("127.10.20.30", "18443")]
     [InlineData("::1", "18443")]
     [InlineData("monitor pc", "18443")]
     [InlineData("monitor", "0")]
@@ -123,14 +121,15 @@ public sealed class ViewerSettingsTests
     [Theory]
     [InlineData("localhost")]
     [InlineData("127.0.0.1")]
-    public void ConnectionInput_LoopbackFailureExplainsLocalPreflight(string address)
+    public void ConnectionInput_LoopbackIsAcceptedForSamePcOperation(string address)
     {
-        Assert.False(ViewerSettingsSanitizer.TryBuildAgentUri(
+        Assert.True(ViewerSettingsSanitizer.TryBuildAgentUri(
             address,
             "18443",
-            out _,
+            out var uri,
             out var reason));
-        Assert.Contains("Agent와 Viewer가 같은 PC일 때 테스트", reason, StringComparison.Ordinal);
+        Assert.StartsWith("https://", uri, StringComparison.Ordinal);
+        Assert.Empty(reason);
     }
 
     [Fact]

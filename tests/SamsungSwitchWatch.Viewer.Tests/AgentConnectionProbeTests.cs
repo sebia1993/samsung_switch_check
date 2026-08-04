@@ -37,8 +37,7 @@ public sealed class AgentConnectionProbeTests
                 Assert.Equal(AgentConnectionProbeState.Succeeded, item.State);
                 Assert.InRange(item.DurationMs, 0, AgentConnectionProbeTimingProgress.MaximumDurationMs);
             });
-        Assert.True(settings.TryGetAgentTrustPin(out var pin));
-        Assert.Equal(new string('A', 64), pin);
+        Assert.Empty(settings.AgentTrustPins);
         Assert.Equal(
             [
                 (AgentConnectionProbeStage.Address, AgentConnectionProbeState.Running),
@@ -220,7 +219,7 @@ public sealed class AgentConnectionProbeTests
     }
 
     [Fact]
-    public async Task ProbeAsync_ProductVersionMismatchFailsClosedAtIdentityStage()
+    public async Task ProbeAsync_ProductVersionMismatchConnectsWithWarningWhenApiV4IsCompatible()
     {
         var probe = CreateProbe(
             identity: Identity("0.9.23-poc"),
@@ -228,18 +227,19 @@ public sealed class AgentConnectionProbeTests
 
         var result = await probe.ProbeAsync(Settings(), null, CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal(AgentConnectionProbeStage.Identity, result.FailedStage);
-        Assert.Equal("AGENT_VERSION_MISMATCH", result.ErrorCode);
+        Assert.True(result.Succeeded);
+        Assert.Null(result.FailedStage);
+        Assert.Null(result.ErrorCode);
         Assert.NotNull(result.Identity);
         Assert.Equal("0.9.23-poc", result.Identity.ProductVersion);
         Assert.Equal(4, result.Identity.ApiVersion);
         Assert.Contains("0.9.23-poc", result.Detail, StringComparison.Ordinal);
         Assert.Contains("0.10.0-poc", result.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("경고", result.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task ProbeAsync_MissingProductVersionFailsClosed()
+    public async Task ProbeAsync_MissingProductVersionConnectsWithWarningWhenApiV4IsCompatible()
     {
         var probe = CreateProbe(
             identity: Identity(),
@@ -247,14 +247,15 @@ public sealed class AgentConnectionProbeTests
 
         var result = await probe.ProbeAsync(Settings(), null, CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal(AgentConnectionProbeStage.Identity, result.FailedStage);
-        Assert.Equal("AGENT_VERSION_MISMATCH", result.ErrorCode);
-        Assert.Contains("제품 버전 정보", result.Detail, StringComparison.Ordinal);
+        Assert.True(result.Succeeded);
+        Assert.Null(result.FailedStage);
+        Assert.Null(result.ErrorCode);
+        Assert.Contains("제품 버전", result.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("경고", result.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task ProbeAsync_CopiesValidatedPinSoCertificateChangeBeforeApplyIsBlocked()
+    public async Task ProbeAsync_DoesNotPersistPinAndAcceptsEphemeralCertificateChanges()
     {
         using var probeCertificate = CreateCertificate();
         using var changedCertificate = CreateCertificate();
@@ -274,31 +275,29 @@ public sealed class AgentConnectionProbeTests
             SslPolicyErrors.None);
 
         Assert.True(result.Succeeded);
-        Assert.True(settings.TryGetAgentTrustPin(out var persistedPin));
-        Assert.Equal(
-            CertificatePinValidator.GetSpkiSha256(probeCertificate),
-            persistedPin);
-        Assert.False(acceptedChangedCertificate);
-        Assert.True(applyValidator.IdentityChanged);
+        Assert.Empty(settings.AgentTrustPins);
+        Assert.True(acceptedChangedCertificate);
+        Assert.False(applyValidator.IdentityChanged);
     }
 
     [Fact]
-    public void ProductVersionPolicy_IgnoresSourceMetadataButNotReleaseDifference()
+    public void ProductVersionPolicy_AllowsReleaseDifferenceAndReportsWarning()
     {
         Assert.True(AgentProductVersionPolicy.IsCompatible(
             "0.10.0-poc+agentcommit",
             "0.10.0-poc+viewercommit",
             out _));
-        Assert.False(AgentProductVersionPolicy.IsCompatible(
+        Assert.True(AgentProductVersionPolicy.IsCompatible(
             "0.10.0-poc",
             "0.10.1-poc",
-            out _));
+            out var detail));
+        Assert.StartsWith("경고", detail, StringComparison.Ordinal);
     }
 
     private static AgentConnectionProbe CreateProbe(
         AgentIdentityDto identity,
         string viewerVersion) =>
-        new(new FakeNetworkProbe(), new FakeIdentityProbe(identity, setSyntheticPin: true), viewerVersion);
+        new(new FakeNetworkProbe(), new FakeIdentityProbe(identity, setSyntheticPin: false), viewerVersion);
 
     private static ViewerSettings Settings() => new()
     {
@@ -372,7 +371,7 @@ public sealed class AgentConnectionProbeTests
         public FakeIdentityProbe(
             AgentIdentityDto identity,
             bool reportCertificateAccepted = true,
-            bool setSyntheticPin = true)
+            bool setSyntheticPin = false)
         {
             _identity = identity;
             _reportCertificateAccepted = reportCertificateAccepted;

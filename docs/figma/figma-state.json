@@ -1,7 +1,7 @@
 {
   "fileKey": "JueYiLj18xFE7enHvGlU2s",
   "fileUrl": "https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s",
-  "runId": "ssw-20260730-v14-failure-support-code-figma-synced",
+  "runId": "ssw-20260804-v011-operability-first-figma-synced",
   "pages": {
     "cover": "0:1",
     "foundations": "3:26",
@@ -47,10 +47,12 @@
     "httpsConnectionFailureSupportCodeV14": "62:99",
     "agentSetupSupportCodePanelV14": "68:340",
     "viewerConnectionSupportCodePanelV14": "69:341",
+    "httpsConnectionSimpleV011": "73:72",
+    "agentSetupAutomaticV011": "73:362",
     "uxAudit": "24:3"
   },
   "implementationOverride": {
-    "version": "v14-failure-support-code",
+    "version": "v0.11.0-operability-first",
     "status": "figma-synced",
     "agentTransport": "https",
     "agentPort": 18443,
@@ -61,6 +63,8 @@
     "monitoringOwner": "viewer",
     "fingerprintInput": false,
     "pairingTokenInput": false,
+    "certificateTrustMode": "automatic-no-pinning",
+    "compatibleApiVersionMismatch": "warning-and-connect",
     "fieldDiagnosticPersistence": "manual-save-only"
   },
   "supportCodeFlow": {
@@ -82,27 +86,25 @@
     "existingFieldDiagnosticSchemaUnchanged": true
   },
   "managementNetworkFlow": {
-    "automaticDiscovery": true,
-    "manualPrivateIpv4CidrInput": true,
-    "networkAddressNormalization": true,
-    "maximumUniqueNetworks": 2,
-    "existingAllowedTargetCidrsReloaded": true,
+    "automaticDiscovery": false,
+    "manualPrivateIpv4CidrInput": false,
+    "networkAddressNormalization": false,
+    "maximumUniqueNetworks": 3,
+    "existingAllowedTargetCidrsReloaded": false,
+    "automaticRfc1918Networks": true,
     "manualEntryDraftPersisted": false,
     "publicNetworkAccepted": false
   },
   "agentSetupSecurityFlow": {
     "externalFirewallRulesModified": false,
     "externalTcp18443AllowRule": "warning-and-continue",
-    "agentAllowedViewerIpv4Required": true,
-    "windowsFirewallViewer32RulePreserved": true,
-    "viewerHostAddressEquivalentForms": [
-      "IPv4",
-      "IPv4/32",
-      "IPv4/255.255.255.255"
-    ],
+    "agentAllowedViewerIpv4Required": false,
+    "windowsFirewallViewer32RulePreserved": false,
+    "windowsFirewallPrivateRanges": true,
     "firewallVerificationRetryWindowMilliseconds": 2000,
     "firewallMismatchDetailsSanitized": true,
-    "firewallFailureRollbackRequired": true,
+    "firewallFailureRollbackRequired": false,
+    "readinessFailureRollbackRequired": false,
     "productionLoopbackEndpoints": [
       "/health/live",
       "/health/ready"
@@ -111,14 +113,14 @@
   },
   "samePcPreflightFlow": {
     "automaticExecution": false,
-    "viewerAction": "Agent와 Viewer가 같은 PC일 때 테스트",
-    "agentSetupAction": "같은 PC 시험용 주소",
-    "loopbackAccepted": false,
-    "privateIpv4Required": true,
+    "viewerAction": "localhost 또는 127.0.0.1 입력",
+    "agentSetupAction": "별도 입력 없음",
+    "loopbackAccepted": true,
+    "privateIpv4Required": false,
     "agentApiVerified": true,
     "switchAccessVerified": false,
     "remoteViewerPathVerified": false,
-    "remoteDeploymentRequiresViewerIpv4Reapply": true
+    "remoteDeploymentRequiresViewerIpv4Reapply": false
   },
   "setupRecoveryFlow": {
     "pendingJournalIsReadOnlyDetected": true,

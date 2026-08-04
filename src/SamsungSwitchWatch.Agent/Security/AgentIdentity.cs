@@ -14,10 +14,12 @@ public sealed class AgentIdentity : IDisposable
     {
         InstanceId = instanceId;
         Certificate = certificate;
-        using var publicKey = certificate.GetECDsaPublicKey()
-            ?? throw new AgentConfigurationException(
+        using var publicKey =
+            (AsymmetricAlgorithm?)certificate.GetRSAPublicKey() ??
+            certificate.GetECDsaPublicKey() ??
+            throw new AgentConfigurationException(
                 AgentErrorCodes.TlsIdentityInvalid,
-                "Agent HTTPS identity does not contain an ECDSA public key.");
+                "Agent HTTPS identity does not contain a supported public key.");
         CertificatePublicKeySha256 =
             Convert.ToHexString(SHA256.HashData(publicKey.ExportSubjectPublicKeyInfo()));
     }
@@ -27,6 +29,62 @@ public sealed class AgentIdentity : IDisposable
     public string CertificatePublicKeySha256 { get; }
 
     public void Dispose() => Certificate.Dispose();
+}
+
+public static class EphemeralAgentIdentityFactory
+{
+    public static AgentIdentity Create()
+    {
+        var instanceId = Guid.NewGuid().ToString("N");
+        using var key = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=Samsung Switch Watch Agent",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(
+            new X509BasicConstraintsExtension(false, false, 0, true));
+        request.CertificateExtensions.Add(
+            new X509KeyUsageExtension(
+                X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
+                true));
+        request.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension(
+                new OidCollection { new("1.3.6.1.5.5.7.3.1") },
+                true));
+        request.CertificateExtensions.Add(
+            new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+
+        using var generated = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-5),
+            DateTimeOffset.UtcNow.AddDays(30));
+        var exported = generated.Export(X509ContentType.Pfx);
+        try
+        {
+            // Windows Schannel rejects a TLS server certificate backed by an
+            // EphemeralKeySet. Import the freshly generated, memory-only PFX
+            // into a temporary user key container without PersistKeySet. The
+            // host-owned AgentIdentity disposes it after Kestrel stops, and no
+            // certificate or key is retained for the next service start.
+            var certificate = X509CertificateLoader.LoadPkcs12(
+                exported,
+                password: null,
+                X509KeyStorageFlags.UserKeySet);
+            try
+            {
+                return new AgentIdentity(instanceId, certificate);
+            }
+            catch
+            {
+                certificate.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(exported);
+        }
+    }
 }
 
 public static class AgentIdentityStore

@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.16-poc
+.\scripts\build-release.ps1 -Version 0.11.0-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -32,7 +32,8 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
   `--background` launch exits.
 - The service runs as the passwordless `NT SERVICE\SamsungSwitchWatchAgent` virtual account.
   Accept legacy `LocalService`-owned data descendants only for one stopped-service migration.
-- Production Agent listens only on HTTPS/18443 and connects only to allowed IPv4 CIDRs on Telnet/23.
+- Production Agent listens only on HTTPS/18443. It accepts loopback and RFC1918 IPv4 Viewer sources
+  and connects only to RFC1918 IPv4 switch targets on Telnet/23.
 - Each request uses a fresh bounded Telnet session and always disconnects. If the device closes the
   connection during command execution, reconnect at most once and execute only unfinished commands;
   never retry authentication/enable failures or command timeouts.
@@ -43,21 +44,20 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
 ## Safety
 
 - Never commit credentials, tokens, certificates, real IPs, host names, MAC addresses, or company command output.
-- The Agent API has no application authentication. The exact Viewer IPv4 is enforced both by the
-  product-owned Windows Firewall rule and by the Agent request middleware.
-- Treat Windows Firewall readback forms `IP`, `IP/32`, and
-  `IP/255.255.255.255` as equivalent only for the same single Viewer host. Never accept another
-  prefix, list, range, `Any`, `LocalSubnet`, or IPv6 as an exact Viewer rule.
-- Keep post-apply firewall verification bounded and preserve strict non-address fields. On a
-  firewall/GPO/apply/readback-only mismatch, restore only the attempted firewall change, retain a
-  locally healthy Agent install and expose `FIREWALL_REMOTE_ACCESS_UNCONFIRMED` plus stable mismatch
-  codes rather than raw addresses or rule contents. Never create `Any`, `LocalSubnet` or a broad rule.
-- Persistent Agent ECDSA identity is stored only under ProgramData and protected with DPAPI LocalMachine.
-- Agent DataDirectory is exactly `%ProgramData%\SamsungSwitchWatch`; reject custom paths and even
-  empty pre-existing roots during a new install.
-- `install-receipt.json` is Administrators-owned with SYSTEM/Administrators-only ACL. It is not a
-  CIDR authority; preserve target CIDRs from validated config and management CIDRs from the exact
-  owned firewall rule.
+- The Agent API has no application authentication. Keep it on a trusted private company network;
+  never expose it to a user VLAN, public Wi-Fi or the Internet.
+- The product-owned Windows Firewall rule is best effort: Domain/Private inbound TCP/18443 from the
+  three RFC1918 ranges. A firewall/GPO/apply/readback failure is an actionable warning and must not
+  roll back an otherwise installed service.
+- Agent TLS uses a freshly generated self-signed RSA certificate on each process start. Windows
+  Schannel requires a temporary UserKeySet container; do not set PersistKeySet, and dispose the
+  certificate so the temporary container is removed on process exit. Viewer accepts this
+  certificate automatically; TLS encrypts transport but does not authenticate the Agent endpoint.
+- Agent DataDirectory is exactly `%ProgramData%\SamsungSwitchWatch`; reject custom paths. A new
+  install may adopt only an empty, non-reparse product root whose owner and ACL pass the existing
+  trusted-path checks; reject unknown non-empty roots.
+- A legacy `install-receipt.json`, when present, must remain Administrators-owned with
+  SYSTEM/Administrators-only ACL. It is not a Viewer or target address authority.
 - Keep stable sanitized error codes; never log passwords, enable passwords, commands, or raw output.
 - Do not claim live validation from mock tests.
 - Do not perform live network writes or company-network testing from Codex.
@@ -71,20 +71,19 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
   PowerShell/CMD deployment scripts stay source-only for development and legacy recovery.
 - The Viewer release is portable: extract the ZIP and run `SamsungSwitchWatch.Viewer.exe`.
   Do not add public install scripts, auto-start registration or an administrator requirement.
-- Preserve Agent ProgramData identity and CIDR configuration across transactional updates.
+- Preserve compatible Agent ProgramData configuration across transactional updates. Legacy trust
+  and CIDR fields may be read for schema compatibility but must not control v0.11 runtime access.
 - Copy packages into protected staging and rehash them before swapping. If service quiescence,
   rollback dependencies or legacy moves are incomplete, block later file mutation and preserve
   snapshots, archives, backups and journal evidence.
 - Internal Actions artifacts contain six validation files; GitHub Release custom Assets contain only the versioned Agent and Viewer ZIP files.
-- Keep Setup preflight readiness compatible with the legacy API v4 minimum payload. For
-  install/update completion, do not relax the local HTTPS success response, API v4, HTTPS
-  protocol, or exact package-version checks. A local HTTPS/API/version transport failure must remain
-  a failed deployment with rollback rather than a warning or assumed success. A firewall-only
-  failure is a remote-access warning only after local readiness succeeds.
-- Load the production Agent ECDSA PFX for Schannel into the service account's UserKeySet for the
-  Agent process lifetime, without Exportable or PersistKeySet. The host must own and dispose this
-  certificate after Kestrel stops so the temporary user-key container is removed. Keep each Setup
-  readiness retry isolated with a fresh HTTP handler, exact HTTP/1.1, and a closed connection.
+- Keep Setup preflight readiness compatible with the legacy API v4 minimum payload. Commit a valid
+  file/service installation before readiness checks. Local TCP/HTTPS/API/version or firewall
+  readiness failures must leave the service installed and report an actionable warning such as
+  `AGENT_LOCAL_CONNECTION_UNCONFIRMED`; do not enter deployment rollback for readiness alone.
+- Generate a new production Agent RSA certificate on each start and dispose its non-persistent
+  Schannel UserKeySet container on shutdown. Do not add certificate files, persistent identity,
+  trust pins, pairing tokens or user confirmation back into the runtime flow.
 - Keep unexpected Setup diagnostics limited to safe stage/category/timing values; never add exception
   text, PID, address or path data.
 - Viewer automatic status must distinguish awaiting/deferred collection and current unavailable

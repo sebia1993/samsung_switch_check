@@ -314,6 +314,7 @@ public sealed class AgentDeploymentOrchestrator(
         var firewallWarningPending = false;
         var firewallRemoteAccessConfirmed = false;
         var firewallMutationStarted = false;
+        var postCommitCancellationRequested = false;
         var journalStore = new DeploymentJournalStore(fileSystem, paths);
         DeploymentJournal? journal = null;
 
@@ -337,6 +338,7 @@ public sealed class AgentDeploymentOrchestrator(
 
             steps.MarkActiveStage(SetupFailureStage.Input);
             SetupDiagnosticsService.ValidateInput(request);
+            var automaticRequest = SetupConstants.IsAutomaticRequest(request);
             steps.MarkActiveStage(SetupFailureStage.PackageValidation);
             var package = packageValidator.Validate(paths.PackageDirectory);
             steps.Add(Succeeded(
@@ -380,8 +382,12 @@ public sealed class AgentDeploymentOrchestrator(
                     steps,
                     firewallAssessment);
             }
-            catch (SetupException exception) when (
-                exception.Code == SetupErrorCodes.FirewallFailed)
+            catch (Exception exception) when (
+                automaticRequest ||
+                exception is SetupException
+                {
+                    Code: SetupErrorCodes.FirewallFailed
+                })
             {
                 firewallConfigurationEligible = false;
                 firewallWarningPending = true;
@@ -543,65 +549,147 @@ public sealed class AgentDeploymentOrchestrator(
             steps.Add(Succeeded(
                 "SERVICE_STARTED",
                 "Agent 시작",
-                "Agent 서비스가 시작되어 로컬 HTTPS 준비 상태를 확인합니다."));
-            steps.MarkActiveStage(SetupFailureStage.Readiness);
-            agentHealth = await healthProbe.WaitUntilReadyAsync(
-                new Uri("https://127.0.0.1:18443/health/ready"),
-                package.Version,
-                () => serviceManager.Capture(SetupConstants.ServiceName),
-                TimeSpan.FromSeconds(60),
-                cancellationToken);
-            steps.AddSafeDecisionCode(AgentHealthDecisionCode(agentHealth.Value.Code));
-            journal = journal with
+                "Agent 서비스가 시작되었습니다."));
+
+            if (automaticRequest)
             {
-                AgentHealthCode = agentHealth.Value.Code.ToString(),
-                AgentRestartObserved = agentHealth.Value.RestartObserved,
-                AgentServiceRunningObserved =
-                    agentHealth.Value.ServiceRunningObserved,
-                AgentListenerOwnedObserved =
-                    agentHealth.Value.ListenerOwnedObserved,
-                AgentHttpAttemptCount = agentHealth.Value.HttpAttemptCount,
-                AgentLastTransportPhase = agentHealth.Value.LastTransportPhase
-            };
-            journalStore.Write(journal);
-            if (!agentHealth.Value.Ready)
-            {
-                throw new SetupException(
-                    SetupErrorCodes.HealthFailed,
-                    AgentHealthFailureMessage(agentHealth.Value));
+                // Cancellation before the durable commit still belongs to the
+                // transactional install and must restore the previous state.
+                cancellationToken.ThrowIfCancellationRequested();
+                steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
+                serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // File and service mutation is complete here. Connectivity
+                // checks below are advisory and never roll back this install.
+                steps.MarkActiveStage(SetupFailureStage.CommitCleanup);
+                journal = journal with { Stage = "committed" };
+                journalStore.Write(journal);
+                currentTransactionOwned = false;
             }
 
-            steps.Add(Succeeded(
-                "AGENT_READY",
-                "Agent 확인",
-                agentHealth.Value.RestartObserved
-                    ? "Agent 서비스가 시작 중 다시 실행된 뒤 정상 준비 상태가 되었습니다."
-                    : "Agent 서비스가 정상적으로 실행되고 있습니다."));
+            steps.MarkActiveStage(SetupFailureStage.Readiness);
+            if (automaticRequest)
+            {
+                try
+                {
+                    agentHealth = await healthProbe.WaitUntilReadyAsync(
+                        new Uri("https://127.0.0.1:18443/health/ready"),
+                        package.Version,
+                        () => serviceManager.Capture(SetupConstants.ServiceName),
+                        TimeSpan.FromSeconds(60),
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    postCommitCancellationRequested =
+                        cancellationToken.IsCancellationRequested;
+                    agentHealth = AgentHealthProbeResult.Failure(
+                        AgentHealthProbeCode.DeadlineExceeded,
+                        restartObserved: false);
+                }
+                catch
+                {
+                    agentHealth = AgentHealthProbeResult.Failure(
+                        AgentHealthProbeCode.ServiceInspectionFailed,
+                        restartObserved: false);
+                }
+            }
+            else
+            {
+                agentHealth = await healthProbe.WaitUntilReadyAsync(
+                    new Uri("https://127.0.0.1:18443/health/ready"),
+                    package.Version,
+                    () => serviceManager.Capture(SetupConstants.ServiceName),
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken);
+            }
 
-            steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
-            serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
+            if (automaticRequest && cancellationToken.IsCancellationRequested)
+            {
+                postCommitCancellationRequested = true;
+            }
+
+            steps.AddSafeDecisionCode(AgentHealthDecisionCode(agentHealth.Value.Code));
+            if (!automaticRequest)
+            {
+                journal = journal with
+                {
+                    AgentHealthCode = agentHealth.Value.Code.ToString(),
+                    AgentRestartObserved = agentHealth.Value.RestartObserved,
+                    AgentServiceRunningObserved =
+                        agentHealth.Value.ServiceRunningObserved,
+                    AgentListenerOwnedObserved =
+                        agentHealth.Value.ListenerOwnedObserved,
+                    AgentHttpAttemptCount = agentHealth.Value.HttpAttemptCount,
+                    AgentLastTransportPhase = agentHealth.Value.LastTransportPhase
+                };
+                journalStore.Write(journal);
+            }
+
+            if (!agentHealth.Value.Ready)
+            {
+                if (automaticRequest)
+                {
+                    AddAgentLocalConnectionWarning(steps, agentHealth.Value);
+                }
+                else
+                {
+                    throw new SetupException(
+                        SetupErrorCodes.HealthFailed,
+                        AgentHealthFailureMessage(agentHealth.Value));
+                }
+            }
+            else
+            {
+                steps.Add(Succeeded(
+                    "AGENT_READY",
+                    "Agent 확인",
+                    agentHealth.Value.RestartObserved
+                        ? "Agent 서비스가 시작 중 다시 실행된 뒤 정상 준비 상태가 되었습니다."
+                        : "Agent 서비스가 정상적으로 실행되고 있습니다."));
+            }
+
+            if (!automaticRequest)
+            {
+                steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
+                serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
+            }
+
+            if (postCommitCancellationRequested)
+            {
+                firewallWarningPending = true;
+            }
 
             if (firewallWarningPending)
             {
                 AddFirewallRemoteAccessWarning(
                     steps,
-                    firewallStateRestored: true);
+                    firewallStateRestored: true,
+                    localConnectionReady: agentHealth.Value.Ready);
             }
 
-            if (firewallConfigurationEligible)
+            if (firewallConfigurationEligible &&
+                !postCommitCancellationRequested)
             {
                 try
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     steps.MarkActiveStage(SetupFailureStage.Firewall);
                     firewallMutationStarted = true;
                     firewallManager.RemoveOwnedRule(SetupConstants.LegacyFirewallRuleName);
                     firewallManager.ApplyViewerRule(
                         SetupConstants.FirewallRuleName,
                         SetupConstants.HttpsPort,
-                        request.ViewerIpv4);
-                    var firewallVerification = await VerifyViewerFirewallRuleAsync(
-                        request.ViewerIpv4,
-                        cancellationToken);
+                        automaticRequest
+                            ? SetupConstants.PrivateNetworkFirewallRemoteAddresses
+                            : request.ViewerIpv4);
+                    var firewallVerification = automaticRequest
+                        ? await VerifyPrivateNetworkFirewallRuleAsync(
+                            cancellationToken)
+                        : await VerifyViewerFirewallRuleAsync(
+                            request.ViewerIpv4,
+                            cancellationToken);
                     if (!firewallVerification.IsExact)
                     {
                         steps.AddSafeDecisionCode(
@@ -614,21 +702,44 @@ public sealed class AgentDeploymentOrchestrator(
                     _ = firewallManager.AssertSecurityGate(
                         SetupConstants.HttpsPort,
                         paths.AgentExecutablePath);
-                    journal = journal with { Stage = "firewall-configured" };
-                    journalStore.Write(journal);
                     firewallRemoteAccessConfirmed = true;
+                    firewallMutationStarted = false;
 
                     steps.Add(Succeeded(
                         "FIREWALL_CONFIGURED",
                         "방화벽 구성",
-                        $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
+                        automaticRequest
+                            ? "사설 Viewer 대역에서 HTTPS/18443으로 연결할 수 있도록 제품 소유 규칙을 구성했습니다."
+                            : $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
+                }
+                catch (OperationCanceledException) when (automaticRequest)
+                {
+                    postCommitCancellationRequested =
+                        cancellationToken.IsCancellationRequested;
+                    var firewallStateRestored =
+                        !firewallMutationStarted ||
+                        TryRestoreFirewallSnapshotsBestEffort(
+                            previousHttpsFirewall,
+                            previousHttpFirewall);
+                    if (firewallStateRestored)
+                    {
+                        firewallMutationStarted = false;
+                    }
+                    AddFirewallRemoteAccessWarning(
+                        steps,
+                        firewallStateRestored,
+                        agentHealth.Value.Ready);
                 }
                 catch (OperationCanceledException)
                 {
                     throw;
                 }
-                catch (SetupException exception) when (
-                    exception.Code == SetupErrorCodes.FirewallFailed)
+                catch (Exception exception) when (
+                    automaticRequest ||
+                    exception is SetupException
+                    {
+                        Code: SetupErrorCodes.FirewallFailed
+                    })
                 {
                     var firewallStateRestored =
                         !firewallMutationStarted ||
@@ -641,74 +752,105 @@ public sealed class AgentDeploymentOrchestrator(
                     }
                     AddFirewallRemoteAccessWarning(
                         steps,
-                        firewallStateRestored);
+                        firewallStateRestored,
+                        agentHealth.Value.Ready);
                 }
             }
 
-            // Health success is the transaction commit boundary. Backup cleanup
-            // must never turn a working installation into a rollback attempt
-            // because recursive deletion may already be partially complete.
-            steps.MarkActiveStage(SetupFailureStage.CommitCleanup);
-            journal = journal with { Stage = "committed" };
-            journalStore.Write(journal);
-            var committedDirectoriesClean = true;
-            foreach (var target in new[]
-                     {
-                         (
-                             Path: journal.StagingDirectory,
-                             Code: SetupErrorCodes.RollbackStagingCleanupFailed,
-                             Label: "임시 설치 자료 정리"),
-                         (
-                             Path: journal.BackupDirectory,
-                             Code: SetupErrorCodes.RollbackBackupCleanupFailed,
-                             Label: "이전 파일 정리"),
-                         (
-                             Path: journal.FailedDirectory,
-                             Code: SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
-                             Label: "실패 설치 자료 정리")
-                     })
+            if (automaticRequest && cancellationToken.IsCancellationRequested)
             {
-                if (await TryDeleteEvidenceDirectoryAsync(
-                        target.Path,
-                        CancellationToken.None))
+                postCommitCancellationRequested = true;
+            }
+
+            if (!automaticRequest)
+            {
+                steps.MarkActiveStage(SetupFailureStage.CommitCleanup);
+                journal = journal with { Stage = "committed" };
+                journalStore.Write(journal);
+                currentTransactionOwned = false;
+            }
+
+            // Backup cleanup is best effort and cannot turn the working install
+            // into a rollback attempt.
+            if (postCommitCancellationRequested)
+            {
+                AddCommittedCleanupPending(steps);
+            }
+            else
+            {
+                try
                 {
-                    continue;
+                    steps.MarkActiveStage(SetupFailureStage.CommitCleanup);
+                    var committedDirectoriesClean = true;
+                    var committedCleanupToken = automaticRequest
+                        ? cancellationToken
+                        : CancellationToken.None;
+                    foreach (var target in new[]
+                             {
+                                 (
+                                     Path: journal.StagingDirectory,
+                                     Code: SetupErrorCodes.RollbackStagingCleanupFailed,
+                                     Label: "임시 설치 자료 정리"),
+                                 (
+                                     Path: journal.BackupDirectory,
+                                     Code: SetupErrorCodes.RollbackBackupCleanupFailed,
+                                     Label: "이전 파일 정리"),
+                                 (
+                                     Path: journal.FailedDirectory,
+                                     Code: SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+                                     Label: "실패 설치 자료 정리")
+                             })
+                    {
+                        if (await TryDeleteEvidenceDirectoryAsync(
+                                target.Path,
+                                committedCleanupToken))
+                        {
+                            continue;
+                        }
+
+                        committedDirectoriesClean = false;
+                        steps.Add(new SetupStepResult(
+                            target.Code,
+                            target.Label,
+                            SetupStepState.Information,
+                            "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남아 있습니다."));
+                    }
+
+                    if (!committedDirectoriesClean)
+                    {
+                        steps.Add(new SetupStepResult(
+                            "BACKUP_CLEANUP_PENDING",
+                            "이전 파일 정리",
+                            SetupStepState.Information,
+                            "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남았습니다. Agent 동작에는 영향이 없습니다."));
+                    }
+                    else if (!await TryDeleteJournalAsync(
+                                 journalStore,
+                                 committedCleanupToken))
+                    {
+                        steps.Add(new SetupStepResult(
+                            SetupErrorCodes.RollbackJournalCleanupFailed,
+                            "작업 기록 정리",
+                            SetupStepState.Information,
+                            "설치는 완료됐지만 완료된 작업 기록이 남아 있습니다."));
+                        steps.Add(new SetupStepResult(
+                            "JOURNAL_CLEANUP_PENDING",
+                            "작업 기록 정리",
+                            SetupStepState.Information,
+                            "설치는 완료됐지만 완료된 작업 기록이 남았습니다. 다음 실행에서 안전하게 정리합니다."));
+                    }
                 }
-
-                committedDirectoriesClean = false;
-                steps.Add(new SetupStepResult(
-                    target.Code,
-                    target.Label,
-                    SetupStepState.Information,
-                    "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남아 있습니다."));
-            }
-
-            if (!committedDirectoriesClean)
-            {
-                steps.Add(new SetupStepResult(
-                    "BACKUP_CLEANUP_PENDING",
-                    "이전 파일 정리",
-                    SetupStepState.Information,
-                    "설치는 완료됐지만 이전 설치 작업의 정리 자료 일부가 남았습니다. Agent 동작에는 영향이 없습니다."));
-            }
-            else if (!await TryDeleteJournalAsync(
-                         journalStore,
-                         CancellationToken.None))
-            {
-                steps.Add(new SetupStepResult(
-                    SetupErrorCodes.RollbackJournalCleanupFailed,
-                    "작업 기록 정리",
-                    SetupStepState.Information,
-                    "설치는 완료됐지만 완료된 작업 기록이 남아 있습니다."));
-                steps.Add(new SetupStepResult(
-                    "JOURNAL_CLEANUP_PENDING",
-                    "작업 기록 정리",
-                    SetupStepState.Information,
-                    "설치는 완료됐지만 완료된 작업 기록이 남았습니다. 다음 실행에서 안전하게 정리합니다."));
+                catch (OperationCanceledException) when (automaticRequest)
+                {
+                    postCommitCancellationRequested = true;
+                    AddCommittedCleanupPending(steps);
+                }
             }
 
             return SetupOperationResult.Success(
-                firewallRemoteAccessConfirmed
+                postCommitCancellationRequested
+                    ? "Agent 설치 또는 업데이트는 완료됐고 취소 요청에 따라 후속 확인과 정리를 중단했습니다."
+                    : firewallRemoteAccessConfirmed
                     ? "Agent 설치 또는 업데이트가 완료되었습니다."
                     : "Agent 설치 또는 업데이트가 완료됐지만 원격 Viewer 연결은 확인이 필요합니다.",
                 steps) with
@@ -839,8 +981,7 @@ public sealed class AgentDeploymentOrchestrator(
         }
     }
 
-    private async Task<FirewallRuleVerificationResult> VerifyViewerFirewallRuleAsync(
-        string viewerIpv4,
+    private async Task<FirewallRuleVerificationResult> VerifyPrivateNetworkFirewallRuleAsync(
         CancellationToken cancellationToken)
     {
         FirewallRuleVerificationResult verification = default;
@@ -851,8 +992,37 @@ public sealed class AgentDeploymentOrchestrator(
             cancellationToken.ThrowIfCancellationRequested();
             var snapshot = firewallManager.Capture(
                 SetupConstants.FirewallRuleName);
-            verification = FirewallRuleVerifier.Evaluate(
+            verification = FirewallRuleVerifier.EvaluatePrivateNetworks(
                 snapshot,
+                SetupConstants.HttpsPort);
+            if (verification.IsExact)
+            {
+                return verification;
+            }
+
+            if (attempt < FirewallVerificationRetryCount)
+            {
+                await Task.Delay(
+                    FirewallVerificationRetryDelay,
+                    cancellationToken);
+            }
+        }
+
+        return verification;
+    }
+
+    private async Task<FirewallRuleVerificationResult> VerifyViewerFirewallRuleAsync(
+        string viewerIpv4,
+        CancellationToken cancellationToken)
+    {
+        FirewallRuleVerificationResult verification = default;
+        for (var attempt = 0;
+             attempt <= FirewallVerificationRetryCount;
+             attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            verification = FirewallRuleVerifier.Evaluate(
+                firewallManager.Capture(SetupConstants.FirewallRuleName),
                 SetupConstants.HttpsPort,
                 viewerIpv4);
             if (verification.IsExact)
@@ -921,7 +1091,8 @@ public sealed class AgentDeploymentOrchestrator(
 
     private static void AddFirewallRemoteAccessWarning(
         SetupStepRecorder steps,
-        bool firewallStateRestored)
+        bool firewallStateRestored,
+        bool localConnectionReady)
     {
         steps.AddSafeDecisionCode(
             SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
@@ -929,9 +1100,36 @@ public sealed class AgentDeploymentOrchestrator(
             SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
             "원격 Viewer 연결",
             SetupStepState.Warning,
-            firewallStateRestored
-                ? "Agent 로컬 HTTPS는 정상입니다. Viewer 전용 방화벽 규칙을 자동 구성하지 못했으므로 원격 연결이 되지 않으면 회사 방화벽 정책을 확인하세요."
-                : "Agent 로컬 HTTPS는 정상입니다. Viewer 전용 방화벽 규칙 구성과 변경 전 상태 복구 여부를 확인하지 못했으므로 회사 방화벽 정책을 확인하세요."));
+            localConnectionReady
+                ? firewallStateRestored
+                    ? "Agent 로컬 HTTPS는 정상입니다. 사설 Viewer 대역용 방화벽 규칙을 자동 구성하지 못했으므로 원격 연결이 되지 않으면 회사 방화벽 정책을 확인하세요."
+                    : "Agent 로컬 HTTPS는 정상입니다. 방화벽 규칙 구성과 변경 전 상태 복구 여부를 확인하지 못했으므로 회사 방화벽 정책을 확인하세요."
+                : firewallStateRestored
+                    ? "Agent 설치는 완료됐지만 사설 Viewer 대역용 방화벽 규칙과 로컬 HTTPS 응답을 확인하지 못했습니다. Viewer 연결 테스트를 실행하세요."
+                    : "Agent 설치는 완료됐지만 방화벽 규칙과 로컬 HTTPS 응답을 확인하지 못했습니다. 회사 방화벽 정책을 확인하세요."));
+    }
+
+    private static void AddAgentLocalConnectionWarning(
+        SetupStepRecorder steps,
+        AgentHealthProbeResult health)
+    {
+        steps.AddSafeDecisionCode(
+            SetupErrorCodes.AgentLocalConnectionUnconfirmed);
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+            "Agent 연결 확인",
+            SetupStepState.Warning,
+            $"Agent 서비스 설치는 완료됐지만 로컬 HTTPS 응답을 아직 확인하지 못했습니다. " +
+            $"Viewer에서 연결 테스트를 실행하세요. ({AgentHealthDecisionCode(health.Code)})"));
+    }
+
+    private static void AddCommittedCleanupPending(SetupStepRecorder steps)
+    {
+        steps.Add(new SetupStepResult(
+            "BACKUP_CLEANUP_PENDING",
+            "후속 확인 및 정리",
+            SetupStepState.Warning,
+            "Agent 설치는 완료됐습니다. 취소 요청에 따라 선택적 연결 확인과 정리를 중단했으며 다음 실행에서 안전하게 정리합니다."));
     }
 
     private async Task<RollbackOutcome> TryRollbackAsync(
