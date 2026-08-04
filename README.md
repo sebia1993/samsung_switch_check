@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.12-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.13-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.12-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.13-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.13-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -64,10 +64,20 @@ staging·backup·failed·journal 중 어느 안전 단계에서 실패했는지
 `.__staging_*`, `.__backup_*`, `.__failed_*` 폴더나 작업 기록을 수동으로 삭제·이동·이름
 변경하지 마십시오.
 
-`0.10.12-poc`의 Setup 사전 점검은 구형 Agent의 최소 `/health/ready` 응답도 API v4 준비
+`0.10.13-poc`의 Setup 사전 점검은 구형 Agent의 최소 `/health/ready` 응답도 API v4 준비
 상태로 확인하되, 실제 설치·업데이트 완료 판정에서는 새 패키지의 HTTPS 프로토콜과 정확한
 제품 버전을 계속 엄격하게 확인합니다. 예상하지 못한 Setup 실패는 안전한 단계·범주와 제한된
 소요 시간으로만 진단하고 실제 PID, 경로와 예외 원문은 기록하지 않습니다.
+
+설치 완료 직전 로컬 준비 상태 확인이 실패하면 Setup은
+`Setup → 127.0.0.1:18443 → Agent 서비스` 구간을 `HTTPS_TLS_FAILED`,
+`HTTPS_REQUEST_TIMEOUT`, `HTTPS_CONNECTION_RESET`, `HTTPS_EOF`,
+`HTTPS_CONNECT_FAILED` 중 하나로 구분합니다. 이는 Agent PC 내부 통신 실패이며 Viewer IP나
+스위치 관리망 문제를 뜻하지 않습니다. 익명 진단은 서비스 실행, TCP/18443 수신 소유,
+HTTPS 시도 횟수·마지막 전송 단계와 재시작 관측 여부만 기록하고 민감정보는 기록하지
+않습니다. 실패 단계 시간은 `SERVICE_STARTED → SETUP_HEALTH_FAILED → ROLLBACK_COMPLETED`
+순서로 나뉘어 표시됩니다. 짧은 SWD1 지원 코드는 하위 호환을 위해 기존
+`HTTPS_REQUEST_FAILED` 범주를 유지합니다.
 
 Viewer는 Agent 연결 교체·종료 중 진행 중인 요청을 안전하게 취소·정리하고, 자동 수집 전과
 다른 작업 때문에 수집이 미뤄진 장비를 정상으로 단정하지 않습니다. 연결이 끊기면 현재 상태와
@@ -167,7 +177,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.12-poc
+.\scripts\build-release.ps1 -Version 0.10.13-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -189,5 +199,6 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.10.13-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.13_POC_KO.md)
 - [0.10.12-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.12_POC_KO.md)
 - [Figma 화면 설계 및 개발 전달](https://www.figma.com/design/JueYiLj18xFE7enHvGlU2s)

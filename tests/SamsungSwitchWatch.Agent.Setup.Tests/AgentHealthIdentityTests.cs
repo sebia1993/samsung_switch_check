@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Authentication;
 using System.Text;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
 using SamsungSwitchWatch.Agent.Setup.Infrastructure;
@@ -93,7 +95,7 @@ public sealed class AgentHealthIdentityTests
     }
 
     [Fact]
-    public void AgentHealthProbeResult_ExposesOnlySafeClassificationAndRestartFlag()
+    public void AgentHealthProbeResult_ExposesOnlySafeClassificationAndObservations()
     {
         var properties = typeof(AgentHealthProbeResult)
             .GetProperties(BindingFlags.Instance | BindingFlags.Public)
@@ -101,18 +103,30 @@ public sealed class AgentHealthIdentityTests
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(["Code", "Ready", "RestartObserved"], properties);
+        Assert.Equal(
+            [
+                "Code",
+                "HttpAttemptCount",
+                "LastTransportPhase",
+                "ListenerOwnedObserved",
+                "Ready",
+                "RestartObserved",
+                "ServiceRunningObserved"
+            ],
+            properties);
     }
 
     [Fact]
-    public void AgentHealthProbeCode_UsesStableFourBitSafeValues()
+    public void AgentHealthProbeCode_UsesStableDistinctByteValues()
     {
         var values = Enum.GetValues<AgentHealthProbeCode>()
             .Select(value => (byte)value)
             .ToArray();
 
         Assert.Equal(values.Length, values.Distinct().Count());
-        Assert.All(values, value => Assert.InRange(value, (byte)0, (byte)15));
+        Assert.Equal(
+            Enumerable.Range(0, 19).Select(value => (byte)value),
+            values);
     }
 
     [Fact]
@@ -148,6 +162,12 @@ public sealed class AgentHealthIdentityTests
         Assert.True(result.Ready);
         Assert.Equal(AgentHealthProbeCode.Ready, result.Code);
         Assert.False(result.RestartObserved);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.Equal(1, result.HttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.ReadinessValidated,
+            result.LastTransportPhase);
         Assert.Equal([4321], observedProcessIds);
         Assert.Equal(["/health/ready"], handler.RequestPaths);
     }
@@ -236,6 +256,12 @@ public sealed class AgentHealthIdentityTests
         Assert.True(result.Ready);
         Assert.Equal(AgentHealthProbeCode.Ready, result.Code);
         Assert.True(result.RestartObserved);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.Equal(1, result.HttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.ReadinessValidated,
+            result.LastTransportPhase);
         Assert.Equal([1001, 2002], observedProcessIds);
         Assert.Single(handler.RequestPaths);
     }
@@ -270,6 +296,12 @@ public sealed class AgentHealthIdentityTests
         Assert.False(result.Ready);
         Assert.Equal(expected, result.Code);
         Assert.False(result.RestartObserved);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.False(result.ListenerOwnedObserved);
+        Assert.Equal(0, result.HttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.NotStarted,
+            result.LastTransportPhase);
         Assert.Empty(handler.RequestPaths);
     }
 
@@ -291,6 +323,9 @@ public sealed class AgentHealthIdentityTests
 
         Assert.False(result.Ready);
         Assert.Equal(AgentHealthProbeCode.ServiceUnavailable, result.Code);
+        Assert.False(result.ServiceRunningObserved);
+        Assert.False(result.ListenerOwnedObserved);
+        Assert.Equal(0, result.HttpAttemptCount);
         Assert.Empty(handler.RequestPaths);
     }
 
@@ -374,7 +409,7 @@ public sealed class AgentHealthIdentityTests
     }
 
     [Fact]
-    public async Task WaitUntilReadyAsync_ClassifiesHttpsFailureWithoutExceptionDetails()
+    public async Task WaitUntilReadyAsync_ClassifiesGenericHttpsFailureWithoutExceptionDetails()
     {
         var handler = new RecordingHandler(
             (_, _) => Task.FromException<HttpResponseMessage>(
@@ -392,6 +427,262 @@ public sealed class AgentHealthIdentityTests
 
         Assert.False(result.Ready);
         Assert.Equal(AgentHealthProbeCode.HttpsRequestFailed, result.Code);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.True(result.HttpAttemptCount > 0);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.LastTransportPhase);
+    }
+
+    [Theory]
+    [InlineData(
+        (int)HttpRequestError.SecureConnectionError,
+        AgentHealthProbeCode.HttpsTlsFailed)]
+    [InlineData(
+        (int)HttpRequestError.ResponseEnded,
+        AgentHealthProbeCode.HttpsEof)]
+    [InlineData(
+        (int)HttpRequestError.ConnectionError,
+        AgentHealthProbeCode.HttpsConnectFailed)]
+    [InlineData(
+        (int)HttpRequestError.NameResolutionError,
+        AgentHealthProbeCode.HttpsConnectFailed)]
+    [InlineData(
+        (int)HttpRequestError.Unknown,
+        AgentHealthProbeCode.HttpsRequestFailed)]
+    public void ClassifyTransportFailure_UsesSafeHttpRequestErrorCategory(
+        int errorValue,
+        AgentHealthProbeCode expected)
+    {
+        var exception = new HttpRequestException(
+            (HttpRequestError)errorValue,
+            "sensitive address and transport detail");
+
+        Assert.Equal(
+            expected,
+            HttpsAgentHealthProbe.ClassifyTransportFailure(exception));
+    }
+
+    [Fact]
+    public void ClassifyTransportFailure_AuthenticationExceptionOverridesGenericCategory()
+    {
+        var exception = new HttpRequestException(
+            HttpRequestError.Unknown,
+            "sensitive outer detail",
+            new AuthenticationException("sensitive certificate detail"));
+
+        Assert.Equal(
+            AgentHealthProbeCode.HttpsTlsFailed,
+            HttpsAgentHealthProbe.ClassifyTransportFailure(exception));
+    }
+
+    [Theory]
+    [InlineData(
+        (int)SocketError.ConnectionReset,
+        AgentHealthProbeCode.HttpsConnectionReset)]
+    [InlineData(
+        (int)SocketError.ConnectionAborted,
+        AgentHealthProbeCode.HttpsConnectionReset)]
+    [InlineData(
+        (int)SocketError.AccessDenied,
+        AgentHealthProbeCode.HttpsConnectFailed)]
+    [InlineData(
+        (int)SocketError.TimedOut,
+        AgentHealthProbeCode.HttpsRequestTimeout)]
+    [InlineData(
+        (int)SocketError.ConnectionRefused,
+        AgentHealthProbeCode.HttpsConnectFailed)]
+    public void ClassifyTransportFailure_UsesSafeSocketCategory(
+        int socketError,
+        AgentHealthProbeCode expected)
+    {
+        var exception = new HttpRequestException(
+            HttpRequestError.ConnectionError,
+            "sensitive outer detail",
+            new SocketException(socketError));
+
+        Assert.Equal(
+            expected,
+            HttpsAgentHealthProbe.ClassifyTransportFailure(exception));
+    }
+
+    [Theory]
+    [InlineData(
+        (int)HttpRequestError.ResponseEnded,
+        -1,
+        AgentHealthProbeCode.HttpsEof)]
+    [InlineData(
+        (int)HttpRequestError.ConnectionError,
+        (int)SocketError.ConnectionReset,
+        AgentHealthProbeCode.HttpsConnectionReset)]
+    [InlineData(
+        (int)HttpRequestError.ConnectionError,
+        (int)SocketError.TimedOut,
+        AgentHealthProbeCode.HttpsRequestTimeout)]
+    public async Task WaitUntilReadyAsync_ClassifiesResponseBodyTransportFailure(
+        int requestError,
+        int socketError,
+        AgentHealthProbeCode expected)
+    {
+        Exception? inner = socketError < 0
+            ? null
+            : new SocketException(socketError);
+        var bodyFailure = new HttpIOException(
+            (HttpRequestError)requestError,
+            "sensitive response body detail",
+            inner);
+        var handler = new RecordingHandler(
+            (_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new ThrowingReadStream(bodyFailure))
+            }));
+        var probe = CreateProbe(
+            handler,
+            (_, _) =>
+                HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            "0.10.0-poc",
+            () => RunningService(4321),
+            TimeSpan.FromMilliseconds(50),
+            CancellationToken.None);
+
+        Assert.False(result.Ready);
+        Assert.Equal(expected, result.Code);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.True(result.HttpAttemptCount > 0);
+        Assert.Equal(
+            AgentHealthTransportPhase.ResponseBody,
+            result.LastTransportPhase);
+    }
+
+    [Theory]
+    [InlineData(
+        (int)HttpRequestError.SecureConnectionError,
+        -1,
+        AgentHealthProbeCode.HttpsTlsFailed)]
+    [InlineData(
+        (int)HttpRequestError.ResponseEnded,
+        -1,
+        AgentHealthProbeCode.HttpsEof)]
+    [InlineData(
+        (int)HttpRequestError.ConnectionError,
+        (int)SocketError.ConnectionReset,
+        AgentHealthProbeCode.HttpsConnectionReset)]
+    [InlineData(
+        (int)HttpRequestError.ConnectionError,
+        (int)SocketError.AccessDenied,
+        AgentHealthProbeCode.HttpsConnectFailed)]
+    public async Task WaitUntilReadyAsync_ReturnsOnlySafeTransportClassification(
+        int requestError,
+        int socketError,
+        AgentHealthProbeCode expected)
+    {
+        Exception? inner = socketError < 0
+            ? null
+            : new SocketException(socketError);
+        var handler = new RecordingHandler(
+            (_, _) => Task.FromException<HttpResponseMessage>(
+                new HttpRequestException(
+                    (HttpRequestError)requestError,
+                    "sensitive address, certificate, and process detail",
+                    inner)));
+        var probe = CreateProbe(
+            handler,
+            (_, _) => HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            "0.10.0-poc",
+            () => RunningService(4321),
+            TimeSpan.FromMilliseconds(50),
+            CancellationToken.None);
+
+        Assert.False(result.Ready);
+        Assert.Equal(expected, result.Code);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.True(result.HttpAttemptCount > 0);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.LastTransportPhase);
+    }
+
+    [Fact]
+    public async Task WaitUntilReadyAsync_ClassifiesBoundedRequestTimeout()
+    {
+        var handler = new RecordingHandler(
+            async (_, cancellationToken) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                throw new InvalidOperationException("unreachable");
+            });
+        var probe = CreateProbe(
+            handler,
+            (_, _) => HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            "0.10.0-poc",
+            () => RunningService(4321),
+            TimeSpan.FromMilliseconds(50),
+            CancellationToken.None);
+
+        Assert.False(result.Ready);
+        Assert.Equal(AgentHealthProbeCode.HttpsRequestTimeout, result.Code);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.Equal(1, result.HttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.LastTransportPhase);
+    }
+
+    [Fact]
+    public async Task WaitUntilReadyAsync_PreservesCumulativeSafeObservationsAcrossRetry()
+    {
+        var attempt = 0;
+        var handler = new RecordingHandler(
+            (_, _) =>
+            {
+                if (Interlocked.Increment(ref attempt) == 1)
+                {
+                    return Task.FromException<HttpResponseMessage>(
+                        new HttpRequestException(
+                            HttpRequestError.ConnectionError,
+                            "sensitive EDR-like block",
+                            new SocketException((int)SocketError.AccessDenied)));
+                }
+
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"status":"ready","apiVersion":4,"protocol":"https","productVersion":"0.10.0-poc"}""",
+                        Encoding.UTF8,
+                        "application/json")
+                });
+            });
+        var probe = CreateProbe(
+            handler,
+            (_, _) => HttpsAgentHealthProbe.ListenerOwnership.OwnedByExpectedProcess);
+
+        var result = await probe.WaitUntilReadyAsync(
+            new Uri("https://127.0.0.1:18443/health/ready"),
+            "0.10.0-poc",
+            () => RunningService(4321),
+            TimeSpan.FromSeconds(2),
+            CancellationToken.None);
+
+        Assert.True(result.Ready);
+        Assert.True(result.ServiceRunningObserved);
+        Assert.True(result.ListenerOwnedObserved);
+        Assert.Equal(2, result.HttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.ReadinessValidated,
+            result.LastTransportPhase);
     }
 
     [Fact]
@@ -452,5 +743,39 @@ public sealed class AgentHealthIdentityTests
             RequestPaths.Add(request.RequestUri!.AbsolutePath);
             return response(request, cancellationToken);
         }
+    }
+
+    private sealed class ThrowingReadStream(Exception exception) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position
+        {
+            get => 0;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw exception;
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(exception);
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) =>
+            throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
     }
 }

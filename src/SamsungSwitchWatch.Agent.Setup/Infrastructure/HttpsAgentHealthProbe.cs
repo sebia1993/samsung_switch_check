@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Text.Json;
 using SamsungSwitchWatch.Agent.Setup.Deployment;
 
@@ -79,6 +81,10 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
         var lastCode = AgentHealthProbeCode.DeadlineExceeded;
         var firstProcessId = 0;
         var restartObserved = false;
+        var serviceRunningObserved = false;
+        var listenerOwnedObserved = false;
+        var httpAttemptCount = 0;
+        var lastTransportPhase = AgentHealthTransportPhase.NotStarted;
 
         while (!deadline.IsCancellationRequested)
         {
@@ -107,6 +113,8 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                 continue;
             }
 
+            serviceRunningObserved = true;
+
             if (firstProcessId == 0)
             {
                 firstProcessId = service.ProcessId;
@@ -134,13 +142,19 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                 continue;
             }
 
+            listenerOwnedObserved = true;
+            lastTransportPhase = AgentHealthTransportPhase.ListenerOwned;
+
             try
             {
+                httpAttemptCount++;
+                lastTransportPhase = AgentHealthTransportPhase.RequestStarted;
                 using var readyRequest = new HttpRequestMessage(HttpMethod.Get, endpoint);
                 using var readyResponse = await client.SendAsync(
                     readyRequest,
                     HttpCompletionOption.ResponseHeadersRead,
                     deadline.Token);
+                lastTransportPhase = AgentHealthTransportPhase.ResponseHeaders;
                 if (readyResponse.StatusCode != HttpStatusCode.OK)
                 {
                     lastCode = AgentHealthProbeCode.HttpStatusInvalid;
@@ -162,6 +176,7 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     continue;
                 }
 
+                lastTransportPhase = AgentHealthTransportPhase.ResponseBody;
                 var readinessJson = await ReadBoundedAsync(
                     readyResponse.Content,
                     MaximumReadinessBytes,
@@ -175,9 +190,16 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
                     lastCode = ClassifyReadiness(
                         readinessJson,
                         expectedProductVersion);
+                    lastTransportPhase =
+                        AgentHealthTransportPhase.ReadinessValidated;
                     if (lastCode == AgentHealthProbeCode.Ready)
                     {
-                        return AgentHealthProbeResult.Success(restartObserved);
+                        return AgentHealthProbeResult.Success(
+                            restartObserved,
+                            serviceRunningObserved,
+                            listenerOwnedObserved,
+                            httpAttemptCount,
+                            lastTransportPhase);
                     }
                 }
             }
@@ -185,14 +207,48 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
             {
                 if (deadline.IsCancellationRequested)
                 {
+                    // Preserve the last completed HTTP outcome when the overall
+                    // readiness deadline interrupts a later retry. If the first
+                    // request itself consumed the entire deadline, the bounded
+                    // transport outcome is a request timeout.
+                    if (httpAttemptCount == 1)
+                    {
+                        lastCode = AgentHealthProbeCode.HttpsRequestTimeout;
+                    }
                     break;
                 }
 
-                lastCode = AgentHealthProbeCode.HttpsRequestFailed;
+                lastCode = AgentHealthProbeCode.HttpsRequestTimeout;
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException exception)
             {
-                lastCode = AgentHealthProbeCode.HttpsRequestFailed;
+                lastCode = ClassifyTransportFailure(exception);
+            }
+            catch (HttpIOException exception)
+            {
+                lastCode = ClassifyTransportFailure(exception);
+            }
+            catch (AuthenticationException)
+            {
+                lastCode = AgentHealthProbeCode.HttpsTlsFailed;
+            }
+            catch (SocketException exception)
+            {
+                lastCode = ClassifySocketFailure(exception);
+            }
+            catch (EndOfStreamException)
+            {
+                lastCode = AgentHealthProbeCode.HttpsEof;
+            }
+            catch (TimeoutException)
+            {
+                lastCode = AgentHealthProbeCode.HttpsRequestTimeout;
+            }
+            catch (IOException exception)
+            {
+                lastCode = ClassifyTransportFailure(
+                    HttpRequestError.Unknown,
+                    exception);
             }
             catch (JsonException)
             {
@@ -206,7 +262,93 @@ public sealed partial class HttpsAgentHealthProbe : IAgentHealthProbe
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return AgentHealthProbeResult.Failure(lastCode, restartObserved);
+        return AgentHealthProbeResult.Failure(
+            lastCode,
+            restartObserved,
+            serviceRunningObserved,
+            listenerOwnedObserved,
+            httpAttemptCount,
+            lastTransportPhase);
+    }
+
+    internal static AgentHealthProbeCode ClassifyTransportFailure(
+        HttpRequestException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return ClassifyTransportFailure(
+            exception.HttpRequestError,
+            exception);
+    }
+
+    internal static AgentHealthProbeCode ClassifyTransportFailure(
+        HttpIOException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return ClassifyTransportFailure(
+            exception.HttpRequestError,
+            exception);
+    }
+
+    private static AgentHealthProbeCode ClassifyTransportFailure(
+        HttpRequestError requestError,
+        Exception exception)
+    {
+        if (requestError == HttpRequestError.SecureConnectionError ||
+            ContainsException<AuthenticationException>(exception))
+        {
+            return AgentHealthProbeCode.HttpsTlsFailed;
+        }
+
+        if (FindException<SocketException>(exception) is { } socketException)
+        {
+            return ClassifySocketFailure(socketException);
+        }
+
+        if (requestError == HttpRequestError.ResponseEnded ||
+            ContainsException<EndOfStreamException>(exception))
+        {
+            return AgentHealthProbeCode.HttpsEof;
+        }
+
+        return requestError switch
+        {
+            HttpRequestError.ConnectionError or
+            HttpRequestError.NameResolutionError =>
+                AgentHealthProbeCode.HttpsConnectFailed,
+            _ => AgentHealthProbeCode.HttpsRequestFailed
+        };
+    }
+
+    private static AgentHealthProbeCode ClassifySocketFailure(
+        SocketException exception) =>
+        exception.SocketErrorCode == SocketError.TimedOut
+            ? AgentHealthProbeCode.HttpsRequestTimeout
+            : exception.SocketErrorCode is
+            SocketError.ConnectionAborted or
+            SocketError.ConnectionReset or
+            SocketError.NetworkReset or
+            SocketError.Shutdown
+            ? AgentHealthProbeCode.HttpsConnectionReset
+            : AgentHealthProbeCode.HttpsConnectFailed;
+
+    private static bool ContainsException<TException>(Exception exception)
+        where TException : Exception =>
+        FindException<TException>(exception) is not null;
+
+    private static TException? FindException<TException>(Exception exception)
+        where TException : Exception
+    {
+        for (Exception? current = exception;
+             current is not null;
+             current = current.InnerException)
+        {
+            if (current is TException typed)
+            {
+                return typed;
+            }
+        }
+
+        return null;
     }
 
     internal static bool IsExpectedReadiness(string json, string expectedProductVersion)

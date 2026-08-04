@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.12-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.13-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.12-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.12-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.13-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.13-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.12-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.13-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.12-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.13-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -152,6 +152,16 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
 - `SETUP_HEALTH_FAILED`에는 서비스, TCP/18443, HTTPS, 응답 형식과 버전 중 마지막으로
   확인하지 못한 안전한 `AgentHealthCode`가 함께 표시됩니다. 실제 PID, IP, 경로와 예외 원문은
   포함하지 않습니다.
+- 로컬 준비 상태 요청 실패는 `HTTPS_TLS_FAILED`, `HTTPS_REQUEST_TIMEOUT`,
+  `HTTPS_CONNECTION_RESET`, `HTTPS_EOF`, `HTTPS_CONNECT_FAILED`로 구분합니다. 화면의
+  `Setup → 127.0.0.1:18443 → Agent 서비스`는 Agent PC 내부 통신 경로입니다. 이 분류는
+  Viewer IP나 스위치 관리망 설정 문제를 뜻하지 않으므로 해당 값을 임의로 변경하지 마십시오.
+- 익명 진단에는 서비스 실행, TCP/18443 수신 소유, HTTPS 시도 횟수·마지막 전송 단계와
+  Agent 재시작 관측 여부만 기록합니다. 실제 PID, 주소, 경로, 인증서와 예외 원문은 기록하지
+  않습니다. SWD1은 하위 호환을 위해 세부 실패를 기존 `HTTPS_REQUEST_FAILED`로 요약합니다.
+- 설치 후 준비 상태가 실패하면 단계는 `SERVICE_STARTED`, `SETUP_HEALTH_FAILED`,
+  `ROLLBACK_COMPLETED` 순으로 표시되고, 준비 상태 대기 시간과 rollback 시간이 각 단계에
+  따로 기록됩니다.
 - rollback 프로그램 폴더 이동은 일시적 파일 잠금에 한해 최대 5회 제한적으로 다시
   시도합니다. 계속 잠겨 있거나 원본·대상 상태가 모호하면 이전 서비스를 다시 시작하지 않고
   작업 기록을 보존합니다.
@@ -188,7 +198,7 @@ IP/CIDR, PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 �
 
 복구 완료 메시지가 나타났다면 같은 실패 화면에서 설치를 자동으로 다시 시작하지 않습니다.
 Setup을 닫지 않아도 되지만, 상태가 `복구 필요 없음`으로 바뀌고 설치 버튼이 다시 활성화됐는지
-확인한 뒤 `0.10.12-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. 같은 health
+확인한 뒤 `0.10.13-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. 같은 health
 분류가 반복되면 재설치를 계속 반복하지 말고 SWD1 코드 또는 `진단정보 복사` 결과를
 전달하십시오.
 

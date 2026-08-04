@@ -28,6 +28,10 @@ public sealed record DeploymentJournal(
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
     public string? AgentHealthCode { get; init; }
     public bool AgentRestartObserved { get; init; }
+    public bool AgentServiceRunningObserved { get; init; }
+    public bool AgentListenerOwnedObserved { get; init; }
+    public int AgentHttpAttemptCount { get; init; }
+    public AgentHealthTransportPhase AgentLastTransportPhase { get; init; }
 }
 
 internal sealed class DeploymentJournalCleanupVerificationException

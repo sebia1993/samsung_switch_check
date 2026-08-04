@@ -134,14 +134,22 @@ public sealed class SetupDiagnosticsService(
                         ? agentHealth.Value.RestartObserved
                             ? "현재 Agent가 다시 시작된 뒤 정상 응답합니다."
                             : "현재 Agent가 정상 응답합니다."
-                        : "서비스는 실행 중이지만 준비 상태 응답을 받지 못했습니다. " +
-                          $"진단 단계: {AgentDeploymentOrchestrator.AgentHealthDisplayName(agentHealth.Value.Code)}"));
+                        : AgentDeploymentOrchestrator.AgentHealthFailureMessage(
+                            agentHealth.Value)));
             }
 
             return SetupOperationResult.Success("사전 점검이 완료되었습니다.", steps) with
             {
                 AgentHealthCode = agentHealth?.Code.ToString(),
-                AgentRestartObserved = agentHealth?.RestartObserved ?? false
+                AgentRestartObserved = agentHealth?.RestartObserved ?? false,
+                AgentServiceRunningObserved =
+                    agentHealth?.ServiceRunningObserved ?? false,
+                AgentListenerOwnedObserved =
+                    agentHealth?.ListenerOwnedObserved ?? false,
+                AgentHttpAttemptCount = agentHealth?.HttpAttemptCount ?? 0,
+                AgentLastTransportPhase =
+                    agentHealth?.LastTransportPhase ??
+                    AgentHealthTransportPhase.NotStarted
             };
         }
         catch (OperationCanceledException)

@@ -548,7 +548,12 @@ internal sealed class FakeHealthProbe(
     bool ready,
     Action? beforeResult = null,
     AgentHealthProbeCode failureCode =
-        AgentHealthProbeCode.DeadlineExceeded) : IAgentHealthProbe
+        AgentHealthProbeCode.DeadlineExceeded,
+    bool serviceRunningObserved = false,
+    bool listenerOwnedObserved = false,
+    int httpAttemptCount = 0,
+    AgentHealthTransportPhase lastTransportPhase =
+        AgentHealthTransportPhase.NotStarted) : IAgentHealthProbe
 {
     public Task<AgentHealthProbeResult> WaitUntilReadyAsync(
         Uri endpoint,
@@ -564,7 +569,11 @@ internal sealed class FakeHealthProbe(
                 ? AgentHealthProbeResult.Success(restartObserved: false)
                 : AgentHealthProbeResult.Failure(
                     failureCode,
-                    restartObserved: false));
+                    restartObserved: false,
+                    serviceRunningObserved,
+                    listenerOwnedObserved,
+                    httpAttemptCount,
+                    lastTransportPhase));
     }
 }
 

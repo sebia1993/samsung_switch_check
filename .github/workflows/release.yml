@@ -8,7 +8,7 @@ on:
       version:
         description: Build-only semantic version (manual runs never publish)
         required: true
-        default: 0.10.12-poc
+        default: 0.10.13-poc
         type: string
 
 permissions:

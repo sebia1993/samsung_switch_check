@@ -1007,7 +1007,7 @@ internal static class Swd1MappingTables
         value switch
         {
             "NOT_RUN" => Swd1CheckState.NotRun,
-            "PASS" => Swd1CheckState.Passed,
+            "PASS" or "PASS_OBSERVED" => Swd1CheckState.Passed,
             "NOT_CONFIRMED" => Swd1CheckState.FailedOrNotConfirmed,
             _ => Swd1CheckState.Unknown
         };
