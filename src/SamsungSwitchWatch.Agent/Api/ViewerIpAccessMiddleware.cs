@@ -5,18 +5,12 @@ using SamsungSwitchWatch.Agent.Domain;
 namespace SamsungSwitchWatch.Agent.Api;
 
 public sealed class ViewerIpAccessMiddleware(
-    RequestDelegate next,
-    AgentOptions options)
+    RequestDelegate next)
 {
-    private readonly IPAddress? _allowedViewerAddress =
-        string.IsNullOrWhiteSpace(options.AllowedViewerIpv4)
-            ? null
-            : IPAddress.Parse(options.AllowedViewerIpv4);
-
     public async Task InvokeAsync(HttpContext context)
     {
         var remoteAddress = Normalize(context.Connection.RemoteIpAddress);
-        if (IsAllowed(context.Request.Path, remoteAddress))
+        if (IsAllowed(remoteAddress))
         {
             await next(context);
             return;
@@ -35,28 +29,10 @@ public sealed class ViewerIpAccessMiddleware(
         }, cancellationToken: context.RequestAborted);
     }
 
-    private bool IsAllowed(PathString path, IPAddress? remoteAddress)
-    {
-        if (remoteAddress is null)
-        {
-            return false;
-        }
-
-        if (_allowedViewerAddress is not null &&
-            remoteAddress.Equals(_allowedViewerAddress))
-        {
-            return true;
-        }
-
-        if (!IPAddress.IsLoopback(remoteAddress))
-        {
-            return false;
-        }
-
-        return options.MockMode ||
-               path.Equals("/health/live", StringComparison.OrdinalIgnoreCase) ||
-               path.Equals("/health/ready", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsAllowed(IPAddress? remoteAddress) =>
+        remoteAddress is not null &&
+        (IPAddress.IsLoopback(remoteAddress) ||
+         Ipv4Cidr.IsRfc1918Address(remoteAddress));
 
     private static IPAddress? Normalize(IPAddress? address) =>
         address?.IsIPv4MappedToIPv6 == true

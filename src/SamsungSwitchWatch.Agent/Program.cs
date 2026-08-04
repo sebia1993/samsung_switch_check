@@ -36,7 +36,7 @@ public static class AgentApplication
             builder.Configuration.GetSection(AgentOptions.SectionName).Get<AgentOptions>() ??
             new AgentOptions();
         AgentOptionsValidator.ValidateAndNormalize(options, builder.Environment.ContentRootPath);
-        var identity = AgentIdentityStore.LoadOrCreate(options);
+        var identity = EphemeralAgentIdentityFactory.Create();
         WebApplication? app = null;
 
         try

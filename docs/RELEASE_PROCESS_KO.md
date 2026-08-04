@@ -2,8 +2,8 @@
 
 ## 릴리스 계약
 
-- 현재 버전: `0.10.16-poc`
-- 태그: annotated tag `v0.10.16-poc`
+- 현재 버전: `0.11.0-poc`
+- 태그: annotated tag `v0.11.0-poc`
 - 대상: Windows x64, self-contained, single-file managed publish, untrimmed
 - GitHub Release 사용자 정의 Asset: Agent ZIP과 Viewer ZIP 정확히 두 개
 - 공개 패키지: PowerShell·CMD·개발 설정·DB·인증정보 제외
@@ -12,15 +12,15 @@
 공개 Asset:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.16-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.16-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.11.0-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.11.0-poc-win-x64.zip
 ```
 
 내부 검증 파일:
 
 ```text
-SamsungSwitchWatch-Agent-0.10.16-poc-win-x64.zip
-SamsungSwitchWatch-Viewer-0.10.16-poc-win-x64.zip
+SamsungSwitchWatch-Agent-0.11.0-poc-win-x64.zip
+SamsungSwitchWatch-Viewer-0.11.0-poc-win-x64.zip
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -70,23 +70,23 @@ dotnet test SamsungSwitchWatch.sln -c Release --no-build
 - Agent Setup과 Viewer 실패 화면에서만 유효한 SWD1 지원 코드가 표시되고 성공·재시도·
   입력 변경 때 이전 코드가 지워짐
 - SWD1이 오프라인 생성·해석되고 CRC 오타 검사를 통과하며 인증·페어링·비밀값으로 사용되지 않음
-- 실행 중인 구형 API v4 Agent의 최소 readiness 응답은 사전 점검에서 호환되며, 설치 완료
-  판정은 새 패키지의 HTTPS 프로토콜과 정확한 제품 버전을 계속 요구함
-- production Agent ECDSA PFX를 Exportable·PersistKeySet 없이 서비스 계정의 UserKeySet으로
-  Agent 프로세스 수명 동안 불러오고, Schannel TLS 서버 handshake와 기존 DPAPI
-  LocalMachine 신원 재사용을 자동 검증함
+- 실행 중인 API v4 Agent의 최소 readiness 응답은 사전 점검에서 호환되며, Viewer는 같은
+  API v4의 제품 버전 차이를 경고로 표시한 뒤 연결함
+- production Agent가 시작마다 새 RSA 인증서와 PFX 바이트를 만들고 Exportable·PersistKeySet
+  없이 UserKeySet으로 가져오며, 프로세스 종료 뒤 임시 사용자 키 컨테이너가 남지 않는지
+  Schannel TLS 서버 통합 테스트로 검증함
 - Setup 준비 상태 재시도는 매번 새 HTTP handler/client, 정확한 HTTP/1.1과 `Connection: close`를
   사용하며 실패한 TLS 연결 상태를 다음 시도에 재사용하지 않음
-- 로컬 HTTPS 성공 응답, API v4, HTTPS 프로토콜과 정확한 패키지 버전 중 하나라도 확인하지
-  못하면 설치 성공으로 처리하지 않고 rollback함
-- 제품 소유 Viewer `/32` 방화벽 규칙을 계속 적용·재확인하며, 방화벽·GPO·적용·재조회만
-  실패하면 변경한 방화벽 상태 복원을 시도하고 결과를 경고 단계에 남긴 뒤
+- 파일과 서비스 설치를 commit한 뒤 로컬 HTTPS 준비 상태를 확인하지 못해도 rollback하지 않고
+  `AGENT_LOCAL_CONNECTION_UNCONFIRMED` 성공·경고로 남기며 Viewer 연결 진단을 안내함
+- 제품 소유 Domain/Private·TCP/18443·RFC1918 원격 주소 방화벽 규칙을 best effort로 적용하며,
+  방화벽·GPO·적용·재조회만 실패하면 변경한 방화벽 상태 복원을 시도하고 결과를 경고 단계에 남긴 뒤
   `FIREWALL_REMOTE_ACCESS_UNCONFIRMED` 경고로
   Agent 프로그램과 서비스를 유지함
 - 방화벽 경고 완료 화면은 `설치 완료 · 원격 Viewer 연결 확인 필요`, 정확한 규칙까지 확인한
   완료 화면은 `설치 완료 · 원격 연결 준비됨`으로 서로 구분됨
-- 방화벽 실패 경로가 `Any`, `LocalSubnet` 또는 넓은 대역 규칙을 만들거나 Agent 내부의
-  정확한 Viewer IPv4 검증을 완화하지 않음
+- 방화벽 실패 경로가 `Any`, `LocalSubnet` 또는 RFC1918보다 넓은 규칙을 만들거나 Agent 내부의
+  loopback/RFC1918 Viewer 출발지 제한을 완화하지 않음
 - 예상하지 못한 Setup 실패가 안전한 단계·범주와 제한된 시간으로 기록되며 예외 원문·경로·
   PID를 노출하거나 성공으로 처리하지 않음
 - 로컬 준비 상태 실패가 `HTTPS_TLS_FAILED`, `HTTPS_REQUEST_TIMEOUT`,
@@ -140,7 +140,7 @@ python .\tools\build-user-manual.py `
 python .\tools\render-user-manual-pdf.py `
   --input .\docs\SamsungSwitchWatch_User_Manual_KO.docx `
   --output .\docs\SamsungSwitchWatch_User_Manual_KO.pdf `
-  --render-dir .\tmp\manual-render-0.10.16
+  --render-dir .\tmp\manual-render-0.11.0
 ```
 
 DOCX는 저장소 편집 원본이고 공개 패키지에는 넣지 않습니다. PDF는 두 ZIP에 포함합니다.
@@ -149,13 +149,13 @@ QA 페이지 PNG는 시각 검사 후 임시 폴더에만 두며 커밋하지 �
 ## 로컬 패키지 생성
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.16-poc
+.\scripts\build-release.ps1 -Version 0.11.0-poc
 ```
 
 진단용 dirty 빌드는 게시하지 않습니다.
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.10.16-poc -AllowDirty
+.\scripts\build-release.ps1 -Version 0.11.0-poc -AllowDirty
 ```
 
 빌드 스크립트는 다음 순서로 실행됩니다.
@@ -186,7 +186,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.16_POC_KO.md
+RELEASE_NOTES_0.11.0_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -212,7 +212,7 @@ vcruntime140_cor3.dll
 wpfgfx_cor3.dll
 INSTALL_KO.md
 SamsungSwitchWatch_User_Manual_KO.pdf
-RELEASE_NOTES_0.10.16_POC_KO.md
+RELEASE_NOTES_0.11.0_POC_KO.md
 BUILD-MANIFEST.json
 SBOM.spdx.json
 SBOM.cdx.json
@@ -229,7 +229,7 @@ Viewer는 설치하지 않고 압축 해제한 폴더에서 EXE를 직접 실행
 $commit = (git rev-parse HEAD).Trim()
 .\scripts\test-package-contract.ps1 `
   -ReleaseDirectory .\artifacts\release `
-  -Version 0.10.16-poc `
+  -Version 0.11.0-poc `
   -ExpectedSourceCommit $commit
 .\scripts\test-release-workflow-contract.ps1
 ```
@@ -239,7 +239,7 @@ $commit = (git rev-parse HEAD).Trim()
 ```powershell
 .\scripts\test-release-executable-smoke.ps1 `
   -ReleaseDirectory .\artifacts\release `
-  -Version 0.10.16-poc
+  -Version 0.11.0-poc
 ```
 
 검사는 다음 조건을 fail-closed로 확인합니다.
@@ -262,8 +262,8 @@ $commit = (git rev-parse HEAD).Trim()
 ## 태그와 게시
 
 ```powershell
-git tag -a v0.10.16-poc -m "Samsung Switch Watch v0.10.16-poc"
-git push origin v0.10.16-poc
+git tag -a v0.11.0-poc -m "Samsung Switch Watch v0.11.0-poc"
+git push origin v0.11.0-poc
 ```
 
 Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객체와 peeled commit이
@@ -276,10 +276,10 @@ Release workflow는 태그가 `origin/main`에 포함되고 annotated tag의 객
 ## 게시 후 확인
 
 ```powershell
-$tag = 'v0.10.16-poc'
+$tag = 'v0.11.0-poc'
 $expected = @(
-  'SamsungSwitchWatch-Agent-0.10.16-poc-win-x64.zip',
-  'SamsungSwitchWatch-Viewer-0.10.16-poc-win-x64.zip'
+  'SamsungSwitchWatch-Agent-0.11.0-poc-win-x64.zip',
+  'SamsungSwitchWatch-Viewer-0.11.0-poc-win-x64.zip'
 ) | Sort-Object
 $release = gh release view $tag --json isDraft,isPrerelease,assets,url | ConvertFrom-Json
 $actual = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
@@ -291,5 +291,6 @@ foreach ($name in $expected) {
 }
 ```
 
-현장에는 공식 Release의 두 ZIP만 전달합니다. Agent를 먼저 업데이트하고 Setup 검사 성공을
-확인한 뒤 같은 Release의 Viewer를 실행합니다.
+현장에는 공식 Release의 두 ZIP만 전달합니다. Agent를 먼저 설치 또는 업데이트한 뒤 Viewer의
+`Agent 연결 테스트`로 연결을 확인하고, 같은 Release의 Viewer를 사용합니다. Setup이 연결 확인
+경고를 표시해도 Agent 서비스 설치는 유지되므로 Viewer 진단 결과를 기준으로 판단합니다.

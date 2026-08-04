@@ -17,6 +17,23 @@ public static class SetupConstants
     public const string AgentExecutableName = "SamsungSwitchWatch.Agent.exe";
     public const string SetupExecutableName = "SamsungSwitchWatch.Agent.Setup.exe";
     public const string ManifestFileName = "BUILD-MANIFEST.json";
+    public const string LegacyAllowedViewerIpv4 = "127.0.0.1";
+    public const string PrivateNetworkFirewallRemoteAddresses =
+        "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+    public static IReadOnlyList<string> PrivateNetworkTargetCidrs { get; } =
+        ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
+
+    public static SetupRequest CreateAutomaticRequest() =>
+        new(LegacyAllowedViewerIpv4, PrivateNetworkTargetCidrs);
+
+    public static bool IsAutomaticRequest(SetupRequest request) =>
+        string.Equals(
+            request.ViewerIpv4,
+            LegacyAllowedViewerIpv4,
+            StringComparison.Ordinal) &&
+        request.TargetCidrs.SequenceEqual(
+            PrivateNetworkTargetCidrs,
+            StringComparer.Ordinal);
 }
 
 public static class SetupErrorCodes
@@ -37,6 +54,8 @@ public static class SetupErrorCodes
     public const string FirewallFailed = "SETUP_FIREWALL_FAILED";
     public const string FirewallRemoteAccessUnconfirmed =
         "FIREWALL_REMOTE_ACCESS_UNCONFIRMED";
+    public const string AgentLocalConnectionUnconfirmed =
+        "AGENT_LOCAL_CONNECTION_UNCONFIRMED";
     public const string HealthFailed = "SETUP_HEALTH_FAILED";
     public const string RollbackFailed = "SETUP_ROLLBACK_FAILED";
     public const string RecoveryRequired = "SETUP_RECOVERY_REQUIRED";

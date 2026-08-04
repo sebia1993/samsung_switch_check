@@ -157,17 +157,17 @@ public sealed class MockStatelessTelnetExecutor(TimeProvider? timeProvider = nul
 
 public sealed class TargetNetworkPolicy
 {
-    private readonly Ipv4Cidr[] _networks;
+    private static readonly Ipv4Cidr[] AutomaticPrivateNetworks =
+        AgentOptions.AutomaticPrivateNetworkCidrs
+            .Select(value => Ipv4Cidr.TryParse(value, out var cidr)
+                ? cidr
+                : throw new InvalidOperationException(
+                    "The built-in private target policy is invalid."))
+            .ToArray();
 
     public TargetNetworkPolicy(AgentOptions options)
     {
-        _networks = options.AllowedTargetCidrs
-            .Select(value => Ipv4Cidr.TryParse(value, out var cidr)
-                ? cidr
-                : throw new AgentConfigurationException(
-                    AgentErrorCodes.ConfigurationInvalid,
-                    "Allowed target CIDR is invalid."))
-            .ToArray();
+        ArgumentNullException.ThrowIfNull(options);
     }
 
     public bool TryValidate(string? host, int port, out IPAddress address)
@@ -176,7 +176,7 @@ public sealed class TargetNetworkPolicy
         if (port != 23 ||
             !Ipv4Cidr.TryParseStrictAddress(host, out var parsed) ||
             Ipv4Cidr.IsForbiddenTarget(parsed) ||
-            !_networks.Any(network => network.Contains(parsed)))
+            !AutomaticPrivateNetworks.Any(network => network.Contains(parsed)))
         {
             return false;
         }

@@ -22,39 +22,45 @@ public sealed class StatelessAgentSecurityTests
     public void CidrParser_RequiresCanonicalIpv4Network(string value, bool expected) =>
         Assert.Equal(expected, Ipv4Cidr.TryParse(value, out _));
 
-    [Fact]
-    public void TargetPolicy_AllowsOnlyConfiguredNetworkAndPort23()
+    [Theory]
+    [InlineData("10.10.20.25")]
+    [InlineData("172.16.0.1")]
+    [InlineData("172.31.255.254")]
+    [InlineData("192.168.20.25")]
+    public void TargetPolicy_AllowsBuiltInRfc1918NetworksOnPort23(string target)
     {
         var options = new AgentOptions
         {
-            AllowedTargetCidrs = ["10.10.20.0/24"]
+            AllowedTargetCidrs = ["203.0.113.0/24"]
         };
         var policy = new TargetNetworkPolicy(options);
 
-        Assert.True(policy.TryValidate("10.10.20.25", 23, out var address));
-        Assert.Equal("10.10.20.25", address.ToString());
-        Assert.False(policy.TryValidate("10.10.21.25", 23, out _));
-        Assert.False(policy.TryValidate("10.10.20.25", 2323, out _));
-        Assert.False(policy.TryValidate("010.10.20.25", 23, out _));
+        Assert.True(policy.TryValidate(target, 23, out var address));
+        Assert.Equal(target, address.ToString());
     }
 
     [Theory]
-    [InlineData("0.0.0.1")]
-    [InlineData("127.0.0.1")]
-    [InlineData("169.254.10.20")]
-    [InlineData("224.0.0.1")]
-    [InlineData("239.255.255.250")]
-    [InlineData("240.0.0.1")]
-    [InlineData("255.255.255.255")]
-    public void TargetPolicy_RejectsSpecialUseTargetsEvenWithCatchAllCidr(
-        string target)
+    [InlineData("192.0.2.10", 23)]
+    [InlineData("8.8.8.8", 23)]
+    [InlineData("192.168.20.25", 2323)]
+    [InlineData("0192.168.20.25", 23)]
+    [InlineData("0.0.0.1", 23)]
+    [InlineData("127.0.0.1", 23)]
+    [InlineData("169.254.10.20", 23)]
+    [InlineData("224.0.0.1", 23)]
+    [InlineData("239.255.255.250", 23)]
+    [InlineData("240.0.0.1", 23)]
+    [InlineData("255.255.255.255", 23)]
+    public void TargetPolicy_RejectsPublicSpecialOrNonTelnetTargets(
+        string target,
+        int port)
     {
         var policy = new TargetNetworkPolicy(new AgentOptions
         {
             AllowedTargetCidrs = ["0.0.0.0/0"]
         });
 
-        Assert.False(policy.TryValidate(target, 23, out _));
+        Assert.False(policy.TryValidate(target, port, out _));
     }
 
     [Fact]

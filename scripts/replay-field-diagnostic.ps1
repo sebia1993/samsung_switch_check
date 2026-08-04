@@ -647,6 +647,8 @@ function Get-SswAgentV2ErrorCodes {
         'SETUP_CONFIGURATION_INVALID',
         'SETUP_SERVICE_FAILED',
         'SETUP_FIREWALL_FAILED',
+        'FIREWALL_REMOTE_ACCESS_UNCONFIRMED',
+        'AGENT_LOCAL_CONNECTION_UNCONFIRMED',
         'SETUP_HEALTH_FAILED',
         'SETUP_ROLLBACK_FAILED',
         'SETUP_RECOVERY_REQUIRED',
@@ -737,10 +739,14 @@ function Resolve-SswAgentV2Action {
     if ($ErrorCode -ceq 'SETUP_SERVICE_FAILED') {
         return 'CHECK_WINDOWS_SERVICE'
     }
-    if ($ErrorCode -ceq 'SETUP_FIREWALL_FAILED') {
+    if ($ErrorCode -cin @(
+            'SETUP_FIREWALL_FAILED',
+            'FIREWALL_REMOTE_ACCESS_UNCONFIRMED')) {
         return 'CHECK_FIREWALL_POLICY'
     }
-    if ($ErrorCode -ceq 'SETUP_HEALTH_FAILED') {
+    if ($ErrorCode -cin @(
+            'SETUP_HEALTH_FAILED',
+            'AGENT_LOCAL_CONNECTION_UNCONFIRMED')) {
         return 'CHECK_AGENT_READINESS'
     }
     if ($ErrorCode -cin @(
@@ -882,11 +888,13 @@ function Assert-SswAgentSetupV2Schema {
         'UPDATE',
         'NOT_INSTALLED',
         'CONFIGURED',
+        'NOT_CONFIRMED',
         'FAIL'
     )
     Assert-SswAllowedToken -Value $state[4] `
         -Allowed @('PASS', 'PASS_OBSERVED', 'NOT_CONFIRMED', 'NOT_RUN')
-    Assert-SswAllowedToken -Value $state[5] -Allowed @('PASS', 'FAIL', 'NOT_RUN')
+    Assert-SswAllowedToken -Value $state[5] `
+        -Allowed @('PASS', 'FAIL', 'NOT_CONFIRMED', 'NOT_RUN')
 
     $health = $Values.Health -csplit '\|'
     if ($health.Count -ne 4) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
@@ -951,7 +959,10 @@ function Assert-SswAgentSetupV2Schema {
     }
 
     if ($run[1] -ceq 'SUCCESS') {
-        if ($Values.ErrorCode -cne 'OK' -or
+        if ($Values.ErrorCode -cnotin @(
+                'OK',
+                'AGENT_LOCAL_CONNECTION_UNCONFIRMED',
+                'FIREWALL_REMOTE_ACCESS_UNCONFIRMED') -or
             $Values.FailedStage -cne 'NONE' -or
             $failure[0] -cne 'NONE' -or
             $failure[1] -cne 'NOT_RUN' -or
@@ -1150,6 +1161,10 @@ function Resolve-SswFieldDiagnosticScenario {
             'AgentDeploymentOrchestratorTests.DeployAsync_FirewallVerificationTimeoutKeepsReadyAgentAndWarns'
         'AGENT_SETUP|SETUP_HEALTH_FAILED|READINESS' =
             'AgentDeploymentOrchestratorTests.DeployAsync_HealthFailureRestoresUpgradeFilesServiceFirewallAndIdentity'
+        'AGENT_SETUP|AGENT_LOCAL_CONNECTION_UNCONFIRMED|NONE' =
+            'AgentDeploymentOrchestratorTests.DeployAsync_AutomaticRequest_HealthFailureKeepsInstalledServiceAndWarns'
+        'AGENT_SETUP|FIREWALL_REMOTE_ACCESS_UNCONFIRMED|NONE' =
+            'AgentDeploymentOrchestratorTests.DeployAsync_AutomaticRequest_FirewallFailureKeepsInstalledServiceAndWarns'
         'AGENT_SETUP|SETUP_RECOVERY_REQUIRED|RECOVERY_JOURNAL' =
             'AgentDeploymentOrchestratorTests.DeployAsync_RefusesPendingBackupUntilExplicitRecovery'
         'AGENT_SETUP|SETUP_ROLLBACK_FAILED|RECOVERY' =
@@ -1169,7 +1184,7 @@ function Resolve-SswFieldDiagnosticScenario {
         'VIEWER|AGENT_RESPONSE_INVALID|IDENTITY' =
             'AgentConnectionProbeTests.ProbeAsync_InvalidApiAfterTlsIsReportedAtIdentityStage'
         'VIEWER|AGENT_VERSION_MISMATCH|IDENTITY' =
-            'AgentConnectionProbeTests.ProbeAsync_ProductVersionMismatchFailsClosedAtIdentityStage'
+            'AgentConnectionProbeTests.ProbeAsync_ProductVersionMismatchConnectsWithWarningWhenApiV4IsCompatible'
         'VIEWER|VIEWER_SETTINGS_WRITE_FAILED|SETTINGS' =
             'ViewerSettingsTests.SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow'
     }

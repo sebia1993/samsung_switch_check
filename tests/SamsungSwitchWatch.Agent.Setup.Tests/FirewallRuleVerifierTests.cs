@@ -6,6 +6,37 @@ namespace SamsungSwitchWatch.Agent.Setup.Tests;
 public sealed class FirewallRuleVerifierTests
 {
     [Theory]
+    [InlineData("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")]
+    [InlineData("192.168.0.0/255.255.0.0,10.0.0.0/255.0.0.0,172.16.0.0/255.240.0.0")]
+    public void EvaluatePrivateNetworks_AcceptsExactRfc1918Set(string remoteAddresses)
+    {
+        var result = FirewallRuleVerifier.EvaluatePrivateNetworks(
+            ExactRule(remoteAddresses),
+            SetupConstants.HttpsPort);
+
+        Assert.True(result.IsExact);
+        Assert.Null(result.MismatchCode);
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/8,192.168.0.0/16")]
+    [InlineData("10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,192.0.2.0/24")]
+    [InlineData("Any")]
+    [InlineData("LocalSubnet")]
+    public void EvaluatePrivateNetworks_RejectsMissingExtraAndBroadScopes(
+        string remoteAddresses)
+    {
+        var result = FirewallRuleVerifier.EvaluatePrivateNetworks(
+            ExactRule(remoteAddresses),
+            SetupConstants.HttpsPort);
+
+        Assert.False(result.IsExact);
+        Assert.Equal(
+            FirewallRuleMismatchCodes.RemoteAddress,
+            result.MismatchCode);
+    }
+
+    [Theory]
     [InlineData("192.168.1.20")]
     [InlineData("192.168.1.20/32")]
     [InlineData("192.168.1.20/255.255.255.255")]
@@ -129,6 +160,40 @@ public sealed class FirewallRuleVerifierTests
                     ExactRule(readback),
                     SetupConstants.HttpsPort,
                     "192.168.1.20").IsExact);
+        }
+        finally
+        {
+            if (ruleObject is not null && Marshal.IsComObject(ruleObject))
+            {
+                Marshal.FinalReleaseComObject(ruleObject);
+            }
+        }
+    }
+
+    [Fact]
+    public void EvaluatePrivateNetworks_AcceptsWindowsFirewallComReadbackWithoutRegisteringRule()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var ruleType = Type.GetTypeFromProgID("HNetCfg.FWRule");
+        Assert.NotNull(ruleType);
+        object? ruleObject = null;
+        try
+        {
+            ruleObject = Activator.CreateInstance(ruleType);
+            Assert.NotNull(ruleObject);
+            dynamic rule = ruleObject;
+            rule.RemoteAddresses =
+                SetupConstants.PrivateNetworkFirewallRemoteAddresses;
+            var readback = (string)rule.RemoteAddresses;
+
+            Assert.True(
+                FirewallRuleVerifier.EvaluatePrivateNetworks(
+                    ExactRule(readback),
+                    SetupConstants.HttpsPort).IsExact);
         }
         finally
         {

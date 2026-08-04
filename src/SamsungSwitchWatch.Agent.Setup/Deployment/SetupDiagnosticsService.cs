@@ -46,8 +46,8 @@ public sealed class SetupDiagnosticsService(
             ValidateInput(request);
             steps.Add(Success(
                 "INPUT_VALID",
-                "입력 확인",
-                "Viewer IP와 관리망 선택·추가가 올바릅니다."));
+                "기본 연결 범위",
+                "사설 Viewer 대역과 사설 스위치 관리망 기본값을 사용합니다."));
 
             steps.MarkActiveStage(SetupFailureStage.PackageValidation);
             var package = packageValidator.Validate(paths.PackageDirectory);
@@ -82,14 +82,19 @@ public sealed class SetupDiagnosticsService(
                     "FIREWALL_GATE_READY",
                     "방화벽 보안",
                     firewallAssessment.Warnings.Count == 0
-                        ? "Windows 방화벽 기본 차단과 Viewer 전용 규칙 적용 조건이 정상입니다."
-                        : "필수 방화벽 보안 조건은 정상입니다. 다른 허용 규칙은 유지하고 Agent에서 Viewer IP를 추가로 제한합니다."));
+                        ? "Windows 방화벽 기본 차단과 사설 Viewer 대역 규칙 적용 조건이 정상입니다."
+                        : "필수 방화벽 보안 조건은 정상입니다. 다른 허용 규칙은 유지하고 Agent에서도 loopback과 RFC1918 Viewer 출발지만 허용합니다."));
 
                 var firewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
-                var firewallVerification = FirewallRuleVerifier.Evaluate(
-                    firewall,
-                    SetupConstants.HttpsPort,
-                    request.ViewerIpv4);
+                var automaticRequest = SetupConstants.IsAutomaticRequest(request);
+                var firewallVerification = automaticRequest
+                    ? FirewallRuleVerifier.EvaluatePrivateNetworks(
+                        firewall,
+                        SetupConstants.HttpsPort)
+                    : FirewallRuleVerifier.Evaluate(
+                        firewall,
+                        SetupConstants.HttpsPort,
+                        request.ViewerIpv4);
                 var exactFirewall = firewallVerification.IsExact;
                 steps.AddSafeDecisionCode(firewallVerification.MismatchCode);
                 steps.Add(new SetupStepResult(
@@ -101,13 +106,19 @@ public sealed class SetupDiagnosticsService(
                     "방화벽 상태",
                     exactFirewall ? SetupStepState.Succeeded : SetupStepState.Information,
                     exactFirewall
-                        ? $"Viewer {request.ViewerIpv4}/32 전용 HTTPS/18443 규칙이 정확합니다."
+                        ? automaticRequest
+                            ? "사설 Viewer 대역용 HTTPS/18443 규칙이 정확합니다."
+                            : $"Viewer {request.ViewerIpv4}/32 전용 HTTPS/18443 규칙이 정확합니다."
                         : firewall.Exists
-                            ? "현재 규칙이 입력한 Viewer /32 또는 HTTPS/18443과 다릅니다. 설치/업데이트 시 안전한 규칙으로 교체합니다."
-                            : "설치 시 Viewer 전용 방화벽 규칙을 만듭니다."));
+                            ? "현재 제품 소유 규칙이 기본 사설 대역 또는 HTTPS/18443과 다릅니다. 설치/업데이트 시 교체를 시도합니다."
+                            : "설치 시 사설 Viewer 대역용 방화벽 규칙 생성을 시도합니다."));
             }
-            catch (SetupException exception) when (
-                exception.Code == SetupErrorCodes.FirewallFailed)
+            catch (Exception exception) when (
+                SetupConstants.IsAutomaticRequest(request) ||
+                exception is SetupException
+                {
+                    Code: SetupErrorCodes.FirewallFailed
+                })
             {
                 steps.AddSafeDecisionCode(
                     SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
@@ -115,7 +126,7 @@ public sealed class SetupDiagnosticsService(
                     SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
                     "원격 Viewer 연결",
                     SetupStepState.Warning,
-                    "방화벽 정책이나 현재 규칙을 확인하지 못했습니다. 사전 점검은 계속할 수 있지만 설치 후 원격 Viewer 연결을 별도로 확인해야 합니다."));
+                    "방화벽 정책이나 현재 규칙을 확인하지 못했습니다. 설치는 계속할 수 있으며 완료 후 Viewer에서 연결 상태를 확인하세요."));
             }
 
             steps.Add(new SetupStepResult(
@@ -195,6 +206,15 @@ public sealed class SetupDiagnosticsService(
 
     internal static void ValidateInput(SetupRequest request)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        if (SetupConstants.IsAutomaticRequest(request))
+        {
+            return;
+        }
+
+        // Keep the legacy request shape valid for transactional recovery and
+        // older internal callers. The public Setup UI always uses the automatic
+        // request above and no longer exposes these values.
         if (!Ipv4Input.TryParseStrict(request.ViewerIpv4, out var viewer) ||
             !Ipv4Input.IsPrivate(viewer))
         {
@@ -204,7 +224,7 @@ public sealed class SetupDiagnosticsService(
         }
 
         if (request.TargetCidrs.Count is < 1 or > 2 ||
-            request.TargetCidrs.Any(cidr => !IsCanonicalPrivateCidr(cidr)) ||
+            request.TargetCidrs.Any(cidr => !Ipv4Input.IsCanonicalPrivateCidr(cidr)) ||
             request.TargetCidrs.Distinct(StringComparer.Ordinal).Count() !=
                 request.TargetCidrs.Count)
         {
@@ -213,9 +233,6 @@ public sealed class SetupDiagnosticsService(
                 "스위치가 연결된 사설 관리망을 1~2개 선택하거나 추가하세요.");
         }
     }
-
-    private static bool IsCanonicalPrivateCidr(string value) =>
-        Ipv4Input.IsCanonicalPrivateCidr(value);
 
     private static SetupStepResult Success(string code, string label, string message) =>
         new(code, label, SetupStepState.Succeeded, message);

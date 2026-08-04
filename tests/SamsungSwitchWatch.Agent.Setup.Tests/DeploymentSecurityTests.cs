@@ -30,6 +30,31 @@ public sealed class DeploymentSecurityTests
     }
 
     [Fact]
+    public void FreshDataDirectoryAdoption_AcceptsOnlyExistingEmptyDirectory()
+    {
+        using var folder = new TemporaryFolder();
+
+        Assert.True(PhysicalSetupFileSystem.IsEmptyNonReparseDirectory(folder.Path));
+
+        var filePath = Path.Combine(folder.Path, "unexpected.txt");
+        File.WriteAllText(filePath, "unexpected");
+        Assert.False(PhysicalSetupFileSystem.IsEmptyNonReparseDirectory(folder.Path));
+
+        File.Delete(filePath);
+        Directory.CreateDirectory(Path.Combine(folder.Path, "unexpected-child"));
+        Assert.False(PhysicalSetupFileSystem.IsEmptyNonReparseDirectory(folder.Path));
+    }
+
+    [Fact]
+    public void FreshDataDirectoryAdoption_RejectsMissingDirectory()
+    {
+        using var folder = new TemporaryFolder();
+        var missing = Path.Combine(folder.Path, "missing");
+
+        Assert.False(PhysicalSetupFileSystem.IsEmptyNonReparseDirectory(missing));
+    }
+
+    [Fact]
     public void IsAllowedOwner_RequiresExplicitTrustedOwner()
     {
         var administrators =

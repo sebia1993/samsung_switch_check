@@ -37,7 +37,7 @@ internal sealed class TestAgentHost : IAsyncDisposable
             ["Agent:ListenUrl"] = "http://127.0.0.1:0",
             ["Agent:DataDirectory"] = folder,
             ["Agent:MockMode"] = "true",
-            ["Agent:AllowedTargetCidrs:0"] = "192.0.2.0/24"
+            ["Agent:AllowedTargetCidrs:0"] = "192.168.0.0/16"
         };
         if (additionalOverrides is not null)
         {

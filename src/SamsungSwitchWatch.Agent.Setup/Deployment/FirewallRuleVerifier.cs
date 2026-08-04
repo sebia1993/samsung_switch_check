@@ -95,6 +95,116 @@ internal static class FirewallRuleVerifier
         return FirewallRuleVerificationResult.Exact;
     }
 
+    public static FirewallRuleVerificationResult EvaluatePrivateNetworks(
+        FirewallRuleSnapshot snapshot,
+        int port)
+    {
+        var structural = EvaluateStructure(snapshot, port);
+        if (!structural.IsExact)
+        {
+            return structural;
+        }
+
+        if (!HasExactPrivateNetworkSet(snapshot.RemoteAddresses))
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.RemoteAddress);
+        }
+
+        return FirewallRuleVerificationResult.Exact;
+    }
+
+    private static FirewallRuleVerificationResult EvaluateStructure(
+        FirewallRuleSnapshot snapshot,
+        int port)
+    {
+        if (!snapshot.Exists)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Missing);
+        }
+
+        if (!snapshot.Enabled)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Disabled);
+        }
+
+        if (snapshot.Direction != NetFwRuleDirectionIn)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Direction);
+        }
+
+        if (snapshot.Action != NetFwActionAllow)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Action);
+        }
+
+        if (snapshot.Protocol != TcpProtocol)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Protocol);
+        }
+
+        if (!string.Equals(
+                snapshot.LocalPorts,
+                port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                StringComparison.Ordinal))
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.LocalPort);
+        }
+
+        if (snapshot.Profiles != NetFwProfileDomainAndPrivate)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.Profiles);
+        }
+
+        if (snapshot.EdgeTraversal)
+        {
+            return FirewallRuleVerificationResult.Mismatch(
+                FirewallRuleMismatchCodes.EdgeTraversal);
+        }
+
+        return FirewallRuleVerificationResult.Exact;
+    }
+
+    private static bool HasExactPrivateNetworkSet(string? remoteAddresses)
+    {
+        if (string.IsNullOrWhiteSpace(remoteAddresses))
+        {
+            return false;
+        }
+
+        var actual = remoteAddresses
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizePrivateNetworkToken)
+            .ToArray();
+        return actual.All(value => value is not null) &&
+               actual.Length == SetupConstants.PrivateNetworkTargetCidrs.Count &&
+               actual!
+                   .Cast<string>()
+                   .ToHashSet(StringComparer.Ordinal)
+                   .SetEquals(SetupConstants.PrivateNetworkTargetCidrs);
+    }
+
+    private static string? NormalizePrivateNetworkToken(string value)
+    {
+        var normalized = value switch
+        {
+            "10.0.0.0/255.0.0.0" => "10.0.0.0/8",
+            "172.16.0.0/255.240.0.0" => "172.16.0.0/12",
+            "192.168.0.0/255.255.0.0" => "192.168.0.0/16",
+            _ => value
+        };
+        return Ipv4Input.TryNormalizePrivateCidr(normalized, out var canonical)
+            ? canonical
+            : null;
+    }
+
     private static bool IsExactSingleViewerAddress(
         string? remoteAddresses,
         string viewerIpv4)

@@ -2115,7 +2115,7 @@ public sealed class ViewerManagedDeviceTests
     }
 
     [Fact]
-    public void CertificateTrust_IsAutomaticAndBlocksChangedAgentKey()
+    public void CertificateTrust_IsAutomaticAndAcceptsEphemeralAgentKeyChanges()
     {
         using var firstKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         using var secondKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -2127,12 +2127,11 @@ public sealed class ViewerManagedDeviceTests
         Assert.True(initial.Validate(new HttpRequestMessage(), first, null, SslPolicyErrors.RemoteCertificateChainErrors));
         var firstPin = CertificatePinValidator.GetSpkiSha256(first);
         Assert.True(initial.CompleteTrust(firstPin));
-        Assert.True(settings.TryGetAgentTrustPin(out var stored));
-        Assert.Equal(firstPin, stored);
+        Assert.Empty(settings.AgentTrustPins);
 
         var changed = new CertificatePinValidator(settings);
-        Assert.False(changed.Validate(new HttpRequestMessage(), second, null, SslPolicyErrors.None));
-        Assert.True(changed.IdentityChanged);
+        Assert.True(changed.Validate(new HttpRequestMessage(), second, null, SslPolicyErrors.None));
+        Assert.False(changed.IdentityChanged);
     }
 
     [Fact]

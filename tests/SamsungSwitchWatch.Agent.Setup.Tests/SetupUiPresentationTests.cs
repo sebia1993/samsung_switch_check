@@ -59,6 +59,41 @@ public sealed class SetupUiPresentationTests
     }
 
     [Fact]
+    public void InstallCompletion_LocalConnectionWarningKeepsInstallCompleted()
+    {
+        var result = SetupOperationResult.Success(
+            "installed with warning",
+            [
+                new SetupStepResult(
+                    "PACKAGE_VALID",
+                    "package",
+                    SetupStepState.Succeeded,
+                    "valid"),
+                new SetupStepResult(
+                    "SERVICE_CONFIGURED",
+                    "service",
+                    SetupStepState.Succeeded,
+                    "configured"),
+                new SetupStepResult(
+                    SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+                    "Agent 연결 확인",
+                    SetupStepState.Warning,
+                    "not confirmed")
+            ]);
+
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+
+        Assert.Equal(
+            SetupInstallCompletionSeverity.Warning,
+            completion.Severity);
+        Assert.Equal("설치 완료 · 연결 확인 필요", completion.StatusText);
+        Assert.Contains(
+            "Agent는 설치되어 실행 중",
+            completion.GuidanceText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InstallCompletion_LocalHttpsFailureRemainsInstallationFailure()
     {
         var result = SetupOperationResult.Failure(
@@ -847,6 +882,98 @@ public sealed class SetupUiPresentationTests
             text);
         Assert.Contains(
             "Health=NOT_RUN|FTT|1|READINESS_VALIDATED",
+            text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_SuccessWithLocalConnectionWarningKeepsWarningEvidence()
+    {
+        var result = SetupOperationResult.Success(
+            "installed with warning",
+            [
+                new SetupStepResult(
+                    "PACKAGE_VALID",
+                    "package",
+                    SetupStepState.Succeeded,
+                    "valid"),
+                new SetupStepResult(
+                    "SERVICE_CONFIGURED",
+                    "service",
+                    SetupStepState.Succeeded,
+                    "configured"),
+                new SetupStepResult(
+                    SetupErrorCodes.AgentLocalConnectionUnconfirmed,
+                    "Agent connection",
+                    SetupStepState.Warning,
+                    "not confirmed")
+            ]) with
+        {
+            AgentHealthCode = AgentHealthProbeCode.HttpsRequestTimeout.ToString(),
+            AgentServiceRunningObserved = true,
+            AgentHttpAttemptCount = 2,
+            AgentLastTransportPhase = AgentHealthTransportPhase.RequestStarted
+        };
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.11.0-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.FromSeconds(60),
+                result,
+                PendingRecoveryInspection.None));
+
+        AssertCompactFieldDiagnostic(text);
+        Assert.Contains("Run=INSTALL|SUCCESS|60000", text);
+        Assert.Contains("FailedStage=NONE", text);
+        Assert.Contains(
+            $"ErrorCode={SetupErrorCodes.AgentLocalConnectionUnconfirmed}",
+            text);
+        Assert.Contains("Failure=NONE|NOT_RUN|unknown", text);
+        Assert.Contains("Action=CHECK_AGENT_READINESS", text);
+        Assert.Contains(
+            "State=PASS|NONE|CONFIGURED|NONE|NOT_CONFIRMED|NOT_CONFIRMED",
+            text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_SuccessWithFirewallWarningKeepsWarningEvidence()
+    {
+        var result = SetupOperationResult.Success(
+            "installed with warning",
+            [
+                new SetupStepResult(
+                    "SERVICE_CONFIGURED",
+                    "service",
+                    SetupStepState.Succeeded,
+                    "configured"),
+                new SetupStepResult(
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+                    "firewall",
+                    SetupStepState.Warning,
+                    "not confirmed")
+            ]);
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.11.0-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.Zero,
+                result,
+                PendingRecoveryInspection.None));
+
+        AssertCompactFieldDiagnostic(text);
+        Assert.Contains(
+            $"ErrorCode={SetupErrorCodes.FirewallRemoteAccessUnconfirmed}",
+            text);
+        Assert.Contains("Action=CHECK_FIREWALL_POLICY", text);
+        Assert.Contains(
+            "State=NOT_RUN|NONE|CONFIGURED|NOT_CONFIRMED|NOT_RUN|NOT_RUN",
             text);
     }
 

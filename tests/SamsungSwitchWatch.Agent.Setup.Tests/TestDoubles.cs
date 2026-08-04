@@ -333,6 +333,7 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public int RestoreFailuresRemaining { get; set; }
     public Exception? CaptureException { get; set; }
     public Exception? StartException { get; set; }
+    public Action? StartCompleted { get; set; }
     private int StopCallCount { get; set; }
 
     public void SetState(ServiceSnapshot state) =>
@@ -422,6 +423,7 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
 
         State = State with { Running = true };
         State = State with { ProcessId = 4321 };
+        StartCompleted?.Invoke();
     }
 
     public void Restore(string serviceName, ServiceSnapshot snapshot)
@@ -491,7 +493,10 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
             1,
             6,
             port.ToString(),
-            $"{viewerIpv4}/32",
+            viewerIpv4.Contains(',', StringComparison.Ordinal) ||
+            viewerIpv4.Contains('/', StringComparison.Ordinal)
+                ? viewerIpv4
+                : $"{viewerIpv4}/32",
             3,
             "All",
             false,
@@ -525,10 +530,17 @@ internal sealed class FakeFirewallManager(FirewallRuleSnapshot initial) : IFirew
     }
 
     public bool IsExactViewerRule(string ruleName, int port, string viewerIpv4) =>
-        FirewallRuleVerifier.Evaluate(
-            Capture(ruleName),
-            port,
-            viewerIpv4).IsExact;
+        string.Equals(
+                viewerIpv4,
+                SetupConstants.PrivateNetworkFirewallRemoteAddresses,
+                StringComparison.Ordinal)
+            ? FirewallRuleVerifier.EvaluatePrivateNetworks(
+                Capture(ruleName),
+                port).IsExact
+            : FirewallRuleVerifier.Evaluate(
+                Capture(ruleName),
+                port,
+                viewerIpv4).IsExact;
 
     public FirewallSecurityAssessment AssertSecurityGate(
         int port,

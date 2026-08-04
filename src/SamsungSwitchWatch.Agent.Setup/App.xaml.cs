@@ -25,9 +25,6 @@ public partial class App : Application
         var health = new HttpsAgentHealthProbe();
         var administrator = new WindowsAdministratorChecker();
         var package = new AgentPackageValidator(fileSystem);
-        var networks = new WindowsNetworkDiscovery();
-        var existingTargetNetworks =
-            new ExistingTargetNetworkLoader(fileSystem, paths).Load();
         var diagnostics = new SetupDiagnosticsService(
             package,
             fileSystem,
@@ -49,10 +46,7 @@ public partial class App : Application
         var diagnosticsOnly = e.Args.Any(argument =>
             string.Equals(argument, "--diagnostics", StringComparison.OrdinalIgnoreCase));
         var mainWindow =
-            new MainWindow(networks, diagnostics, deployment, diagnosticsOnly);
-        mainWindow.InitializeExistingTargetNetworks(
-            existingTargetNetworks.TargetCidrs,
-            existingTargetNetworks.Warning);
+            new MainWindow(diagnostics, deployment, diagnosticsOnly);
         MainWindow = mainWindow;
         mainWindow.Show();
     }

@@ -7,6 +7,279 @@ namespace SamsungSwitchWatch.Agent.Setup.Tests;
 public sealed class AgentDeploymentOrchestratorTests
 {
     [Fact]
+    public async Task DeployAsync_AutomaticRequest_HealthFailureKeepsInstalledServiceAndWarns()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+
+        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.AgentLocalConnectionUnconfirmed);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.Equal(
+            AgentHealthProbeCode.DeadlineExceeded.ToString(),
+            result.AgentHealthCode);
+        Assert.True(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.Equal(
+            "new-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.True(fixture.Services.State.Exists);
+        Assert.True(fixture.Services.State.Running);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+
+        var agent = JsonNode.Parse(
+            File.ReadAllText(fixture.Paths.ProductionConfigurationPath))!["Agent"]!;
+        Assert.Equal(
+            SetupConstants.LegacyAllowedViewerIpv4,
+            agent["AllowedViewerIpv4"]!.GetValue<string>());
+        Assert.Equal(
+            SetupConstants.PrivateNetworkTargetCidrs,
+            agent["AllowedTargetCidrs"]!
+                .AsArray()
+                .Select(value => value!.GetValue<string>())
+                .ToArray());
+        Assert.Equal(
+            SetupConstants.PrivateNetworkFirewallRemoteAddresses,
+            fixture.Firewall.State.RemoteAddresses);
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_UnexpectedHealthErrorIsWarning()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        var health = new FakeHealthProbe(
+            ready: false,
+            beforeResult: () => throw new TimeoutException("synthetic"));
+
+        var result = await fixture.CreateOrchestrator(health).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            AgentHealthProbeCode.ServiceInspectionFailed.ToString(),
+            result.AgentHealthCode);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.AgentLocalConnectionUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.True(fixture.Services.State.Running);
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_FirewallFailureKeepsInstalledServiceAndWarns()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.SecurityGateException = new SetupException(
+            SetupErrorCodes.FirewallFailed,
+            "synthetic");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.True(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.True(fixture.Services.State.Running);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_ServiceStartFailureStillRollsBack()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.StartException = new IOException("synthetic");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_CancellationBeforeCommitStillRollsBack()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Services.StartCompleted = cancellation.Cancel;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.False(fixture.Services.State.Exists);
+        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.DoesNotContain("recovery", fixture.Services.Operations);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_CancellationDuringReadinessKeepsCommittedService()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        using var cancellation = new CancellationTokenSource();
+        var health = new FakeHealthProbe(
+            ready: false,
+            beforeResult: () =>
+            {
+                cancellation.Cancel();
+                cancellation.Token.ThrowIfCancellationRequested();
+            });
+
+        var result = await fixture.CreateOrchestrator(health).DeployAsync(
+                SetupConstants.CreateAutomaticRequest(),
+                cancellation.Token)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        Assert.True(fixture.Services.State.Exists);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Equal("new-agent", File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+        Assert.Equal(0, fixture.FileSystem.BackupDirectoryCleanupAttempts);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.AgentLocalConnectionUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "BACKUP_CLEANUP_PENDING" &&
+                    step.State == SetupStepState.Warning);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+
+        var pending = new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Read();
+        Assert.Equal("committed", pending.Stage);
+        Assert.True(Directory.Exists(pending.BackupDirectory));
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_CancellationDuringFirewallRetryKeepsCommittedService()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
+        using var cancellation = new CancellationTokenSource();
+
+        var deployment = fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+        Assert.True(
+            fixture.Firewall.AppliedRuleCaptured.Wait(TimeSpan.FromSeconds(5)),
+            "Firewall verification retry did not start before the test deadline.");
+        cancellation.Cancel();
+
+        var result = await deployment.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        Assert.True(fixture.Services.State.Exists);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Contains("apply", fixture.Firewall.Operations);
+        Assert.Contains(
+            $"restore:{SetupConstants.FirewallRuleName}",
+            fixture.Firewall.Operations);
+        Assert.Equal(1, fixture.Firewall.AppliedRuleCaptureCount);
+        Assert.False(fixture.Firewall.State.Exists);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "BACKUP_CLEANUP_PENDING" &&
+                    step.State == SetupStepState.Warning);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+        Assert.Equal(
+            "committed",
+            new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Read().Stage);
+    }
+
+    [Fact]
+    public async Task DeployAsync_AutomaticRequest_CancellationDuringCleanupLeavesRecoveryEvidence()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.BackupDirectoryCleanupFailuresRemaining = 10;
+        using var cancellation = new CancellationTokenSource();
+
+        var deployment = fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => fixture.FileSystem.BackupDirectoryCleanupAttempts > 0,
+                TimeSpan.FromSeconds(5)),
+            "Committed backup cleanup did not start before the test deadline.");
+        cancellation.Cancel();
+
+        var result = await deployment.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        Assert.True(fixture.Services.State.Exists);
+        Assert.True(fixture.Services.State.Running);
+        Assert.DoesNotContain("restore", fixture.Services.Operations);
+        Assert.Equal(1, fixture.FileSystem.BackupDirectoryCleanupAttempts);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "BACKUP_CLEANUP_PENDING" &&
+                    step.State == SetupStepState.Warning);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+
+        var pending = new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Read();
+        Assert.Equal("committed", pending.Stage);
+        Assert.True(Directory.Exists(pending.BackupDirectory));
+    }
+
+    [Fact]
     public async Task DeployAsync_UpgradePreservesIdentityAndValidatedConfiguration()
     {
         using var folder = new TemporaryFolder();
@@ -2528,7 +2801,7 @@ public sealed class AgentDeploymentOrchestratorTests
             new FirewallSecurityWarning(
                 WindowsFirewallManager.FirewallOverlapWarningCode,
                 "TCP/18443을 허용하는 다른 인바운드 방화벽 규칙 1개가 있습니다. " +
-                "해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")
+                "해당 규칙은 변경하지 않으며 Agent는 loopback과 RFC1918 Viewer만 허용합니다.")
         ]);
 
     private static AgentDeploymentOrchestrator CreateOrchestratorWithFirewall(

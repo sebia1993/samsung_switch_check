@@ -11,6 +11,13 @@ public sealed class AgentOptions
     public const string SectionName = "Agent";
     public const int MaximumConcurrentExecutionLimit = 16;
     public const int MaximumCommandsPerRequestLimit = 8;
+    public static IReadOnlyList<string> AutomaticPrivateNetworkCidrs { get; } =
+        Array.AsReadOnly(new[]
+        {
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16"
+        });
     public static readonly IReadOnlySet<string> SupportedModels = new HashSet<string>(
         ["IES4224GP", "IES4028XP", "IES4226XP"], StringComparer.OrdinalIgnoreCase);
 
@@ -18,8 +25,14 @@ public sealed class AgentOptions
     public string ListenUrl { get; set; } = "https://0.0.0.0:18443";
     public string DataDirectory { get; set; } = "data";
     public bool MockMode { get; set; }
+    // Retained so v0.10 configuration files continue to bind during an
+    // in-place update. Runtime access no longer depends on a single Viewer IP.
     public string AllowedViewerIpv4 { get; set; } = string.Empty;
-    public List<string> AllowedTargetCidrs { get; set; } = [];
+
+    // Retained for configuration compatibility. Runtime target access is
+    // always normalized to the three RFC1918 networks below.
+    public List<string> AllowedTargetCidrs { get; set; } =
+        [.. AutomaticPrivateNetworkCidrs];
     public int MaxConcurrentExecutions { get; set; } = 2;
     public int RateLimitPerMinute { get; set; } = 60;
     public int MaxCommandsPerRequest { get; set; } = 8;
@@ -75,44 +88,11 @@ public static class AgentOptionsValidator
                 "Stateless execution limits are invalid.");
         }
 
-        if (options.AllowedTargetCidrs is null || options.AllowedTargetCidrs.Count == 0)
-        {
-            throw new AgentConfigurationException(
-                AgentErrorCodes.ConfigurationInvalid,
-                "At least one allowed IPv4 target CIDR is required.");
-        }
-
-        if (options.AllowedTargetCidrs.Any(cidr => !Ipv4Cidr.TryParse(cidr, out _)))
-        {
-            throw new AgentConfigurationException(
-                AgentErrorCodes.ConfigurationInvalid,
-                "Allowed target CIDRs must use canonical IPv4 CIDR notation.");
-        }
-
-        if (string.IsNullOrWhiteSpace(options.AllowedViewerIpv4))
-        {
-            if (!options.MockMode)
-            {
-                throw new AgentConfigurationException(
-                    AgentErrorCodes.ConfigurationInvalid,
-                    "A private IPv4 Viewer address is required.");
-            }
-
-            options.AllowedViewerIpv4 = string.Empty;
-        }
-        else if (!Ipv4Cidr.TryParseStrictAddress(
-                     options.AllowedViewerIpv4,
-                     out var viewerAddress) ||
-                 !IsPrivateAddress(viewerAddress))
-        {
-            throw new AgentConfigurationException(
-                AgentErrorCodes.ConfigurationInvalid,
-                "The allowed Viewer address must be one exact private IPv4 address.");
-        }
-        else
-        {
-            options.AllowedViewerIpv4 = viewerAddress.ToString();
-        }
+        // v0.10 accepted an exact Viewer IP and operator-selected target
+        // networks. v0.11 deliberately ignores both legacy authorities and
+        // applies one predictable private-network policy instead.
+        options.AllowedViewerIpv4 = string.Empty;
+        options.AllowedTargetCidrs = [.. AgentOptions.AutomaticPrivateNetworkCidrs];
 
         if (!Uri.TryCreate(options.ListenUrl, UriKind.Absolute, out var listenUri) ||
             !string.IsNullOrEmpty(listenUri.UserInfo) ||
@@ -146,18 +126,6 @@ public static class AgentOptionsValidator
         string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
         IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address);
 
-    private static bool IsPrivateAddress(IPAddress address)
-    {
-        if (address.AddressFamily != AddressFamily.InterNetwork)
-        {
-            return false;
-        }
-
-        var bytes = address.GetAddressBytes();
-        return bytes[0] == 10 ||
-               bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
-               bytes[0] == 192 && bytes[1] == 168;
-    }
 }
 
 public readonly record struct Ipv4Cidr(uint Network, int PrefixLength)
@@ -243,6 +211,19 @@ public readonly record struct Ipv4Cidr(uint Network, int PrefixLength)
         return bytes[0] is 0 or 127 ||
                bytes[0] == 169 && bytes[1] == 254 ||
                bytes[0] >= 224;
+    }
+
+    public static bool IsRfc1918Address(IPAddress address)
+    {
+        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 10 ||
+               bytes[0] == 172 && bytes[1] is >= 16 and <= 31 ||
+               bytes[0] == 192 && bytes[1] == 168;
     }
 
     private static uint PrefixMask(int prefix) =>

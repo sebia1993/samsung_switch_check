@@ -11,24 +11,19 @@ public partial class ConnectionSettingsWindow : Window
     private readonly ViewerSettings _original;
     private readonly Func<ViewerSettings, CancellationToken, Task> _applySettingsAsync;
     private readonly IAgentConnectionProbe _connectionProbe;
-    private readonly ILocalAgentPreflight _localAgentPreflight;
     private readonly ViewerFieldDiagnosticWriter _fieldDiagnosticWriter = new();
     private readonly CancellationTokenSource _lifetime = new();
-    private ViewerSettings? _identityMismatchCandidate;
-    private ViewerSettings? _localPreflightCandidate;
     private ViewerFieldDiagnosticSnapshot? _lastFieldDiagnostic;
     private AgentConnectionProbeResult? _lastDiagnosticProbeResult;
     private string _lastDiagnosticMode = "NORMAL";
     private int _lastDiagnosticCandidateCount;
-    private bool _settingDiscoveredAddress;
     private bool _addressTextInitialized;
-    private bool _localPreflightRunning;
     private bool _settingsApplied;
 
     public ConnectionSettingsWindow(
         ViewerSettings settings,
         Func<ViewerSettings, CancellationToken, Task> applySettingsAsync)
-        : this(settings, applySettingsAsync, new AgentConnectionProbe(), null)
+        : this(settings, applySettingsAsync, new AgentConnectionProbe())
     {
     }
 
@@ -36,33 +31,16 @@ public partial class ConnectionSettingsWindow : Window
         ViewerSettings settings,
         Func<ViewerSettings, CancellationToken, Task> applySettingsAsync,
         IAgentConnectionProbe connectionProbe)
-        : this(settings, applySettingsAsync, connectionProbe, null)
-    {
-    }
-
-    internal ConnectionSettingsWindow(
-        ViewerSettings settings,
-        Func<ViewerSettings, CancellationToken, Task> applySettingsAsync,
-        IAgentConnectionProbe connectionProbe,
-        ILocalAgentPreflight? localAgentPreflight)
     {
         InitializeComponent();
         _original = ViewerSettingsSanitizer.Copy(settings);
         _applySettingsAsync = applySettingsAsync;
         _connectionProbe = connectionProbe ?? throw new ArgumentNullException(nameof(connectionProbe));
-        _localAgentPreflight = localAgentPreflight
-                               ?? new LocalAgentPreflight(
-                                   new SystemLocalIpv4Discovery(),
-                                   _connectionProbe);
         DemoModeCheckBox.IsChecked = settings.DemoMode;
         ViewerSettingsSanitizer.SplitAgentUri(settings.AgentUri, out var address, out var port);
         AgentAddressTextBox.Text = address;
         _addressTextInitialized = true;
         StartMinimizedCheckBox.IsChecked = settings.StartMinimizedToTray;
-        if (ViewerSettingsSanitizer.IsLoopbackAgentUri(settings.AgentUri))
-        {
-            ValidationText.Text = ViewerSettingsSanitizer.LoopbackAgentAddressReason;
-        }
         Loaded += (_, _) =>
         {
             FitToWorkingArea();
@@ -90,8 +68,6 @@ public partial class ConnectionSettingsWindow : Window
         {
             ResetProbeSteps();
             ConnectionProgressPanel.Visibility = Visibility.Collapsed;
-            LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
-            _localPreflightCandidate = null;
             ClearFieldDiagnostic();
         }
     }
@@ -125,14 +101,7 @@ public partial class ConnectionSettingsWindow : Window
             return;
         }
 
-        var usePreflightCandidate =
-            _localPreflightCandidate is not null
-            && string.Equals(
-                ViewerSettingsSanitizer.NormalizeAgentUri(_localPreflightCandidate.AgentUri),
-                agentUri,
-                StringComparison.OrdinalIgnoreCase);
-        var candidate = ViewerSettingsSanitizer.Copy(
-            usePreflightCandidate ? _localPreflightCandidate! : _original);
+        var candidate = ViewerSettingsSanitizer.Copy(_original);
         candidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
         candidate.DemoMode = false;
         candidate.AgentUri = agentUri;
@@ -143,138 +112,22 @@ public partial class ConnectionSettingsWindow : Window
             return;
         }
 
-        if (usePreflightCandidate)
-        {
-            ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-            ValidationText.Text = "사전 테스트를 통과한 Agent 연결을 저장하고 있습니다.";
-        }
         await ApplyAndCloseAsync(
             clean,
-            probeConnection: !usePreflightCandidate,
+            probeConnection: true,
             keepOpenAfterApply: true);
-    }
-
-    private async void LocalPreflight_Click(object sender, RoutedEventArgs e)
-    {
-        ValidationText.Foreground = MediaBrushes.Firebrick;
-        ValidationText.Text = string.Empty;
-        LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
-        _localPreflightCandidate = null;
-        ClearFieldDiagnostic();
-        ResetProbeSteps();
-        ConnectionProgressPanel.Visibility = Visibility.Visible;
-        ConnectionProgressTitleText.Text = "이 PC의 사설 IPv4를 확인하고 있습니다.";
-        _localPreflightRunning = true;
-        SetBusy(true);
-        try
-        {
-            var candidate = ViewerSettingsSanitizer.Copy(_original);
-            candidate.StartMinimizedToTray = StartMinimizedCheckBox.IsChecked == true;
-            candidate.DemoMode = false;
-            var progress = new Progress<LocalAgentPreflightUpdate>(UpdateLocalPreflight);
-            var result = await _localAgentPreflight.RunAsync(
-                candidate,
-                progress,
-                _lifetime.Token);
-            SetFieldDiagnostic("SAME_PC", result.ProbeResult, result.CandidateCount);
-            if (!result.Succeeded || result.SuccessfulSettings is null)
-            {
-                ValidationText.Foreground = MediaBrushes.Firebrick;
-                var attempted = result.CandidateCount == 0
-                    ? string.Empty
-                    : $"사설 IPv4 {result.CandidateCount}개 확인 · ";
-                ValidationText.Text =
-                    $"{attempted}{ProbeStageTitle(result.ProbeResult.FailedStage)} 단계 실패 · "
-                    + $"{result.ProbeResult.Detail} ({result.ProbeResult.ErrorCode})";
-                return;
-            }
-
-            _localPreflightCandidate = ViewerSettingsSanitizer.Copy(result.SuccessfulSettings);
-            ViewerSettingsSanitizer.SplitAgentUri(
-                _localPreflightCandidate.AgentUri,
-                out var address,
-                out _);
-            _settingDiscoveredAddress = true;
-            try
-            {
-                AgentAddressTextBox.Text = address;
-            }
-            finally
-            {
-                _settingDiscoveredAddress = false;
-            }
-
-            LocalAgentApiStatusText.Text =
-                $"✓ Agent 실행 및 API 연결: 정상 ({address})";
-            LocalPreflightResultPanel.Visibility = Visibility.Visible;
-            ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-            ValidationText.Text =
-                "동일 PC 사전 테스트를 통과했습니다. '연결 확인 및 저장'을 눌러 적용하세요.";
-        }
-        catch (OperationCanceledException)
-        {
-            // Closing the dialog cancels the bounded local preflight.
-        }
-        catch
-        {
-            var result = AgentConnectionProbeResult.Failure(
-                AgentConnectionProbeStage.Address,
-                "LOCAL_AGENT_PREFLIGHT_FAILED",
-                ViewerConnectionMessages.ForCode("LOCAL_AGENT_PREFLIGHT_FAILED"));
-            SetFieldDiagnostic("SAME_PC", result, 0);
-            ValidationText.Foreground = MediaBrushes.Firebrick;
-            ValidationText.Text =
-                "이 PC 사전 테스트를 완료하지 못했습니다. 네트워크 어댑터와 Agent 서비스를 확인해 주세요. "
-                + "(LOCAL_AGENT_PREFLIGHT_FAILED)";
-        }
-        finally
-        {
-            _localPreflightRunning = false;
-            if (IsVisible) SetBusy(false);
-        }
     }
 
     private void AgentAddress_Changed(object sender, TextChangedEventArgs e)
     {
-        if (_settingDiscoveredAddress || !_addressTextInitialized)
+        if (!_addressTextInitialized)
         {
             return;
         }
 
-        _localPreflightCandidate = null;
-        _identityMismatchCandidate = null;
-        RetrustButton.Visibility = Visibility.Collapsed;
         ConnectionProgressPanel.Visibility = Visibility.Collapsed;
-        LocalPreflightResultPanel.Visibility = Visibility.Collapsed;
         ValidationText.Text = string.Empty;
         ClearFieldDiagnostic();
-    }
-
-    private void UpdateLocalPreflight(LocalAgentPreflightUpdate update)
-    {
-        if (!Dispatcher.CheckAccess())
-        {
-            if (!Dispatcher.HasShutdownStarted && !_lifetime.IsCancellationRequested)
-            {
-                _ = Dispatcher.BeginInvoke(() => UpdateLocalPreflight(update));
-            }
-            return;
-        }
-        if (_lifetime.IsCancellationRequested)
-        {
-            return;
-        }
-
-        if (update.ProbeUpdate is null)
-        {
-            ResetProbeSteps();
-            ConnectionProgressPanel.Visibility = Visibility.Visible;
-            ConnectionProgressTitleText.Text =
-                $"이 PC 주소 {update.CandidateNumber}/{update.CandidateCount} · {update.CandidateAddress}";
-            return;
-        }
-
-        UpdateProbeStep(update.ProbeUpdate);
     }
 
     private async Task ApplyAndCloseAsync(
@@ -283,6 +136,7 @@ public partial class ConnectionSettingsWindow : Window
         bool keepOpenAfterApply)
     {
         SetBusy(true);
+        string? connectionDetail = null;
         try
         {
             if (probeConnection)
@@ -298,12 +152,18 @@ public partial class ConnectionSettingsWindow : Window
                 SetFieldDiagnostic("NORMAL", probeResult, 1);
                 if (!probeResult.Succeeded)
                 {
-                    ShowProbeFailure(settings, probeResult);
+                    ShowProbeFailure(probeResult);
                     return;
                 }
 
-                ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-                ValidationText.Text = "Agent 연결 확인 완료 · 설정을 저장하고 있습니다.";
+                connectionDetail = probeResult.Detail;
+                var hasCompatibilityWarning = IsCompatibilityWarning(connectionDetail);
+                ValidationText.Foreground = hasCompatibilityWarning
+                    ? new SolidColorBrush(Color.FromRgb(180, 83, 9))
+                    : new SolidColorBrush(Color.FromRgb(22, 101, 52));
+                ValidationText.Text = hasCompatibilityWarning
+                    ? $"{connectionDetail} · 설정을 저장하고 있습니다."
+                    : "Agent 연결 확인 완료 · 설정을 저장하고 있습니다.";
             }
 
             await _applySettingsAsync(settings, _lifetime.Token);
@@ -311,9 +171,13 @@ public partial class ConnectionSettingsWindow : Window
             if (keepOpenAfterApply)
             {
                 _settingsApplied = true;
-                ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-                ValidationText.Text =
-                    "Agent 연결과 설정 저장이 완료되었습니다. 필요하면 익명 진단을 저장한 뒤 닫아 주세요.";
+                var hasCompatibilityWarning = IsCompatibilityWarning(connectionDetail);
+                ValidationText.Foreground = hasCompatibilityWarning
+                    ? new SolidColorBrush(Color.FromRgb(180, 83, 9))
+                    : new SolidColorBrush(Color.FromRgb(22, 101, 52));
+                ValidationText.Text = hasCompatibilityWarning
+                    ? $"연결 및 저장 완료 · {connectionDetail}"
+                    : "Agent 연결과 설정 저장이 완료되었습니다.";
             }
             else
             {
@@ -330,11 +194,6 @@ public partial class ConnectionSettingsWindow : Window
             ValidationText.Foreground = MediaBrushes.Firebrick;
             ValidationText.Text =
                 $"{ViewerConnectionMessages.ForCode(exception.ErrorCode)} ({exception.ErrorCode})";
-            if (exception.ErrorCode == "AGENT_IDENTITY_CHANGED")
-            {
-                _identityMismatchCandidate = settings;
-                RetrustButton.Visibility = Visibility.Visible;
-            }
         }
         catch
         {
@@ -365,8 +224,6 @@ public partial class ConnectionSettingsWindow : Window
         AgentAddressTextBox.IsEnabled = !busy && !_settingsApplied;
         DemoModeCheckBox.IsEnabled = !busy && !_settingsApplied;
         StartMinimizedCheckBox.IsEnabled = !busy && !_settingsApplied;
-        RetrustButton.IsEnabled = !busy && !_settingsApplied;
-        LocalPreflightButton.IsEnabled = !busy && !_settingsApplied;
         DiagnosticSaveButton.IsEnabled = !busy && _lastFieldDiagnostic is not null;
         SaveButton.Content = busy
             ? "연결 확인 중…"
@@ -374,33 +231,6 @@ public partial class ConnectionSettingsWindow : Window
                 ? "저장 완료"
                 : "연결 확인 및 저장";
         CancelButton.Content = _settingsApplied ? "닫기" : "취소";
-        LocalPreflightButton.Content =
-            busy && _localPreflightRunning
-                ? "같은 PC 확인 중…"
-                : "Agent와 Viewer가 같은 PC일 때 테스트";
-    }
-
-    private async void Retrust_Click(object sender, RoutedEventArgs e)
-    {
-        if (_identityMismatchCandidate is null) return;
-        if (MessageBox.Show(
-                this,
-                "Agent PC가 실제로 교체되었거나 Agent가 다시 설치된 경우에만 진행하세요.",
-                "이 Agent로 다시 연결",
-                MessageBoxButton.OKCancel,
-                MessageBoxImage.Warning) != MessageBoxResult.OK)
-        {
-            return;
-        }
-
-        var candidate = ViewerSettingsSanitizer.Copy(_identityMismatchCandidate);
-        candidate.RemoveAgentTrustPin();
-        RetrustButton.Visibility = Visibility.Collapsed;
-        _identityMismatchCandidate = null;
-        await ApplyAndCloseAsync(
-            candidate,
-            probeConnection: true,
-            keepOpenAfterApply: true);
     }
 
     private async void DiagnosticSave_Click(object sender, RoutedEventArgs e)
@@ -538,24 +368,15 @@ public partial class ConnectionSettingsWindow : Window
             + "(DIAGNOSTIC_WRITE_FAILED)";
     }
 
-    private void ShowProbeFailure(
-        ViewerSettings settings,
-        AgentConnectionProbeResult result)
+    private void ShowProbeFailure(AgentConnectionProbeResult result)
     {
         ValidationText.Foreground = MediaBrushes.Firebrick;
         ValidationText.Text =
             $"{ProbeStageTitle(result.FailedStage)} 단계 실패 · {result.Detail} ({result.ErrorCode})";
-        if (result.ErrorCode == "AGENT_IDENTITY_CHANGED")
-        {
-            _identityMismatchCandidate = settings;
-            RetrustButton.Visibility = Visibility.Visible;
-        }
     }
 
     private void ResetProbeSteps()
     {
-        RetrustButton.Visibility = Visibility.Collapsed;
-        _identityMismatchCandidate = null;
         ConnectionProgressTitleText.Text = "연결 확인 단계";
         SetProbeText(AddressProbeText, "○", "1. 주소 형식", string.Empty, MediaBrushes.SlateGray);
         SetProbeText(DnsProbeText, "○", "2. DNS 또는 IPv4", string.Empty, MediaBrushes.SlateGray);
@@ -564,6 +385,9 @@ public partial class ConnectionSettingsWindow : Window
         SetProbeText(IdentityProbeText, "○", "5. Agent API와 버전", string.Empty, MediaBrushes.SlateGray);
         ValidationText.Text = string.Empty;
     }
+
+    private static bool IsCompatibilityWarning(string? detail) =>
+        detail?.StartsWith("경고", StringComparison.Ordinal) == true;
 
     private void UpdateProbeStep(AgentConnectionProbeUpdate update)
     {

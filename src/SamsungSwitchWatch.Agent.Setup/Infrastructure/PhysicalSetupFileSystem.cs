@@ -1,3 +1,4 @@
+using System.Security;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -267,13 +268,18 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
             paths.DataDirectory,
             paths.OperationsDirectory
         }.Distinct(StringComparer.OrdinalIgnoreCase);
+        var canAdoptFreshDataDirectory =
+            !service.Exists &&
+            IsEmptyNonReparseDirectory(paths.DataDirectory);
         foreach (var existingPath in existingPaths.Where(Directory.Exists))
         {
             var isInstall = SamePath(existingPath, paths.InstallDirectory);
             var isData = SamePath(existingPath, paths.DataDirectory);
             ValidateExistingDirectory(
                 existingPath,
-                allowServiceSid: service.Exists && (isInstall || isData),
+                allowServiceSid:
+                    (service.Exists && (isInstall || isData)) ||
+                    (isData && canAdoptFreshDataDirectory),
                 allowLocalService: isData &&
                                    ServiceAccountContract
                                        .AllowsLegacyLocalServiceDataOwner(service),
@@ -289,7 +295,8 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
 
         if (!service.Exists &&
             Directory.Exists(paths.DataDirectory) &&
-            !HasOwnedAgentData(paths.DataDirectory))
+            !HasOwnedAgentData(paths.DataDirectory) &&
+            !canAdoptFreshDataDirectory)
         {
             throw new SetupException(
                 SetupErrorCodes.PathUntrusted,
@@ -484,6 +491,28 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
 
     internal static bool IsReparsePoint(FileAttributes attributes) =>
         (attributes & FileAttributes.ReparsePoint) != 0;
+
+    internal static bool IsEmptyNonReparseDirectory(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            if (!Directory.Exists(fullPath) ||
+                IsReparsePoint(File.GetAttributes(fullPath)))
+            {
+                return false;
+            }
+
+            return !Directory.EnumerateFileSystemEntries(fullPath).Any();
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or
+                NotSupportedException or SecurityException or
+                UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     internal static bool IsAllowedOwner(
         SecurityIdentifier owner,

@@ -35,7 +35,7 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
-    public void CertificatePinMismatch_RemainsRecordedAfterLaterMatchingValidation()
+    public void LegacyCertificatePin_IsIgnoredAndEphemeralCertificateIsAccepted()
     {
         using var expectedCertificate = CreateCertificate();
         using var changedCertificate = CreateCertificate();
@@ -47,19 +47,21 @@ public sealed class ViewerConnectionTests
         var validator = new CertificatePinValidator(settings);
         using var request = new HttpRequestMessage(HttpMethod.Get, settings.AgentUri);
 
-        Assert.False(validator.Validate(
+        Assert.True(validator.Validate(
             request,
             changedCertificate,
             null,
             SslPolicyErrors.None));
-        Assert.True(validator.IdentityChanged);
+        Assert.False(validator.IdentityChanged);
 
         Assert.True(validator.Validate(
             request,
             expectedCertificate,
             null,
             SslPolicyErrors.None));
-        Assert.True(validator.IdentityChanged);
+        Assert.False(validator.IdentityChanged);
+        Assert.True(settings.TryGetAgentTrustPin(out var retainedLegacyPin));
+        Assert.Equal(CertificatePinValidator.GetSpkiSha256(expectedCertificate), retainedLegacyPin);
     }
 
     [Fact]
@@ -92,7 +94,7 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
-    public void CertificatePin_MismatchDoesNotReportAcceptedTls()
+    public void LegacyCertificatePin_MismatchStillReportsAutomaticTlsAcceptance()
     {
         using var expectedCertificate = CreateCertificate();
         using var changedCertificate = CreateCertificate();
@@ -107,14 +109,14 @@ public sealed class ViewerConnectionTests
             () => acceptedCount++);
         using var request = new HttpRequestMessage(HttpMethod.Get, settings.AgentUri);
 
-        Assert.False(validator.Validate(
+        Assert.True(validator.Validate(
             request,
             changedCertificate,
             null,
             SslPolicyErrors.None));
 
-        Assert.Equal(0, acceptedCount);
-        Assert.True(validator.IdentityChanged);
+        Assert.Equal(1, acceptedCount);
+        Assert.False(validator.IdentityChanged);
     }
 
     [Fact]
@@ -506,7 +508,7 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
-    public async Task IdentityBodyPinMismatch_BlocksTelnetBeforeQueryIsSent()
+    public async Task IdentityBodyPinDifference_DoesNotBlockApiV4TelnetRequest()
     {
         using var certificate = CreateCertificate();
         var fixture = CreateClientFixture(
@@ -516,13 +518,11 @@ public sealed class ViewerConnectionTests
                 IdentityJson(certificate, new string('A', 64))));
         await using var client = fixture.Client;
 
-        var failure = await Assert.ThrowsAsync<AgentClientException>(
-            () => client.TestTelnetAsync(Target(), CancellationToken.None));
+        var result = await client.TestTelnetAsync(Target(), CancellationToken.None);
 
-        Assert.Equal("AGENT_IDENTITY_CHANGED", failure.ErrorCode);
-        Assert.Equal(AgentConnectionState.Stale, failure.SuggestedConnectionState);
+        Assert.True(result.Success);
         Assert.Equal(1, fixture.ControlHandler.RequestCount);
-        Assert.Equal(0, fixture.QueryHandler.RequestCount);
+        Assert.Equal(1, fixture.QueryHandler.RequestCount);
     }
 
     [Fact]
@@ -766,9 +766,10 @@ public sealed class ViewerConnectionTests
     [InlineData("AGENT_CONNECTION_REFUSED", "Agent를 설치한 PC")]
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
-    [InlineData("AGENT_CLIENT_NOT_ALLOWED", "Agent Setup")]
+    [InlineData("AGENT_CLIENT_NOT_ALLOWED", "RFC1918")]
     [InlineData("AGENT_PROTOCOL_MISMATCH", "로컬 HTTPS")]
     [InlineData("AGENT_VERSION_MISMATCH", "같은 릴리스")]
+    [InlineData("LOCAL_AGENT_PREFLIGHT_FAILED", "127.0.0.1")]
     public void ConnectionMessages_AreActionableAndDoNotRequestSecrets(string code, string expected)
     {
         var message = ViewerConnectionMessages.ForCode(code);
@@ -779,15 +780,15 @@ public sealed class ViewerConnectionTests
     }
 
     [Fact]
-    public void ViewerIpNotAllowedMessage_ExplainsExactRecoveryFlow()
+    public void ClientNotAllowedMessage_ExplainsAutomaticPrivateNetworkBoundary()
     {
         var message = ViewerConnectionMessages.ForCode("AGENT_CLIENT_NOT_ALLOWED");
 
-        Assert.Contains("현재 Viewer IP", message, StringComparison.Ordinal);
+        Assert.Contains("현재 Viewer 주소", message, StringComparison.Ordinal);
         Assert.Contains("Agent PC", message, StringComparison.Ordinal);
-        Assert.Contains("Agent Setup", message, StringComparison.Ordinal);
-        Assert.Contains("고정 IPv4", message, StringComparison.Ordinal);
-        Assert.Contains("설치/업데이트", message, StringComparison.Ordinal);
+        Assert.Contains("loopback", message, StringComparison.Ordinal);
+        Assert.Contains("RFC1918", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Agent Setup", message, StringComparison.Ordinal);
     }
 
     [Theory]
