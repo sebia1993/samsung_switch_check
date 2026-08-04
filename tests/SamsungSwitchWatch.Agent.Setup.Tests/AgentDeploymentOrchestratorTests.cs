@@ -58,7 +58,12 @@ public sealed class AgentDeploymentOrchestratorTests
             .Select((step, index) => (step, index))
             .Single(item => item.step.Code == "AGENT_READY")
             .index;
+        var firewallConfiguredIndex = result.Steps
+            .Select((step, index) => (step, index))
+            .Single(item => item.step.Code == "FIREWALL_CONFIGURED")
+            .index;
         Assert.True(serviceStartedIndex < agentReadyIndex);
+        Assert.True(agentReadyIndex < firewallConfiguredIndex);
     }
 
     [Fact]
@@ -1004,12 +1009,19 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
         fixture.Firewall.RestoreFailureRuleNames.Add(
             SetupConstants.FirewallRuleName);
+        using var cancellation = new CancellationTokenSource();
 
-        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+        var deployment = fixture.CreateOrchestrator(ready: true).DeployAsync(
             new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
-            CancellationToken.None);
+            cancellation.Token);
+        Assert.True(
+            fixture.Firewall.AppliedRuleCaptured.Wait(TimeSpan.FromSeconds(5)),
+            "Firewall verification retry did not start before the test deadline.");
+        cancellation.Cancel();
+        var result = await deployment.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
@@ -1032,14 +1044,21 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
         fixture.Firewall.RestoreFailureRuleNames.Add(
             SetupConstants.FirewallRuleName);
         fixture.Firewall.RestoreFailureRuleNames.Add(
             SetupConstants.LegacyFirewallRuleName);
+        using var cancellation = new CancellationTokenSource();
 
-        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+        var deployment = fixture.CreateOrchestrator(ready: true).DeployAsync(
             new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
-            CancellationToken.None);
+            cancellation.Token);
+        Assert.True(
+            fixture.Firewall.AppliedRuleCaptured.Wait(TimeSpan.FromSeconds(5)),
+            "Firewall verification retry did not start before the test deadline.");
+        cancellation.Cancel();
+        var result = await deployment.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Contains(
             SetupErrorCodes.RollbackHttpsFirewallRestoreFailed,
@@ -1319,6 +1338,67 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task Diagnostics_FirewallPolicyFailureWarnsWithoutBlockingPreflight()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.SecurityGateException = new SetupException(
+            SetupErrorCodes.FirewallFailed,
+            "blocked by policy");
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.DoesNotContain("blocked by policy", warning.Message);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task Diagnostics_FirewallReadbackFailureWarnsWithoutBlockingPreflight()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        var firewall = new CaptureFailingFirewallManager(fixture.Firewall);
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, firewall.CaptureAttempts);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
     public async Task DeployAsync_GenericFirewallOverlapSucceedsAndKeepsWarning()
     {
         using var folder = new TemporaryFolder();
@@ -1362,7 +1442,7 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
-    public async Task DeployAsync_FirewallVerificationTimeoutRollsBackWithSanitizedMismatch()
+    public async Task DeployAsync_FirewallVerificationTimeoutKeepsReadyAgentAndWarns()
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateFreshFixture(folder);
@@ -1372,20 +1452,31 @@ public sealed class AgentDeploymentOrchestratorTests
             new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
             CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal(SetupErrorCodes.FirewallFailed, result.Code);
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
         Assert.Contains(
-            FirewallRuleMismatchCodes.RemoteAddress,
+            "원격 Viewer 연결은 확인이 필요",
             result.Message,
             StringComparison.Ordinal);
         Assert.DoesNotContain("10.1.1.20", result.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Any", result.Message, StringComparison.Ordinal);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.Contains(
+            FirewallRuleMismatchCodes.RemoteAddress,
+            Assert.IsType<SetupOperationDiagnosticMetadata>(
+                    result.DiagnosticMetadata)
+                .SafeDecisionCodes);
         Assert.Equal(11, fixture.Firewall.AppliedRuleCaptureCount);
         Assert.Contains(
             $"restore:{SetupConstants.FirewallRuleName}",
             fixture.Firewall.Operations);
         Assert.False(fixture.Firewall.State.Exists);
-        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.True(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.True(fixture.Services.State.Running);
     }
 
     [Fact]
@@ -1415,7 +1506,7 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
-    public async Task DeployAsync_FirewallGateFailureStopsBeforeServiceOrFileMutation()
+    public async Task DeployAsync_FirewallGateFailureKeepsReadyAgentAndWarns()
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateFreshFixture(folder);
@@ -1428,11 +1519,132 @@ public sealed class AgentDeploymentOrchestratorTests
             new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
             CancellationToken.None);
 
-        Assert.False(result.Succeeded);
-        Assert.Equal(SetupErrorCodes.FirewallFailed, result.Code);
-        Assert.False(Directory.Exists(fixture.Paths.InstallDirectory));
-        Assert.DoesNotContain("install", fixture.Services.Operations);
+        Assert.True(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Ok, result.Code);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.Contains("로컬 HTTPS는 정상", warning.Message, StringComparison.Ordinal);
+        var codes = result.Steps.Select(step => step.Code).ToArray();
+        Assert.True(
+            Array.IndexOf(codes, "AGENT_READY") <
+            Array.IndexOf(
+                codes,
+                SetupErrorCodes.FirewallRemoteAccessUnconfirmed));
+        Assert.True(Directory.Exists(fixture.Paths.InstallDirectory));
+        Assert.Contains("install", fixture.Services.Operations);
+        Assert.True(fixture.Services.State.Running);
         Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirewallGateFailureDoesNotClaimHttpsSuccessWhenReadinessFails()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.SecurityGateException = new SetupException(
+            SetupErrorCodes.FirewallFailed,
+            "unsafe firewall");
+
+        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.HealthFailed, result.Code);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.DoesNotContain(
+            fixture.Firewall.Operations,
+            operation => operation.StartsWith("restore:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirewallCaptureFailureKeepsReadyAgentWithoutMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        var firewall = new CaptureFailingFirewallManager(fixture.Firewall);
+
+        var result = await CreateOrchestratorWithFirewall(
+                fixture,
+                firewall,
+                ready: true)
+            .DeployAsync(
+                new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+                CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, firewall.CaptureAttempts);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.True(fixture.Services.State.Running);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.DoesNotContain(
+            fixture.Firewall.Operations,
+            operation => operation.StartsWith("restore:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirewallApplyFailureRestoresSnapshotsAndKeepsReadyAgent()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        var firewall = new ApplyFailingFirewallManager(fixture.Firewall);
+
+        var result = await CreateOrchestratorWithFirewall(
+                fixture,
+                firewall,
+                ready: true)
+            .DeployAsync(
+                new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+                CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(1, firewall.ApplyAttempts);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed &&
+                    step.State == SetupStepState.Warning);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Contains(
+            $"restore:{SetupConstants.FirewallRuleName}",
+            fixture.Firewall.Operations);
+        Assert.Contains(
+            $"restore:{SetupConstants.LegacyFirewallRuleName}",
+            fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirewallRestoreFailureStillReturnsExplicitWarning()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Firewall.AppliedRuleReadback = _ => OwnedFirewall("Any");
+        fixture.Firewall.RestoreFailureRuleNames.Add(
+            SetupConstants.FirewallRuleName);
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            new SetupRequest("10.1.1.20", ["10.30.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code ==
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.Contains("복구 여부를 확인하지 못했", warning.Message);
+        Assert.True(fixture.Services.State.Running);
     }
 
     [Fact]
@@ -2318,6 +2530,88 @@ public sealed class AgentDeploymentOrchestratorTests
                 "TCP/18443을 허용하는 다른 인바운드 방화벽 규칙 1개가 있습니다. " +
                 "해당 규칙은 변경하지 않으며 Agent가 입력한 Viewer IP만 허용합니다.")
         ]);
+
+    private static AgentDeploymentOrchestrator CreateOrchestratorWithFirewall(
+        DeploymentFixture fixture,
+        IFirewallManager firewallManager,
+        bool ready) =>
+        new(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            firewallManager,
+            new FakeHealthProbe(ready),
+            new FakeAdministratorChecker(),
+            fixture.MachineLock,
+            fixture.Paths);
+
+    private sealed class CaptureFailingFirewallManager(
+        FakeFirewallManager inner) : IFirewallManager
+    {
+        public int CaptureAttempts { get; private set; }
+
+        public FirewallRuleSnapshot Capture(string ruleName)
+        {
+            CaptureAttempts++;
+            throw new SetupException(
+                SetupErrorCodes.FirewallFailed,
+                "simulated capture failure");
+        }
+
+        public void ApplyViewerRule(string ruleName, int port, string viewerIpv4) =>
+            inner.ApplyViewerRule(ruleName, port, viewerIpv4);
+
+        public void RemoveOwnedRule(string ruleName) =>
+            inner.RemoveOwnedRule(ruleName);
+
+        public void Restore(FirewallRuleSnapshot snapshot) =>
+            inner.Restore(snapshot);
+
+        public bool IsExactViewerRule(
+            string ruleName,
+            int port,
+            string viewerIpv4) =>
+            inner.IsExactViewerRule(ruleName, port, viewerIpv4);
+
+        public FirewallSecurityAssessment AssertSecurityGate(
+            int port,
+            string agentExecutablePath) =>
+            inner.AssertSecurityGate(port, agentExecutablePath);
+    }
+
+    private sealed class ApplyFailingFirewallManager(
+        FakeFirewallManager inner) : IFirewallManager
+    {
+        public int ApplyAttempts { get; private set; }
+
+        public FirewallRuleSnapshot Capture(string ruleName) =>
+            inner.Capture(ruleName);
+
+        public void ApplyViewerRule(string ruleName, int port, string viewerIpv4)
+        {
+            ApplyAttempts++;
+            throw new SetupException(
+                SetupErrorCodes.FirewallFailed,
+                "simulated apply failure");
+        }
+
+        public void RemoveOwnedRule(string ruleName) =>
+            inner.RemoveOwnedRule(ruleName);
+
+        public void Restore(FirewallRuleSnapshot snapshot) =>
+            inner.Restore(snapshot);
+
+        public bool IsExactViewerRule(
+            string ruleName,
+            int port,
+            string viewerIpv4) =>
+            inner.IsExactViewerRule(ruleName, port, viewerIpv4);
+
+        public FirewallSecurityAssessment AssertSecurityGate(
+            int port,
+            string agentExecutablePath) =>
+            inner.AssertSecurityGate(port, agentExecutablePath);
+    }
 
     private sealed class DeploymentFixture(
         DeploymentPaths paths,

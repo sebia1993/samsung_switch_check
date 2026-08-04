@@ -5,13 +5,18 @@
 | 경계 | 보호 방식 | 남는 위험 |
 |---|---|---|
 | Viewer 로컬 저장소 | DPAPI CurrentUser | 같은 Windows 사용자 세션 또는 계정 탈취 |
-| Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, Viewer 고정 IPv4 `/32` 방화벽, Agent의 동일 IPv4 재검증 | 애플리케이션 사용자 인증 없음 |
+| Viewer → Agent | HTTPS, 자동 TOFU 신원 고정, 정상 구성의 Viewer 고정 IPv4 `/32` 방화벽, Agent의 동일 IPv4 재검증 | 방화벽 확인 경고 상태에서는 네트워크 경계를 별도 확인해야 하며 애플리케이션 사용자 인증 없음 |
 | Agent → 스위치 | Setup에서 확정한 RFC1918 관리망 제한, TCP/23 고정, 한 줄 `show` 정책 | Telnet 평문 노출 |
 | Agent 서비스와 데이터 | 전용 서비스 SID, 제한된 서비스·폴더 ACL, 무창 서비스 | 로컬 관리자는 제어 가능 |
 
 HTTPS를 사용하더라도 등록된 Viewer IPv4를 사용하는 클라이언트는 Agent API에 접근할 수
 있습니다. Agent PC와 Viewer PC를 일반 사용자 VLAN, 공용 Wi-Fi 또는 인터넷에 노출하지
 마십시오.
+
+`FIREWALL_REMOTE_ACCESS_UNCONFIRMED` 상태는 로컬 Agent 설치와 HTTPS 준비가 정상이라는 뜻일
+뿐, 원격 인바운드 경계를 검증했다는 뜻이 아닙니다. Viewer 연결 시험과 조직의 방화벽·GPO
+정책으로 정확한 Viewer 호스트만 도달 가능한지 확인하기 전에는 운영 준비 완료로 간주하지
+마십시오. Agent의 동일 IPv4 API 검증은 이 경고 상태에서도 유지됩니다.
 
 ## 2. 자격 증명
 
@@ -80,10 +85,13 @@ Setup은 패키지를 변경하기 전에 다음을 확인합니다.
 - 관리자 권한
 - Viewer IPv4와 관리망 선택의 유효성
 
-검증한 파일은 보호된 staging에 복사한 뒤 설치 폴더와 교체합니다. 서비스, 방화벽 또는 readiness
-확인이 실패하면 기존 프로그램, 서비스 상태와 방화벽 규칙의 rollback을 시도합니다. rollback이
-완전히 끝나지 않으면 성공으로 처리하지 않고 안정적인 Setup 오류 코드로 관리자 확인을
-요청합니다.
+검증한 파일은 보호된 staging에 복사한 뒤 설치 폴더와 교체합니다. 서비스·파일 또는 로컬
+HTTPS/API/버전 readiness 확인이 실패하면 기존 프로그램, 서비스 상태와 방화벽 규칙의 rollback을
+시도합니다. 방화벽·GPO·규칙 적용/재조회만 실패하고 로컬 readiness가 정상이면 방화벽 변경분
+복원을 시도하고 결과를 경고에 남긴 뒤 Agent 설치를 유지하면서
+`FIREWALL_REMOTE_ACCESS_UNCONFIRMED`를 표시합니다.
+rollback이 완전히 끝나지 않으면 성공으로 처리하지 않고 안정적인 Setup 오류 코드로 관리자
+확인을 요청합니다.
 
 Setup은 시작 시 미완료 트랜잭션 작업 기록을 읽기 전용으로 검사합니다. 안전하게 복구 가능한
 상태이면 새 설치·업데이트를 차단하고 `이전 상태 복구`만 허용합니다. 복구 성공 뒤에는 설치
@@ -138,9 +146,12 @@ ViewerIPv4/255.255.255.255
 LocalPort 18443, Domain+Private만, Edge Traversal 비활성을 모두 만족해야 합니다.
 
 적용 직후 Windows의 규칙 조회 반영이 늦을 수 있으므로 즉시 확인 후 200ms 간격으로 최대
-2초까지만 다시 확인합니다. 계속 불일치하면 Setup은 `SETUP_FIREWALL_FAILED`와
-`FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한 필드별 코드를 표시하고 설치 전 snapshot으로
-rollback합니다. 오류 메시지에는 Viewer IPv4, 방화벽 원문 또는 다른 규칙 주소를 넣지 않습니다.
+2초까지만 다시 확인합니다. 계속 불일치하거나 GPO 때문에 로컬 규칙을 확인할 수 없으면 Setup은
+`FIREWALL_REMOTE_ACCESS_UNCONFIRMED`와 `FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한 필드별
+코드를 표시하고 방화벽 변경분을 설치 전 snapshot으로 복원하려고 시도합니다. 복원 확인
+여부는 경고 단계에 남깁니다. Agent의 로컬
+HTTPS/API/버전 readiness가 정상이면 프로그램과 서비스는 유지하며, 원격 연결은 Viewer에서
+별도로 확인합니다. 오류 메시지에는 Viewer IPv4, 방화벽 원문 또는 다른 규칙 주소를 넣지 않습니다.
 
 Agent는 운영 설정의 `AllowedViewerIpv4`와 실제 TCP 연결의 원격 주소를 정확히 비교합니다.
 일치하지 않거나 원격 주소를 확인할 수 없으면 모든 Agent API를
@@ -309,14 +320,15 @@ Windows SCM, 방화벽 COM, 실제 ACL, EDR 파일 잠금과 전원 중단 조�
   있습니다.
 - Agent API에는 Windows/AD 로그인이나 별도 애플리케이션 인증 토큰이 없습니다.
 - 자체 서명 신원의 첫 연결은 TOFU이며 중앙 인증기관 검증이 아닙니다.
-- Viewer 고정 IPv4 `/32` 방화벽이 훼손되면 API 접근 경계가 약화됩니다.
+- Viewer 고정 IPv4 `/32` 방화벽이 훼손되거나 `FIREWALL_REMOTE_ACCESS_UNCONFIRMED` 상태를
+  조직 방화벽 정책 확인 없이 사용하면 API 접근 경계가 약화됩니다.
 - 코드 서명 없는 `-poc` 실행 파일은 사내 보안 제품에 의해 차단될 수 있습니다.
 - 실제 세 모델과 펌웨어별 프롬프트·페이징 처리는 현장 읽기 전용 검증이 필요합니다.
 
 다음 조건에서는 배포하지 마십시오.
 
 - Agent 또는 Telnet 구간이 일반 사용자망·공용망·인터넷을 통과함
-- Viewer 고정 IPv4 한 개로 방화벽을 제한할 수 없음
+- Viewer 고정 IPv4 한 개로 제품 규칙 또는 조직 방화벽 정책을 제한할 수 없음
 - Telnet 평문 위험을 조직이 수용하지 않음
 - 애플리케이션 사용자 인증이 필수인 환경
 - 24시간 Viewer 비의존 감시가 필수인 환경

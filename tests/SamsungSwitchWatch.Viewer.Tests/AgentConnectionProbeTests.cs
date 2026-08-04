@@ -107,6 +107,9 @@ public sealed class AgentConnectionProbeTests
         Assert.Equal("AGENT_CONNECTION_REFUSED", result.ErrorCode);
         Assert.Contains("서비스", result.Detail, StringComparison.Ordinal);
         Assert.Contains("TCP/18443", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("원격 연결", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("방화벽", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("GPO", result.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -126,6 +129,35 @@ public sealed class AgentConnectionProbeTests
         Assert.False(result.Succeeded);
         Assert.Equal(AgentConnectionProbeStage.Tcp, result.FailedStage);
         Assert.Equal("AGENT_TIMEOUT", result.ErrorCode);
+        Assert.Contains("원격 연결", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("방화벽", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("GPO", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("AGENT_PROTOCOL_MISMATCH")]
+    [InlineData("AGENT_TIMEOUT")]
+    [InlineData("AGENT_UNREACHABLE")]
+    public async Task ProbeAsync_HttpsTransportFailurePointsToLocalTlsReadiness(
+        string errorCode)
+    {
+        var identity = new FakeIdentityProbe(
+            new AgentClientException(errorCode, AgentConnectionState.Offline),
+            reportCertificateAccepted: false);
+        var probe = new AgentConnectionProbe(
+            new FakeNetworkProbe(),
+            identity,
+            "0.10.0-poc");
+
+        var result = await probe.ProbeAsync(Settings(), null, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(AgentConnectionProbeStage.Https, result.FailedStage);
+        Assert.Equal(errorCode, result.ErrorCode);
+        Assert.Contains("TCP/18443 연결은 확인", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("로컬 HTTPS", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("TLS", result.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("방화벽", result.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

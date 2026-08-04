@@ -6,6 +6,87 @@ namespace SamsungSwitchWatch.Agent.Setup.Tests;
 public sealed class SetupUiPresentationTests
 {
     [Fact]
+    public void InstallCompletion_SuccessWithoutWarningIsReadyForRemoteConnection()
+    {
+        var result = SetupOperationResult.Success(
+            "installed",
+            [
+                new SetupStepResult(
+                    "SETUP_COMPLETED",
+                    "설치 완료",
+                    SetupStepState.Succeeded,
+                    "completed")
+            ]);
+
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+
+        Assert.Equal(
+            SetupInstallCompletionSeverity.Success,
+            completion.Severity);
+        Assert.Equal(
+            "설치 완료 · 원격 연결 준비됨",
+            completion.StatusText);
+        Assert.Contains(
+            "Agent 연결 테스트",
+            completion.GuidanceText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InstallCompletion_RemoteAccessWarningRequiresViewerConnectionTest()
+    {
+        var result = SetupOperationResult.Success(
+            "installed with warning",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+                    "원격 연결 확인 필요",
+                    SetupStepState.Warning,
+                    "remote access is not confirmed")
+            ]);
+
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+
+        Assert.Equal(
+            SetupInstallCompletionSeverity.Warning,
+            completion.Severity);
+        Assert.Equal(
+            "설치 완료 · 원격 Viewer 연결 확인 필요",
+            completion.StatusText);
+        Assert.Equal(
+            "Viewer에서 Agent 연결 테스트를 실행해 원격 연결을 확인하세요.",
+            completion.GuidanceText);
+    }
+
+    [Fact]
+    public void InstallCompletion_LocalHttpsFailureRemainsInstallationFailure()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.HealthFailed,
+            "local HTTPS readiness failed",
+            [
+                new SetupStepResult(
+                    SetupErrorCodes.HealthFailed,
+                    "로컬 HTTPS 응답",
+                    SetupStepState.Failed,
+                    "failed")
+            ]);
+
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+
+        Assert.Equal(
+            SetupInstallCompletionSeverity.Error,
+            completion.Severity);
+        Assert.Equal(
+            $"설치 실패 · {SetupErrorCodes.HealthFailed}",
+            completion.StatusText);
+        Assert.DoesNotContain(
+            "설치 완료",
+            completion.StatusText,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PendingRecoveryResult_PreservesOriginalFailureCodeAndMessage()
     {
         var inspection = new PendingRecoveryInspection(

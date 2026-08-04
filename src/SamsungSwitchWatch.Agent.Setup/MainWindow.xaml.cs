@@ -688,6 +688,23 @@ public partial class MainWindow : Window
             });
         RefreshRecoveryState(
             preserveFailureDiagnostics: result is { Succeeded: false });
+        if (result is not null && !_recoveryInspection.Exists)
+        {
+            ApplyInstallCompletion(result);
+        }
+    }
+
+    private void ApplyInstallCompletion(SetupOperationResult result)
+    {
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+        OperationStateText.Text = completion.StatusText;
+        OperationStateText.Foreground = completion.Severity switch
+        {
+            SetupInstallCompletionSeverity.Success => Brushes.SeaGreen,
+            SetupInstallCompletionSeverity.Warning => Brushes.DarkGoldenrod,
+            _ => Brushes.Firebrick
+        };
+        ActionGuidanceText.Text = completion.GuidanceText;
     }
 
     private SetupRequest CreateRequest() =>

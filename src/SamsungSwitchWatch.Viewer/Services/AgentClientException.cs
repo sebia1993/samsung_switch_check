@@ -170,6 +170,40 @@ internal static class AgentClientErrors
 
 internal static class ViewerConnectionMessages
 {
+    public static string ForProbeFailure(
+        AgentConnectionProbeStage stage,
+        string? errorCode)
+    {
+        if (stage == AgentConnectionProbeStage.Tcp)
+        {
+            return errorCode switch
+            {
+                "AGENT_CONNECTION_REFUSED" =>
+                    "Agent PC의 TCP/18443 연결이 거부되었습니다. Agent 서비스와 원격 연결 허용 상태를 확인하고, Windows 방화벽 또는 회사 GPO 경로를 확인해 주세요.",
+                "AGENT_TIMEOUT" or "AGENT_UNREACHABLE" =>
+                    "Agent PC의 TCP/18443에 도달하지 못했습니다. 네트워크 경로와 Agent 원격 연결 허용, Windows 방화벽 또는 회사 GPO를 확인해 주세요.",
+                _ => ForCode(errorCode)
+            };
+        }
+
+        if (stage == AgentConnectionProbeStage.Https)
+        {
+            return errorCode switch
+            {
+                "AGENT_PROTOCOL_MISMATCH" or
+                "AGENT_TIMEOUT" or
+                "AGENT_UNREACHABLE" or
+                "AGENT_CONNECTION_REFUSED" or
+                "AGENT_RESPONSE_INVALID" or
+                "TLS_IDENTITY_INVALID" =>
+                    "TCP/18443 연결은 확인했지만 Agent HTTPS/TLS 응답을 확인하지 못했습니다. Agent PC에서 로컬 HTTPS 준비 상태와 Agent 서비스 진단을 확인해 주세요.",
+                _ => ForCode(errorCode)
+            };
+        }
+
+        return ForCode(errorCode);
+    }
+
     public static string ForCode(string? errorCode) => errorCode switch
     {
         "AGENT_DNS_FAILED" => "Agent PC 이름을 찾지 못했습니다. 주소 또는 사내 DNS 연결을 확인해 주세요.",
@@ -179,7 +213,7 @@ internal static class ViewerConnectionMessages
         "AGENT_HTTP_ERROR" or "AGENT_INTERNAL_ERROR" => "Agent가 요청을 처리하지 못했습니다. Agent 서비스 상태와 진단 로그를 확인해 주세요.",
         "AGENT_ACCESS_DENIED" => "Agent 접근이 거부되었습니다. Windows 방화벽의 허용 Viewer IPv4를 확인해 주세요.",
         "AGENT_CLIENT_NOT_ALLOWED" => "현재 Viewer IP가 Agent에서 허용되지 않았습니다. Agent PC에서 Agent Setup을 다시 실행해 이 Viewer PC의 고정 IPv4를 입력하고 설치/업데이트해 주세요.",
-        "AGENT_PROTOCOL_MISMATCH" => "Agent와 Viewer의 통신 방식이 다릅니다. Agent를 최신 버전으로 먼저 업데이트해 주세요.",
+        "AGENT_PROTOCOL_MISMATCH" => "Agent HTTPS/TLS 응답을 확인하지 못했습니다. Agent PC에서 로컬 HTTPS 준비 상태와 Agent 서비스 진단을 확인해 주세요.",
         "AGENT_VERSION_MISMATCH" => "Agent와 Viewer 버전이 다릅니다. 같은 릴리스 ZIP에 포함된 두 프로그램을 사용해 주세요.",
         "AGENT_IDENTITY_CHANGED" => "이전에 연결한 Agent와 인증 정보가 다릅니다. Agent 교체 여부를 확인한 뒤 신뢰를 다시 설정해 주세요.",
         "AGENT_NOT_READY" or "STORAGE_WRITE_FAILED" => "Agent가 아직 상태 제공을 준비하지 못했습니다. Agent 상태를 확인해 주세요.",
