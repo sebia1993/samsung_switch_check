@@ -307,6 +307,10 @@ public sealed record SetupOperationResult(
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
     public string? AgentHealthCode { get; init; }
     public bool AgentRestartObserved { get; init; }
+    public bool AgentServiceRunningObserved { get; init; }
+    public bool AgentListenerOwnedObserved { get; init; }
+    public int AgentHttpAttemptCount { get; init; }
+    public AgentHealthTransportPhase AgentLastTransportPhase { get; init; }
     internal SetupOperationDiagnosticMetadata? DiagnosticMetadata { get; init; }
 
     public static SetupOperationResult Failure(
@@ -342,6 +346,10 @@ public sealed record PendingRecoveryInspection(
     public IReadOnlyList<string> RollbackFailureCodes { get; init; } = [];
     public string? AgentHealthCode { get; init; }
     public bool AgentRestartObserved { get; init; }
+    public bool AgentServiceRunningObserved { get; init; }
+    public bool AgentListenerOwnedObserved { get; init; }
+    public int AgentHttpAttemptCount { get; init; }
+    public AgentHealthTransportPhase AgentLastTransportPhase { get; init; }
     public IReadOnlyList<string> FailureCodes => RollbackFailureCodes;
     public string ServiceState { get; init; } = "unknown";
     public bool EvidenceStateKnown { get; init; } = true;
@@ -544,7 +552,22 @@ public enum AgentHealthProbeCode : byte
     ApiVersionMismatch = 10,
     ProtocolMismatch = 11,
     ProductVersionMismatch = 12,
-    DeadlineExceeded = 13
+    DeadlineExceeded = 13,
+    HttpsTlsFailed = 14,
+    HttpsRequestTimeout = 15,
+    HttpsConnectionReset = 16,
+    HttpsEof = 17,
+    HttpsConnectFailed = 18
+}
+
+public enum AgentHealthTransportPhase : byte
+{
+    NotStarted = 0,
+    ListenerOwned = 1,
+    RequestStarted = 2,
+    ResponseHeaders = 3,
+    ResponseBody = 4,
+    ReadinessValidated = 5
 }
 
 public readonly record struct AgentHealthProbeResult(
@@ -552,12 +575,58 @@ public readonly record struct AgentHealthProbeResult(
     AgentHealthProbeCode Code,
     bool RestartObserved)
 {
+    public bool ServiceRunningObserved { get; init; }
+
+    public bool ListenerOwnedObserved { get; init; }
+
+    public int HttpAttemptCount { get; init; }
+
+    public AgentHealthTransportPhase LastTransportPhase { get; init; }
+
     public static AgentHealthProbeResult Success(bool restartObserved) =>
-        new(true, AgentHealthProbeCode.Ready, restartObserved);
+        Success(
+            restartObserved,
+            serviceRunningObserved: true,
+            listenerOwnedObserved: true,
+            httpAttemptCount: 1,
+            AgentHealthTransportPhase.ReadinessValidated);
+
+    public static AgentHealthProbeResult Success(
+        bool restartObserved,
+        bool serviceRunningObserved,
+        bool listenerOwnedObserved,
+        int httpAttemptCount,
+        AgentHealthTransportPhase lastTransportPhase)
+    {
+        if (!serviceRunningObserved ||
+            !listenerOwnedObserved ||
+            httpAttemptCount <= 0 ||
+            lastTransportPhase != AgentHealthTransportPhase.ReadinessValidated)
+        {
+            throw new ArgumentException(
+                "A ready Agent health probe must have completed the bounded HTTPS readiness request.");
+        }
+
+        return new AgentHealthProbeResult(
+            true,
+            AgentHealthProbeCode.Ready,
+            restartObserved)
+        {
+            ServiceRunningObserved = true,
+            ListenerOwnedObserved = true,
+            HttpAttemptCount = httpAttemptCount,
+            LastTransportPhase = lastTransportPhase
+        };
+    }
 
     public static AgentHealthProbeResult Failure(
         AgentHealthProbeCode code,
-        bool restartObserved)
+        bool restartObserved,
+        bool serviceRunningObserved = false,
+        bool listenerOwnedObserved = false,
+        int httpAttemptCount = 0,
+        AgentHealthTransportPhase lastTransportPhase =
+            AgentHealthTransportPhase.NotStarted)
     {
         if (code == AgentHealthProbeCode.Ready)
         {
@@ -565,8 +634,18 @@ public readonly record struct AgentHealthProbeResult(
                 nameof(code),
                 "A failed Agent health probe cannot use the Ready code.");
         }
+        if (httpAttemptCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(httpAttemptCount));
+        }
 
-        return new AgentHealthProbeResult(false, code, restartObserved);
+        return new AgentHealthProbeResult(false, code, restartObserved)
+        {
+            ServiceRunningObserved = serviceRunningObserved,
+            ListenerOwnedObserved = listenerOwnedObserved,
+            HttpAttemptCount = httpAttemptCount,
+            LastTransportPhase = lastTransportPhase
+        };
     }
 }
 

@@ -115,7 +115,15 @@ internal static class SetupResultPresentation
         {
             PrimaryFailureCode = inspection.PrimaryFailureCode,
             PrimaryFailureMessage = inspection.PrimaryFailureMessage,
-            RollbackFailureCodes = inspection.FailureCodes
+            RollbackFailureCodes = inspection.FailureCodes,
+            AgentHealthCode = inspection.AgentHealthCode,
+            AgentRestartObserved = inspection.AgentRestartObserved,
+            AgentServiceRunningObserved =
+                inspection.AgentServiceRunningObserved,
+            AgentListenerOwnedObserved =
+                inspection.AgentListenerOwnedObserved,
+            AgentHttpAttemptCount = inspection.AgentHttpAttemptCount,
+            AgentLastTransportPhase = inspection.AgentLastTransportPhase
         };
     }
 
@@ -394,13 +402,31 @@ internal static class SetupFailureDiagnosticFormatter
             $"FailureCategory={failure.Category}",
             $"FailureStageDurationMs={
                 MillisecondsToken(failure.DurationMilliseconds)}",
-            $"AgentHealthCode={SafeToken(
+            $"AgentHealthCode={SafeAgentHealthToken(
                 context.Result.AgentHealthCode ??
                 context.Recovery.AgentHealthCode)}",
             $"AgentRestartObserved={
                 BooleanToken(
                     context.Result.AgentRestartObserved ||
                     context.Recovery.AgentRestartObserved)}",
+            $"ServiceRunningObserved={
+                BooleanToken(
+                    context.Result.AgentServiceRunningObserved ||
+                    context.Recovery.AgentServiceRunningObserved)}",
+            $"ListenerOwnedObserved={
+                BooleanToken(
+                    context.Result.AgentListenerOwnedObserved ||
+                    context.Recovery.AgentListenerOwnedObserved)}",
+            $"HttpAttemptCount={
+                AttemptCountToken(
+                    Math.Max(
+                        context.Result.AgentHttpAttemptCount,
+                        context.Recovery.AgentHttpAttemptCount))}",
+            $"LastTransportPhase={
+                TransportPhaseToken(
+                    LastTransportPhase(
+                        context.Result,
+                        context.Recovery))}",
             $"RollbackFailureCodes={
                 (rollbackCodes.Length == 0 ? "none" : string.Join(",", rollbackCodes))}",
             $"RecoveryJournalExists={
@@ -466,6 +492,30 @@ internal static class SetupFailureDiagnosticFormatter
         return builder.Length == 0 ? "none" : builder.ToString();
     }
 
+    private static string SafeAgentHealthToken(string? value)
+    {
+        if (!Enum.TryParse<AgentHealthProbeCode>(
+                value,
+                ignoreCase: false,
+                out var code))
+        {
+            return SafeToken(value);
+        }
+
+        return code switch
+        {
+            AgentHealthProbeCode.HttpsTlsFailed => "HTTPS_TLS_FAILED",
+            AgentHealthProbeCode.HttpsRequestTimeout =>
+                "HTTPS_REQUEST_TIMEOUT",
+            AgentHealthProbeCode.HttpsConnectionReset =>
+                "HTTPS_CONNECTION_RESET",
+            AgentHealthProbeCode.HttpsEof => "HTTPS_EOF",
+            AgentHealthProbeCode.HttpsConnectFailed =>
+                "HTTPS_CONNECT_FAILED",
+            _ => SafeToken(value)
+        };
+    }
+
     private static string BooleanToken(bool value) =>
         value ? "true" : "false";
 
@@ -474,6 +524,30 @@ internal static class SetupFailureDiagnosticFormatter
             ? Math.Min(86_400_000, milliseconds)
                 .ToString(CultureInfo.InvariantCulture)
             : "unknown";
+
+    private static string AttemptCountToken(int count) =>
+        Math.Clamp(count, 0, 10_000).ToString(CultureInfo.InvariantCulture);
+
+    private static string TransportPhaseToken(
+        AgentHealthTransportPhase phase) =>
+        phase switch
+        {
+            AgentHealthTransportPhase.NotStarted => "NOT_STARTED",
+            AgentHealthTransportPhase.ListenerOwned => "LISTENER_OWNED",
+            AgentHealthTransportPhase.RequestStarted => "REQUEST_STARTED",
+            AgentHealthTransportPhase.ResponseHeaders => "RESPONSE_HEADERS",
+            AgentHealthTransportPhase.ResponseBody => "RESPONSE_BODY",
+            AgentHealthTransportPhase.ReadinessValidated =>
+                "READINESS_VALIDATED",
+            _ => "NOT_STARTED"
+        };
+
+    private static AgentHealthTransportPhase LastTransportPhase(
+        SetupOperationResult result,
+        PendingRecoveryInspection recovery) =>
+        result.AgentLastTransportPhase != AgentHealthTransportPhase.NotStarted
+            ? result.AgentLastTransportPhase
+            : recovery.AgentLastTransportPhase;
 
     private static string EvidenceToken(
         PendingRecoveryInspection recovery,
@@ -554,6 +628,7 @@ internal static class SetupFieldDiagnosticFormatter
             "PACKAGE_STAGED",
             "SERVICE_CONFIGURED",
             "FIREWALL_CONFIGURED",
+            "SERVICE_STARTED",
             "AGENT_READY",
             "AGENT_NOT_READY",
             "BACKUP_CLEANUP_PENDING",
@@ -647,7 +722,8 @@ internal static class SetupFieldDiagnosticFormatter
                 (firewallDecisionCodes.Count == 0
                     ? "NONE"
                     : string.Join(",", firewallDecisionCodes))}",
-            $"LocalTcp18443={LocalTcpStatus(context.Result, stages)}",
+            $"LocalTcp18443={
+                LocalTcpStatus(context.Result, context.Recovery, stages)}",
             $"Readiness={ReadinessStatus(context.Result, stages)}",
             $"AgentHealthCode={AgentHealthCode(context.Result, context.Recovery)}",
             $"AgentRestartObserved={
@@ -655,6 +731,24 @@ internal static class SetupFieldDiagnosticFormatter
                  context.Recovery.AgentRestartObserved
                     ? "TRUE"
                     : "FALSE")}",
+            $"ServiceRunningObserved={
+                BooleanToken(
+                    context.Result.AgentServiceRunningObserved ||
+                    context.Recovery.AgentServiceRunningObserved)}",
+            $"ListenerOwnedObserved={
+                BooleanToken(
+                    context.Result.AgentListenerOwnedObserved ||
+                    context.Recovery.AgentListenerOwnedObserved)}",
+            $"HttpAttemptCount={
+                AttemptCountToken(
+                    Math.Max(
+                        context.Result.AgentHttpAttemptCount,
+                        context.Recovery.AgentHttpAttemptCount))}",
+            $"LastTransportPhase={
+                TransportPhaseToken(
+                    LastTransportPhase(
+                        context.Result,
+                        context.Recovery))}",
             $"StageCount={stages.Count.ToString(CultureInfo.InvariantCulture)}"
         };
 
@@ -709,7 +803,7 @@ internal static class SetupFieldDiagnosticFormatter
             rollbackCodes,
             RecoveryJournal(context.Recovery),
             ServiceStatus(context.Result, context.Recovery, stages),
-            LocalTcpStatus(context.Result, stages),
+            LocalTcpStatus(context.Result, context.Recovery, stages),
             ReadinessStatus(context.Result, stages),
             PackageValidation(context.Result, stages),
             BuildFirewallDecisionCodes(context.Result, stages),
@@ -726,7 +820,18 @@ internal static class SetupFieldDiagnosticFormatter
             value,
             ignoreCase: false,
             out var code)
-            ? code.ToString().ToUpperInvariant()
+            ? code switch
+            {
+                AgentHealthProbeCode.HttpsTlsFailed => "HTTPS_TLS_FAILED",
+                AgentHealthProbeCode.HttpsRequestTimeout =>
+                    "HTTPS_REQUEST_TIMEOUT",
+                AgentHealthProbeCode.HttpsConnectionReset =>
+                    "HTTPS_CONNECTION_RESET",
+                AgentHealthProbeCode.HttpsEof => "HTTPS_EOF",
+                AgentHealthProbeCode.HttpsConnectFailed =>
+                    "HTTPS_CONNECT_FAILED",
+                _ => code.ToString().ToUpperInvariant()
+            }
             : NotRun;
     }
 
@@ -735,13 +840,23 @@ internal static class SetupFieldDiagnosticFormatter
         PendingRecoveryInspection recovery)
     {
         var value = result.AgentHealthCode ?? recovery.AgentHealthCode;
-        return Enum.TryParse<AgentHealthProbeCode>(
-                   value,
-                   ignoreCase: false,
-                   out var code) &&
-               code != AgentHealthProbeCode.Ready
-            ? (byte)code
-            : (byte)Swd1AgentHealthCode.NotRecorded;
+        if (!Enum.TryParse<AgentHealthProbeCode>(
+                value,
+                ignoreCase: false,
+                out var code) ||
+            code == AgentHealthProbeCode.Ready)
+        {
+            return (byte)Swd1AgentHealthCode.NotRecorded;
+        }
+
+        return code is
+            AgentHealthProbeCode.HttpsTlsFailed or
+            AgentHealthProbeCode.HttpsRequestTimeout or
+            AgentHealthProbeCode.HttpsConnectionReset or
+            AgentHealthProbeCode.HttpsEof or
+            AgentHealthProbeCode.HttpsConnectFailed
+            ? (byte)Swd1AgentHealthCode.HttpsRequestFailed
+            : (byte)code;
     }
 
     private static IReadOnlyList<SetupStageDiagnostic> BuildStages(
@@ -850,11 +965,18 @@ internal static class SetupFieldDiagnosticFormatter
 
     private static string LocalTcpStatus(
         SetupOperationResult result,
+        PendingRecoveryInspection recovery,
         IReadOnlyList<SetupStageDiagnostic> stages)
     {
         if (HasStage(stages, "AGENT_READY"))
         {
             return "PASS";
+        }
+
+        if (result.AgentListenerOwnedObserved ||
+            recovery.AgentListenerOwnedObserved)
+        {
+            return "PASS_OBSERVED";
         }
 
         return result.Code == SetupErrorCodes.HealthFailed ||
@@ -1021,6 +1143,33 @@ internal static class SetupFieldDiagnosticFormatter
             ? Math.Min(86_400_000, milliseconds)
                 .ToString(CultureInfo.InvariantCulture)
             : "unknown";
+
+    private static string BooleanToken(bool value) =>
+        value ? "TRUE" : "FALSE";
+
+    private static string AttemptCountToken(int count) =>
+        Math.Clamp(count, 0, 10_000).ToString(CultureInfo.InvariantCulture);
+
+    private static string TransportPhaseToken(
+        AgentHealthTransportPhase phase) =>
+        phase switch
+        {
+            AgentHealthTransportPhase.NotStarted => "NOT_STARTED",
+            AgentHealthTransportPhase.ListenerOwned => "LISTENER_OWNED",
+            AgentHealthTransportPhase.RequestStarted => "REQUEST_STARTED",
+            AgentHealthTransportPhase.ResponseHeaders => "RESPONSE_HEADERS",
+            AgentHealthTransportPhase.ResponseBody => "RESPONSE_BODY",
+            AgentHealthTransportPhase.ReadinessValidated =>
+                "READINESS_VALIDATED",
+            _ => "NOT_STARTED"
+        };
+
+    private static AgentHealthTransportPhase LastTransportPhase(
+        SetupOperationResult result,
+        PendingRecoveryInspection recovery) =>
+        result.AgentLastTransportPhase != AgentHealthTransportPhase.NotStarted
+            ? result.AgentLastTransportPhase
+            : recovery.AgentLastTransportPhase;
 }
 
 internal static class SetupFieldDiagnosticWriter

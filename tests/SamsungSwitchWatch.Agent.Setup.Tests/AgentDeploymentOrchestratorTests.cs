@@ -50,6 +50,15 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.True(
             fixture.Services.Operations.IndexOf("start") <
             fixture.Services.Operations.IndexOf("recovery"));
+        var serviceStartedIndex = result.Steps
+            .Select((step, index) => (step, index))
+            .Single(item => item.step.Code == "SERVICE_STARTED")
+            .index;
+        var agentReadyIndex = result.Steps
+            .Select((step, index) => (step, index))
+            .Single(item => item.step.Code == "AGENT_READY")
+            .index;
+        Assert.True(serviceStartedIndex < agentReadyIndex);
     }
 
     [Fact]
@@ -108,6 +117,56 @@ public sealed class AgentDeploymentOrchestratorTests
             step => step.Code == "ROLLBACK_COMPLETED");
         Assert.Contains("recovery-disabled", fixture.Services.Operations);
         Assert.DoesNotContain("recovery", fixture.Services.Operations);
+    }
+
+    [Fact]
+    public async Task DeployAsync_HealthFailureRecordsReadinessBeforeRollbackWithoutDuplicate()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var health = new FakeHealthProbe(
+            ready: false,
+            beforeResult: () => Thread.Sleep(TimeSpan.FromSeconds(1)));
+
+        var result = await fixture.CreateOrchestrator(health).DeployAsync(
+            new SetupRequest("192.168.1.20", ["10.20.0.0/16"]),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.HealthFailed, result.Code);
+        var serviceStarted = Assert.Single(
+            result.Steps,
+            step => step.Code == "SERVICE_STARTED");
+        Assert.Equal(SetupStepState.Succeeded, serviceStarted.State);
+        var healthFailed = Assert.Single(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.HealthFailed);
+        Assert.Equal(SetupStepState.Failed, healthFailed.State);
+        var rollbackCompleted = Assert.Single(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+        Assert.Equal(SetupStepState.Succeeded, rollbackCompleted.State);
+
+        var codes = result.Steps.Select(step => step.Code).ToArray();
+        Assert.True(
+            Array.IndexOf(codes, "SERVICE_STARTED") <
+            Array.IndexOf(codes, SetupErrorCodes.HealthFailed));
+        Assert.True(
+            Array.IndexOf(codes, SetupErrorCodes.HealthFailed) <
+            Array.IndexOf(codes, "ROLLBACK_COMPLETED"));
+
+        var diagnostics = Assert.IsType<SetupOperationDiagnosticMetadata>(
+            result.DiagnosticMetadata);
+        var healthDiagnostic = Assert.Single(
+            diagnostics.Stages,
+            stage => stage.Code == SetupErrorCodes.HealthFailed);
+        var rollbackDiagnostic = Assert.Single(
+            diagnostics.Stages,
+            stage => stage.Code == "ROLLBACK_COMPLETED");
+        Assert.True(healthDiagnostic.DurationMilliseconds >= 900);
+        Assert.True(
+            rollbackDiagnostic.DurationMilliseconds <
+            healthDiagnostic.DurationMilliseconds);
     }
 
     [Fact]
@@ -809,6 +868,13 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Contains(
             result.Steps,
             step => step.Code == SetupErrorCodes.RollbackServiceStopFailed);
+        Assert.Single(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.HealthFailed);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, result.Steps.Last().Code);
+        Assert.Single(
+            result.Steps,
+            step => step.Code == SetupErrorCodes.RollbackFailed);
         Assert.DoesNotContain("restore", fixture.Services.Operations);
         Assert.Equal(
             "new-agent",
@@ -847,12 +913,19 @@ public sealed class AgentDeploymentOrchestratorTests
     {
         using var folder = new TemporaryFolder();
         var fixture = CreateUpgradeFixture(folder);
+        var health = new FakeHealthProbe(
+            ready: false,
+            failureCode: AgentHealthProbeCode.HttpsConnectionReset,
+            serviceRunningObserved: true,
+            listenerOwnedObserved: true,
+            httpAttemptCount: 3,
+            lastTransportPhase: AgentHealthTransportPhase.RequestStarted);
         fixture.FileSystem.MoveFailuresRemaining = 10;
         fixture.FileSystem.MoveFailurePredicate = (_, destination) =>
             Path.GetFileName(destination)
                 .Contains(".__failed_", StringComparison.Ordinal);
 
-        var result = await fixture.CreateOrchestrator(ready: false).DeployAsync(
+        var result = await fixture.CreateOrchestrator(health).DeployAsync(
             new SetupRequest("192.168.1.20", ["192.168.40.0/24"]),
             CancellationToken.None);
 
@@ -860,8 +933,19 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
         Assert.Equal(SetupErrorCodes.HealthFailed, result.PrimaryFailureCode);
         Assert.Equal(
-            AgentHealthProbeCode.DeadlineExceeded.ToString(),
+            AgentHealthProbeCode.HttpsConnectionReset.ToString(),
             result.AgentHealthCode);
+        Assert.True(result.AgentServiceRunningObserved);
+        Assert.True(result.AgentListenerOwnedObserved);
+        Assert.Equal(3, result.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.AgentLastTransportPhase);
+        Assert.Equal(
+            "Agent PC 내부 통신 실패: Setup → 127.0.0.1:18443 → Agent 서비스 구간에서 " +
+            "로컬 HTTPS 응답을 확인하지 못했습니다. Viewer IP나 스위치 관리망 설정 문제는 아닙니다. " +
+            "진단 단계: 로컬 HTTPS 연결 재설정 / HTTPS 진행: HTTPS 요청 시작.",
+            result.PrimaryFailureMessage);
         Assert.Contains(
             SetupErrorCodes.RollbackFileRestoreFailed,
             result.RollbackFailureCodes);
@@ -871,9 +955,23 @@ public sealed class AgentDeploymentOrchestratorTests
             fixture.FileSystem,
             fixture.Paths).Read();
         Assert.Equal(
-            AgentHealthProbeCode.DeadlineExceeded.ToString(),
+            AgentHealthProbeCode.HttpsConnectionReset.ToString(),
             pending.AgentHealthCode);
         Assert.False(pending.AgentRestartObserved);
+        Assert.True(pending.AgentServiceRunningObserved);
+        Assert.True(pending.AgentListenerOwnedObserved);
+        Assert.Equal(3, pending.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            pending.AgentLastTransportPhase);
+        var inspection = fixture.CreateOrchestrator(ready: true)
+            .InspectPendingRecovery();
+        Assert.True(inspection.AgentServiceRunningObserved);
+        Assert.True(inspection.AgentListenerOwnedObserved);
+        Assert.Equal(3, inspection.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            inspection.AgentLastTransportPhase);
     }
 
     [Fact]
@@ -1087,7 +1185,11 @@ public sealed class AgentDeploymentOrchestratorTests
             fixture.Firewall,
             new FakeHealthProbe(
                 ready: false,
-                failureCode: AgentHealthProbeCode.PayloadInvalid),
+                failureCode: AgentHealthProbeCode.HttpsRequestTimeout,
+                serviceRunningObserved: true,
+                listenerOwnedObserved: true,
+                httpAttemptCount: 2,
+                lastTransportPhase: AgentHealthTransportPhase.RequestStarted),
             new FakeAdministratorChecker(),
             fixture.Paths);
 
@@ -1097,15 +1199,34 @@ public sealed class AgentDeploymentOrchestratorTests
 
         Assert.True(result.Succeeded);
         Assert.Equal(
-            AgentHealthProbeCode.PayloadInvalid.ToString(),
+            AgentHealthProbeCode.HttpsRequestTimeout.ToString(),
             result.AgentHealthCode);
+        Assert.True(result.AgentServiceRunningObserved);
+        Assert.True(result.AgentListenerOwnedObserved);
+        Assert.Equal(2, result.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.AgentLastTransportPhase);
         var readiness = Assert.Single(
             result.Steps,
             step => step.Code == "AGENT_NOT_READY");
         Assert.Equal(SetupStepState.Information, readiness.State);
         Assert.Contains(
             AgentDeploymentOrchestrator.AgentHealthDisplayName(
-                AgentHealthProbeCode.PayloadInvalid),
+                AgentHealthProbeCode.HttpsRequestTimeout),
+            readiness.Message,
+            StringComparison.Ordinal);
+        Assert.StartsWith(
+            "Agent PC 내부 통신 실패: Setup → 127.0.0.1:18443 → Agent 서비스 구간에서 " +
+            "로컬 HTTPS 응답을 확인하지 못했습니다. Viewer IP나 스위치 관리망 설정 문제는 아닙니다.",
+            readiness.Message,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "HTTPS 진행: HTTPS 요청 시작",
+            readiness.Message,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "192.168.1.20",
             readiness.Message,
             StringComparison.Ordinal);
     }
@@ -1570,6 +1691,14 @@ public sealed class AgentDeploymentOrchestratorTests
             installMovedToBackup: false,
             stagingActivated: false,
             formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        journalStore.Write(journalStore.Read() with
+        {
+            AgentHealthCode = AgentHealthProbeCode.HttpsTlsFailed.ToString(),
+            AgentServiceRunningObserved = true,
+            AgentListenerOwnedObserved = true,
+            AgentHttpAttemptCount = 1,
+            AgentLastTransportPhase = AgentHealthTransportPhase.RequestStarted
+        });
         fixture.Services.CaptureException =
             new InvalidOperationException("simulated Windows failure");
 
@@ -1589,6 +1718,15 @@ public sealed class AgentDeploymentOrchestratorTests
             result.DiagnosticMetadata?.Failure?.Category);
         Assert.True(
             result.DiagnosticMetadata?.Failure?.DurationMilliseconds >= 0);
+        Assert.Equal(
+            AgentHealthProbeCode.HttpsTlsFailed.ToString(),
+            result.AgentHealthCode);
+        Assert.True(result.AgentServiceRunningObserved);
+        Assert.True(result.AgentListenerOwnedObserved);
+        Assert.Equal(1, result.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.AgentLastTransportPhase);
         Assert.True(journalStore.Exists);
     }
 
@@ -1614,6 +1752,10 @@ public sealed class AgentDeploymentOrchestratorTests
         json.Remove(nameof(DeploymentJournal.RollbackFailureCodes));
         json.Remove(nameof(DeploymentJournal.AgentHealthCode));
         json.Remove(nameof(DeploymentJournal.AgentRestartObserved));
+        json.Remove(nameof(DeploymentJournal.AgentServiceRunningObserved));
+        json.Remove(nameof(DeploymentJournal.AgentListenerOwnedObserved));
+        json.Remove(nameof(DeploymentJournal.AgentHttpAttemptCount));
+        json.Remove(nameof(DeploymentJournal.AgentLastTransportPhase));
         File.WriteAllText(journalStore.JournalPath, json.ToJsonString());
 
         var restored = journalStore.Read();
@@ -1624,6 +1766,12 @@ public sealed class AgentDeploymentOrchestratorTests
         Assert.Empty(restored.RollbackFailureCodes);
         Assert.Null(restored.AgentHealthCode);
         Assert.False(restored.AgentRestartObserved);
+        Assert.False(restored.AgentServiceRunningObserved);
+        Assert.False(restored.AgentListenerOwnedObserved);
+        Assert.Equal(0, restored.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.NotStarted,
+            restored.AgentLastTransportPhase);
     }
 
     [Theory]

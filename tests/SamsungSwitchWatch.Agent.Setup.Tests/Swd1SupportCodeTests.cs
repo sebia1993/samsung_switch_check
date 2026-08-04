@@ -180,6 +180,30 @@ public sealed class Swd1SupportCodeTests
     }
 
     [Fact]
+    public void AgentBuilder_TreatsObservedOwnedListenerAsPassed()
+    {
+        var payload = Swd1AgentPayloadBuilder.Build(
+            "0.10.13-poc",
+            "install",
+            "SETUP_HEALTH_FAILED",
+            "SETUP_HEALTH_FAILED",
+            [],
+            "NONE",
+            "CONFIGURED",
+            "PASS_OBSERVED",
+            "FAIL",
+            "PASS",
+            [],
+            reserved: (byte)Swd1AgentHealthCode.HttpsRequestFailed);
+
+        var code = Swd1SupportCode.Encode(payload);
+        Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
+        Assert.Equal(
+            Swd1CheckState.Passed,
+            decoded!.Agent!.Value.LocalTcp18443);
+    }
+
+    [Fact]
     public void CompactAgentVersion_DistinguishesMaximumNormalValueFromUnknown()
     {
         var normal = CreateViewerPayload(

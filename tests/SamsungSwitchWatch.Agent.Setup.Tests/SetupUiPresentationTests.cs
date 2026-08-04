@@ -19,7 +19,15 @@ public sealed class SetupUiPresentationTests
             RollbackFailureCodes =
             [
                 SetupErrorCodes.RollbackServiceRestoreFailed
-            ]
+            ],
+            AgentHealthCode =
+                AgentHealthProbeCode.HttpsConnectionReset.ToString(),
+            AgentRestartObserved = true,
+            AgentServiceRunningObserved = true,
+            AgentListenerOwnedObserved = true,
+            AgentHttpAttemptCount = 2,
+            AgentLastTransportPhase =
+                AgentHealthTransportPhase.RequestStarted
         };
 
         var result =
@@ -32,6 +40,16 @@ public sealed class SetupUiPresentationTests
         Assert.Equal(
             "서비스 등록 단계에서 실패했습니다.",
             result.PrimaryFailureMessage);
+        Assert.Equal(
+            AgentHealthProbeCode.HttpsConnectionReset.ToString(),
+            result.AgentHealthCode);
+        Assert.True(result.AgentRestartObserved);
+        Assert.True(result.AgentServiceRunningObserved);
+        Assert.True(result.AgentListenerOwnedObserved);
+        Assert.Equal(2, result.AgentHttpAttemptCount);
+        Assert.Equal(
+            AgentHealthTransportPhase.RequestStarted,
+            result.AgentLastTransportPhase);
         Assert.Contains(
             steps,
             step =>
@@ -589,6 +607,10 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("Readiness=NOT_RUN", text);
         Assert.Contains("AgentHealthCode=NOT_RUN", text);
         Assert.Contains("AgentRestartObserved=FALSE", text);
+        Assert.Contains("ServiceRunningObserved=FALSE", text);
+        Assert.Contains("ListenerOwnedObserved=FALSE", text);
+        Assert.Contains("HttpAttemptCount=0", text);
+        Assert.Contains("LastTransportPhase=NOT_STARTED", text);
         Assert.Contains("StageCount=3", text);
         Assert.Contains("Stage.01.Code=PACKAGE_VALID", text);
         Assert.Contains("Stage.01.Status=SUCCESS", text);
@@ -720,7 +742,14 @@ public sealed class SetupUiPresentationTests
             "ready",
             SetupStepState.Succeeded,
             "safe"));
-        var result = SetupOperationResult.Success("done", steps);
+        var result = SetupOperationResult.Success("done", steps) with
+        {
+            AgentServiceRunningObserved = true,
+            AgentListenerOwnedObserved = true,
+            AgentHttpAttemptCount = 1,
+            AgentLastTransportPhase =
+                AgentHealthTransportPhase.ReadinessValidated
+        };
 
         var text = SetupFieldDiagnosticFormatter.Format(
             new SetupFieldDiagnosticContext(
@@ -748,6 +777,10 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("Readiness=PASS", text);
         Assert.Contains("AgentHealthCode=NOT_RUN", text);
         Assert.Contains("AgentRestartObserved=FALSE", text);
+        Assert.Contains("ServiceRunningObserved=TRUE", text);
+        Assert.Contains("ListenerOwnedObserved=TRUE", text);
+        Assert.Contains("HttpAttemptCount=1", text);
+        Assert.Contains("LastTransportPhase=READINESS_VALIDATED", text);
     }
 
     [Fact]
@@ -761,7 +794,11 @@ public sealed class SetupUiPresentationTests
             PrimaryFailureCode = SetupErrorCodes.HealthFailed,
             AgentHealthCode =
                 AgentHealthProbeCode.TcpOwnedByOtherProcess.ToString(),
-            AgentRestartObserved = true
+            AgentRestartObserved = true,
+            AgentServiceRunningObserved = true,
+            AgentListenerOwnedObserved = true,
+            AgentHttpAttemptCount = 3,
+            AgentLastTransportPhase = AgentHealthTransportPhase.ResponseBody
         };
 
         var failureText = SetupFailureDiagnosticFormatter.Format(
@@ -787,13 +824,79 @@ public sealed class SetupUiPresentationTests
             "AgentHealthCode=TcpOwnedByOtherProcess",
             failureText);
         Assert.Contains("AgentRestartObserved=true", failureText);
+        Assert.Contains("ServiceRunningObserved=true", failureText);
+        Assert.Contains("ListenerOwnedObserved=true", failureText);
+        Assert.Contains("HttpAttemptCount=3", failureText);
+        Assert.Contains("LastTransportPhase=RESPONSE_BODY", failureText);
         Assert.Contains(
             "AgentHealthCode=TCPOWNEDBYOTHERPROCESS",
             fieldText);
         Assert.Contains("AgentRestartObserved=TRUE", fieldText);
+        Assert.Contains("ServiceRunningObserved=TRUE", fieldText);
+        Assert.Contains("ListenerOwnedObserved=TRUE", fieldText);
+        Assert.Contains("HttpAttemptCount=3", fieldText);
+        Assert.Contains("LastTransportPhase=RESPONSE_BODY", fieldText);
+        Assert.Contains("LocalTcp18443=PASS_OBSERVED", fieldText);
         Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
         Assert.Equal(
             Swd1AgentHealthCode.TcpOwnedByOtherProcess,
+            decoded!.Agent!.Value.HealthCode);
+        Assert.Equal(
+            Swd1CheckState.Passed,
+            decoded.Agent.Value.LocalTcp18443);
+    }
+
+    [Theory]
+    [InlineData(AgentHealthProbeCode.HttpsTlsFailed, "HTTPS_TLS_FAILED")]
+    [InlineData(
+        AgentHealthProbeCode.HttpsRequestTimeout,
+        "HTTPS_REQUEST_TIMEOUT")]
+    [InlineData(
+        AgentHealthProbeCode.HttpsConnectionReset,
+        "HTTPS_CONNECTION_RESET")]
+    [InlineData(AgentHealthProbeCode.HttpsEof, "HTTPS_EOF")]
+    [InlineData(
+        AgentHealthProbeCode.HttpsConnectFailed,
+        "HTTPS_CONNECT_FAILED")]
+    public void DetailedHttpsFailureCodesKeepSwd1Compatibility(
+        AgentHealthProbeCode healthCode,
+        string expectedDiagnosticCode)
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.HealthFailed,
+            "safe",
+            []) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.HealthFailed,
+            AgentHealthCode = healthCode.ToString()
+        };
+        var context = new SetupFieldDiagnosticContext(
+            "0.10.13-poc",
+            DateTimeOffset.UnixEpoch,
+            "10.0.26100.0",
+            "X64",
+            "install",
+            TimeSpan.Zero,
+            result,
+            PendingRecoveryInspection.None);
+
+        var text = SetupFieldDiagnosticFormatter.Format(context);
+        var failureText = SetupFailureDiagnosticFormatter.Format(
+            new SetupFailureDiagnosticContext(
+                "0.10.13-poc",
+                DateTimeOffset.UnixEpoch,
+                "install",
+                result,
+                PendingRecoveryInspection.None));
+        var supportCode = SetupFieldDiagnosticFormatter.CreateSupportCode(context);
+
+        Assert.Contains($"AgentHealthCode={expectedDiagnosticCode}", text);
+        Assert.Contains(
+            $"AgentHealthCode={expectedDiagnosticCode}",
+            failureText);
+        Assert.True(Swd1SupportCode.TryDecode(supportCode, out var decoded));
+        Assert.Equal(
+            Swd1AgentHealthCode.HttpsRequestFailed,
             decoded!.Agent!.Value.HealthCode);
     }
 

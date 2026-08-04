@@ -229,7 +229,13 @@ public sealed class AgentDeploymentOrchestrator(
                 PrimaryFailureMessage = inspection.PrimaryFailureMessage,
                 RollbackFailureCodes = rollbackFailureCodes,
                 AgentHealthCode = inspection.AgentHealthCode,
-                AgentRestartObserved = inspection.AgentRestartObserved
+                AgentRestartObserved = inspection.AgentRestartObserved,
+                AgentServiceRunningObserved =
+                    inspection.AgentServiceRunningObserved,
+                AgentListenerOwnedObserved =
+                    inspection.AgentListenerOwnedObserved,
+                AgentHttpAttemptCount = inspection.AgentHttpAttemptCount,
+                AgentLastTransportPhase = inspection.AgentLastTransportPhase
             };
         }
         catch (Exception exception)
@@ -265,7 +271,13 @@ public sealed class AgentDeploymentOrchestrator(
                 PrimaryFailureMessage = inspection.PrimaryFailureMessage,
                 RollbackFailureCodes = inspection.RollbackFailureCodes,
                 AgentHealthCode = inspection.AgentHealthCode,
-                AgentRestartObserved = inspection.AgentRestartObserved
+                AgentRestartObserved = inspection.AgentRestartObserved,
+                AgentServiceRunningObserved =
+                    inspection.AgentServiceRunningObserved,
+                AgentListenerOwnedObserved =
+                    inspection.AgentListenerOwnedObserved,
+                AgentHttpAttemptCount = inspection.AgentHttpAttemptCount,
+                AgentLastTransportPhase = inspection.AgentLastTransportPhase
             };
         }
         finally
@@ -536,6 +548,10 @@ public sealed class AgentDeploymentOrchestrator(
             serviceManager.Start(SetupConstants.ServiceName, TimeSpan.FromSeconds(30));
             journal = journal with { Stage = "service-started" };
             journalStore.Write(journal);
+            steps.Add(Succeeded(
+                "SERVICE_STARTED",
+                "Agent 시작",
+                "Agent 서비스가 시작되어 로컬 HTTPS 준비 상태를 확인합니다."));
             steps.MarkActiveStage(SetupFailureStage.Readiness);
             agentHealth = await healthProbe.WaitUntilReadyAsync(
                 new Uri("https://127.0.0.1:18443/health/ready"),
@@ -547,14 +563,20 @@ public sealed class AgentDeploymentOrchestrator(
             journal = journal with
             {
                 AgentHealthCode = agentHealth.Value.Code.ToString(),
-                AgentRestartObserved = agentHealth.Value.RestartObserved
+                AgentRestartObserved = agentHealth.Value.RestartObserved,
+                AgentServiceRunningObserved =
+                    agentHealth.Value.ServiceRunningObserved,
+                AgentListenerOwnedObserved =
+                    agentHealth.Value.ListenerOwnedObserved,
+                AgentHttpAttemptCount = agentHealth.Value.HttpAttemptCount,
+                AgentLastTransportPhase = agentHealth.Value.LastTransportPhase
             };
+            journalStore.Write(journal);
             if (!agentHealth.Value.Ready)
             {
                 throw new SetupException(
                     SetupErrorCodes.HealthFailed,
-                    "Agent 서비스가 제한 시간 안에 준비 상태가 되지 않았습니다. " +
-                    $"진단 단계: {AgentHealthDisplayName(agentHealth.Value.Code)}");
+                    AgentHealthFailureMessage(agentHealth.Value));
             }
 
             steps.Add(Succeeded(
@@ -634,13 +656,24 @@ public sealed class AgentDeploymentOrchestrator(
                 steps) with
             {
                 AgentHealthCode = agentHealth.Value.Code.ToString(),
-                AgentRestartObserved = agentHealth.Value.RestartObserved
+                AgentRestartObserved = agentHealth.Value.RestartObserved,
+                AgentServiceRunningObserved =
+                    agentHealth.Value.ServiceRunningObserved,
+                AgentListenerOwnedObserved =
+                    agentHealth.Value.ListenerOwnedObserved,
+                AgentHttpAttemptCount = agentHealth.Value.HttpAttemptCount,
+                AgentLastTransportPhase = agentHealth.Value.LastTransportPhase
             };
         }
         catch (OperationCanceledException)
         {
             const string primaryCode = SetupErrorCodes.Cancelled;
             const string primaryMessage = "설치가 취소되었습니다.";
+            RecordPrimaryFailureBeforeRollback(
+                steps,
+                primaryCode,
+                "설치 취소",
+                primaryMessage);
             var rollback = currentTransactionOwned
                 ? await TryRollbackAsync(
                     journalStore,
@@ -671,6 +704,11 @@ public sealed class AgentDeploymentOrchestrator(
         }
         catch (SetupException exception)
         {
+            RecordPrimaryFailureBeforeRollback(
+                steps,
+                exception.Code,
+                "설치 실패",
+                exception.Message);
             var rollback = currentTransactionOwned
                 ? await TryRollbackAsync(
                     journalStore,
@@ -705,6 +743,11 @@ public sealed class AgentDeploymentOrchestrator(
             const string primaryCode = SetupErrorCodes.Unexpected;
             const string primaryMessage =
                 "예상하지 못한 오류로 설치를 완료하지 못했습니다.";
+            RecordPrimaryFailureBeforeRollback(
+                steps,
+                primaryCode,
+                "설치 실패",
+                primaryMessage);
             var rollback = currentTransactionOwned
                 ? await TryRollbackAsync(
                     journalStore,
@@ -1243,7 +1286,20 @@ public sealed class AgentDeploymentOrchestrator(
         var finalMessage = rollback.Succeeded
             ? primaryMessage
             : "설치에 실패했고 이전 상태를 완전히 복구하지 못했습니다. 관리자 확인이 필요합니다.";
-        steps.Add(Failed(finalCode, label, finalMessage));
+        if (rollback.Succeeded)
+        {
+            RecordPrimaryFailureBeforeRollback(
+                steps,
+                primaryCode,
+                label,
+                primaryMessage);
+        }
+        else
+        {
+            // Keep the rollback result as the final failed step while preserving
+            // the original failure immediately before rollback starts.
+            steps.Add(Failed(finalCode, label, finalMessage));
+        }
         return SetupOperationResult.Failure(
             finalCode,
             finalMessage,
@@ -1253,8 +1309,32 @@ public sealed class AgentDeploymentOrchestrator(
             PrimaryFailureMessage = primaryMessage,
             RollbackFailureCodes = rollback.FailureCodes,
             AgentHealthCode = agentHealth?.Code.ToString(),
-            AgentRestartObserved = agentHealth?.RestartObserved ?? false
+            AgentRestartObserved = agentHealth?.RestartObserved ?? false,
+            AgentServiceRunningObserved =
+                agentHealth?.ServiceRunningObserved ?? false,
+            AgentListenerOwnedObserved =
+                agentHealth?.ListenerOwnedObserved ?? false,
+            AgentHttpAttemptCount = agentHealth?.HttpAttemptCount ?? 0,
+            AgentLastTransportPhase =
+                agentHealth?.LastTransportPhase ??
+                AgentHealthTransportPhase.NotStarted
         };
+    }
+
+    private static void RecordPrimaryFailureBeforeRollback(
+        SetupStepRecorder steps,
+        string code,
+        string label,
+        string message)
+    {
+        if (steps.Any(step =>
+                step.State == SetupStepState.Failed &&
+                string.Equals(step.Code, code, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        steps.Add(Failed(code, label, message));
     }
 
     private async Task MoveDirectoryForRollbackAsync(
@@ -1353,7 +1433,21 @@ public sealed class AgentDeploymentOrchestrator(
                     current.AgentHealthCode ?? journal.AgentHealthCode,
                 AgentRestartObserved =
                     current.AgentRestartObserved ||
-                    journal.AgentRestartObserved
+                    journal.AgentRestartObserved,
+                AgentServiceRunningObserved =
+                    current.AgentServiceRunningObserved ||
+                    journal.AgentServiceRunningObserved,
+                AgentListenerOwnedObserved =
+                    current.AgentListenerOwnedObserved ||
+                    journal.AgentListenerOwnedObserved,
+                AgentHttpAttemptCount = Math.Max(
+                    current.AgentHttpAttemptCount,
+                    journal.AgentHttpAttemptCount),
+                AgentLastTransportPhase =
+                    current.AgentLastTransportPhase !=
+                    AgentHealthTransportPhase.NotStarted
+                        ? current.AgentLastTransportPhase
+                        : journal.AgentLastTransportPhase
             });
         }
         catch
@@ -2037,6 +2131,12 @@ public sealed class AgentDeploymentOrchestrator(
             RollbackFailureCodes = pending.RollbackFailureCodes,
             AgentHealthCode = pending.AgentHealthCode,
             AgentRestartObserved = pending.AgentRestartObserved,
+            AgentServiceRunningObserved =
+                pending.AgentServiceRunningObserved,
+            AgentListenerOwnedObserved =
+                pending.AgentListenerOwnedObserved,
+            AgentHttpAttemptCount = pending.AgentHttpAttemptCount,
+            AgentLastTransportPhase = pending.AgentLastTransportPhase,
             ServiceState = GetServiceState(currentService),
             InstallDirectoryExists =
                 fileSystem.DirectoryExists(paths.InstallDirectory),
@@ -2085,6 +2185,14 @@ public sealed class AgentDeploymentOrchestrator(
             RollbackFailureCodes = pending?.RollbackFailureCodes ?? [],
             AgentHealthCode = pending?.AgentHealthCode,
             AgentRestartObserved = pending?.AgentRestartObserved ?? false,
+            AgentServiceRunningObserved =
+                pending?.AgentServiceRunningObserved ?? false,
+            AgentListenerOwnedObserved =
+                pending?.AgentListenerOwnedObserved ?? false,
+            AgentHttpAttemptCount = pending?.AgentHttpAttemptCount ?? 0,
+            AgentLastTransportPhase =
+                pending?.AgentLastTransportPhase ??
+                AgentHealthTransportPhase.NotStarted,
             ServiceState = service is null
                 ? "unknown"
                 : GetServiceState(service),
@@ -2131,6 +2239,11 @@ public sealed class AgentDeploymentOrchestrator(
             AgentHealthProbeCode.ApiVersionMismatch => "API_VERSION_MISMATCH",
             AgentHealthProbeCode.ProtocolMismatch => "PROTOCOL_MISMATCH",
             AgentHealthProbeCode.ProductVersionMismatch => "PRODUCT_VERSION_MISMATCH",
+            AgentHealthProbeCode.HttpsTlsFailed => "HTTPS_TLS_FAILED",
+            AgentHealthProbeCode.HttpsRequestTimeout => "HTTPS_REQUEST_TIMEOUT",
+            AgentHealthProbeCode.HttpsConnectionReset => "HTTPS_CONNECTION_RESET",
+            AgentHealthProbeCode.HttpsEof => "HTTPS_EOF",
+            AgentHealthProbeCode.HttpsConnectFailed => "HTTPS_CONNECT_FAILED",
             _ => "DEADLINE_EXCEEDED"
         }}";
 
@@ -2150,7 +2263,31 @@ public sealed class AgentDeploymentOrchestrator(
             AgentHealthProbeCode.ApiVersionMismatch => "Agent API 버전",
             AgentHealthProbeCode.ProtocolMismatch => "Agent 통신 프로토콜",
             AgentHealthProbeCode.ProductVersionMismatch => "Agent 제품 버전",
+            AgentHealthProbeCode.HttpsTlsFailed => "로컬 HTTPS TLS 협상",
+            AgentHealthProbeCode.HttpsRequestTimeout => "로컬 HTTPS 응답 제한 시간",
+            AgentHealthProbeCode.HttpsConnectionReset => "로컬 HTTPS 연결 재설정",
+            AgentHealthProbeCode.HttpsEof => "로컬 HTTPS 응답 조기 종료",
+            AgentHealthProbeCode.HttpsConnectFailed => "로컬 HTTPS 연결",
             _ => "준비 확인 제한 시간"
+        };
+
+    internal static string AgentHealthFailureMessage(
+        AgentHealthProbeResult health) =>
+        "Agent PC 내부 통신 실패: Setup → 127.0.0.1:18443 → Agent 서비스 구간에서 " +
+        "로컬 HTTPS 응답을 확인하지 못했습니다. Viewer IP나 스위치 관리망 설정 문제는 아닙니다. " +
+        $"진단 단계: {AgentHealthDisplayName(health.Code)} / " +
+        $"HTTPS 진행: {AgentHealthTransportPhaseDisplayName(health.LastTransportPhase)}.";
+
+    internal static string AgentHealthTransportPhaseDisplayName(
+        AgentHealthTransportPhase phase) =>
+        phase switch
+        {
+            AgentHealthTransportPhase.ListenerOwned => "TCP/18443 Agent 소유 확인",
+            AgentHealthTransportPhase.RequestStarted => "HTTPS 요청 시작",
+            AgentHealthTransportPhase.ResponseHeaders => "HTTPS 응답 헤더",
+            AgentHealthTransportPhase.ResponseBody => "HTTPS 응답 본문",
+            AgentHealthTransportPhase.ReadinessValidated => "준비 응답 검증",
+            _ => "HTTPS 요청 전"
         };
 
     private static void ValidatePendingJournalState(DeploymentJournal pending)

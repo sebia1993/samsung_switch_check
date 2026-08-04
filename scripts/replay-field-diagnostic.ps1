@@ -289,10 +289,17 @@ function Assert-SswAgentSetupSchema {
         'FailureCategory',
         'FailureStageDurationMs'
     )
+    $transportObservationKeys = @(
+        'ServiceRunningObserved',
+        'ListenerOwnedObserved',
+        'HttpAttemptCount',
+        'LastTransportPhase'
+    )
     $allowedFixedKeys = @(
         $legacyFixedKeys
         $healthExtensionKeys
         $failureExtensionKeys
+        $transportObservationKeys
     )
 
     Assert-SswKeys -Values $Values -RequiredKeys $legacyFixedKeys -IsAllowed {
@@ -309,9 +316,19 @@ function Assert-SswAgentSetupSchema {
         $failureExtensionKeys |
             Where-Object { $Values.ContainsKey($_) }
     )
+    $hasTransportObservation = @(
+        $transportObservationKeys |
+            Where-Object { $Values.ContainsKey($_) }
+    )
     if ($hasHealthExtension.Count -notin @(0, $healthExtensionKeys.Count) -or
         $hasFailureExtension.Count -notin @(0, $failureExtensionKeys.Count) -or
+        $hasTransportObservation.Count -notin @(
+            0,
+            $transportObservationKeys.Count
+        ) -or
         ($hasFailureExtension.Count -gt 0 -and
+         $hasHealthExtension.Count -eq 0) -or
+        ($hasTransportObservation.Count -gt 0 -and
          $hasHealthExtension.Count -eq 0)) {
         Stop-SswFieldDiagnostic -Code $script:SchemaError
     }
@@ -334,7 +351,7 @@ function Assert-SswAgentSetupSchema {
     Assert-SswPattern -Values $Values -Key 'FirewallDecisionCodes' `
         -Pattern '^(NONE|[A-Z][A-Z0-9_]*(,[A-Z][A-Z0-9_]*)*)$'
     Assert-SswPattern -Values $Values -Key 'LocalTcp18443' `
-        -Pattern '^(PASS|NOT_CONFIRMED|NOT_RUN)$'
+        -Pattern '^(PASS|PASS_OBSERVED|NOT_CONFIRMED|NOT_RUN)$'
     Assert-SswPattern -Values $Values -Key 'Readiness' `
         -Pattern '^(PASS|FAIL|NOT_RUN)$'
 
@@ -357,6 +374,21 @@ function Assert-SswAgentSetupSchema {
             -Pattern '^(unknown|[0-9]{1,8})$'
     }
 
+    if ($hasTransportObservation.Count -gt 0) {
+        Assert-SswPattern -Values $Values -Key 'ServiceRunningObserved' `
+            -Pattern '^(TRUE|FALSE)$'
+        Assert-SswPattern -Values $Values -Key 'ListenerOwnedObserved' `
+            -Pattern '^(TRUE|FALSE)$'
+        Assert-SswIntegerRange -Value $Values.HttpAttemptCount `
+            -Minimum 0 `
+            -Maximum 10000
+        Assert-SswPattern -Values $Values -Key 'LastTransportPhase' `
+            -Pattern (
+                '^(NOT_STARTED|LISTENER_OWNED|REQUEST_STARTED|' +
+                'RESPONSE_HEADERS|RESPONSE_BODY|READINESS_VALIDATED)$'
+            )
+    }
+
     if ($Values.Result -ceq 'SUCCESS') {
         if ($Values.ErrorCode -cne 'OK' -or $Values.FailedStage -cne 'NONE') {
             Stop-SswFieldDiagnostic -Code $script:SchemaError
@@ -370,7 +402,8 @@ function Assert-SswAgentSetupSchema {
     $stageCount = [int]$Values.StageCount
     $expectedFixedKeyCount = $legacyFixedKeys.Count +
         $hasHealthExtension.Count +
-        $hasFailureExtension.Count
+        $hasFailureExtension.Count +
+        $hasTransportObservation.Count
     if ($Values.Count -ne ($expectedFixedKeyCount + (4 * $stageCount))) {
         Stop-SswFieldDiagnostic -Code $script:SchemaError
     }

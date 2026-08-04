@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.12 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.13 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.12-poc"
-DOCUMENT_DATE = "2026-07-30"
+VERSION = "0.10.13-poc"
+DOCUMENT_DATE = "2026-08-04"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -816,8 +816,10 @@ Viewer PC                 Agent PC                    Samsung Switch
         "SWD1-XXXX-XXXX-XXXX-XXXX 형식의 읽기 전용 코드가 표시됩니다. 별도 복사 버튼은 "
         "없으며 코드만 선택해 Ctrl+C로 복사합니다. 전화나 메신저로 짧은 장애 분류를 전달할 "
         "때 사용하세요. 이 코드는 오프라인에서 생성되고 CRC로 입력 오타를 확인하지만 비밀값, "
-        "인증·페어링 토큰 또는 인증서 지문이 아닙니다. 새 작업과 성공 화면에서는 이전 코드가 "
-        "지워집니다.",
+        "인증·페어링 토큰 또는 인증서 지문이 아닙니다. 로컬 HTTPS의 다섯 세부 원인은 기존 "
+        "SWD1/1 형식과 호환되도록 HTTPS 요청 실패라는 상위 분류로만 담깁니다. 정확한 세부 "
+        "코드와 안전 관측값은 같은 실패 화면의 진단정보를 함께 확인하세요. 새 작업과 성공 "
+        "화면에서는 이전 코드가 지워집니다.",
         "warning",
     )
     add_callout(
@@ -891,6 +893,57 @@ Viewer PC IPv4 예     : 10.20.30.25
         "IP/CIDR, PC·사용자 이름, 절대 경로, 계정, "
         "비밀번호, 인증서, 방화벽 규칙 원문과 장비 명령·출력은 포함하지 않으며 별도 로그 파일로 "
         "저장하지 않습니다.",
+        "info",
+    )
+    add_callout(
+        doc,
+        "로컬 HTTPS 실패는 Agent PC 내부 구간",
+        "HTTPS_TLS_FAILED, HTTPS_REQUEST_TIMEOUT, HTTPS_CONNECTION_RESET, HTTPS_EOF, "
+        "HTTPS_CONNECT_FAILED는 Setup → 127.0.0.1:18443 → Agent 서비스 사이의 로컬 "
+        "준비 상태 확인 실패입니다. 이 다섯 코드는 Viewer IP나 스위치 관리망 문제를 뜻하지 "
+        "않습니다. 같은 설치를 반복하기보다 코드와 아래 안전 관측값을 확인한 뒤 Agent PC의 "
+        "Windows 이벤트, TLS 정책, 백신·EDR 개입 여부를 점검하세요.",
+        "danger",
+    )
+    add_table(
+        doc,
+        ["안전 진단 항목", "의미"],
+        [
+            ("AgentHealthCode", "로컬 HTTPS 실패의 다섯 세부 분류 중 하나"),
+            ("ServiceRunningObserved", "검사 중 Agent 서비스 Running을 관찰했는지 여부"),
+            ("ListenerOwnedObserved", "기대 서비스가 TCP/18443 listener를 소유함을 관찰했는지 여부"),
+            ("HttpAttemptCount", "로컬 HTTPS 요청을 시도한 제한된 횟수"),
+            ("LastTransportPhase", "ListenerOwned, RequestStarted, ResponseHeaders 등 마지막 안전 단계"),
+            ("AgentRestartObserved", "검사 중 Agent 서비스 프로세스 재시작을 관찰했는지 여부"),
+        ],
+        [2900, 6460],
+        header_size=8.5,
+        body_size=8.25,
+        body_line=1.0,
+    )
+    add_code_block(
+        doc,
+        """
+AgentHealthCode=HTTPS_REQUEST_TIMEOUT
+ServiceRunningObserved=TRUE
+ListenerOwnedObserved=TRUE
+HttpAttemptCount=3
+LastTransportPhase=REQUEST_STARTED
+AgentRestartObserved=FALSE
+
+Stage.01.Code=SERVICE_STARTED
+Stage.02.Code=SETUP_HEALTH_FAILED
+Stage.03.Code=ROLLBACK_COMPLETED
+        """,
+    )
+    add_callout(
+        doc,
+        "진단만 세분화됨",
+        "SERVICE_STARTED → SETUP_HEALTH_FAILED → ROLLBACK_COMPLETED 순서와 각 단계 소요 시간은 "
+        "실패 위치를 구분하기 위한 기록입니다. 설치, 방화벽, Agent 신원, rollback과 보안 검증 "
+        "흐름은 바뀌지 않습니다. TRUE는 검사 중 관찰한 사실일 뿐 현재 상태를 영구 보장하지 "
+        "않으며, FALSE는 반드시 반대 상태를 확인했다는 뜻이 아니라 관찰하지 못했음을 뜻할 수 "
+        "있습니다.",
         "info",
     )
     add_callout(
@@ -1327,7 +1380,7 @@ Viewer PC IPv4 예     : 10.20.30.25
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
             ("SETUP_FIREWALL_FAILED", "안전한 불일치 코드 기록 → rollback 완료 확인 → 방화벽 서비스·Domain/Private·그룹 정책"),
-            ("SETUP_HEALTH_FAILED", "화면의 AgentHealthCode로 서비스·TCP/18443·HTTPS·응답·API/제품 버전 단계 확인 → 같은 설치 반복 대신 Windows 이벤트·EDR 확인"),
+            ("SETUP_HEALTH_FAILED", "Agent PC 내부 Setup → 127.0.0.1:18443 → Agent 서비스 구간 확인 → AgentHealthCode와 안전 관측값 확인 → 같은 설치 반복 대신 Windows 이벤트·TLS 정책·EDR 확인"),
             ("SETUP_RECOVERY_REQUIRED", "설치/업데이트를 누르지 말고 '이전 상태 복구' 실행 → 복구 완료 확인 → 설치/업데이트를 별도로 시작"),
             ("SETUP_ROLLBACK_FAILED", "'진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계 확인 → 증거 폴더를 그대로 보존 → Windows 관리자에게 전달"),
             ("ROLLBACK_STATE_MISMATCH", "복구 기록과 현재 설치 상태가 다름. 복구·설치 재시도와 파일 수동 정리를 중지"),

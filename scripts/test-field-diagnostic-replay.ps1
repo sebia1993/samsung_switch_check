@@ -123,7 +123,13 @@ function New-SswAgentSetupDiagnostic {
         [string]$ErrorCode,
         [Parameter(Mandatory = $true)]
         [string]$FailedStage,
-        [ValidateSet('Legacy', 'Health', 'Current')]
+        [ValidateSet(
+            'Legacy',
+            'Health',
+            'Current',
+            'HealthObserved',
+            'CurrentObserved'
+        )]
         [string]$SchemaVariant = 'Legacy'
     )
 
@@ -139,7 +145,7 @@ function New-SswAgentSetupDiagnostic {
         ('FailedStage=' + $FailedStage),
         ('ErrorCode=' + $ErrorCode)
     )
-    if ($SchemaVariant -ceq 'Current') {
+    if ($SchemaVariant -cin @('Current', 'CurrentObserved')) {
         $lines += @(
             ('PrimaryFailureCode=' + $ErrorCode),
             'FailureCategory=CLASSIFIED',
@@ -147,20 +153,57 @@ function New-SswAgentSetupDiagnostic {
         )
     }
 
+    $hasTransportObservation = $SchemaVariant -cin @(
+        'HealthObserved',
+        'CurrentObserved'
+    )
     $lines += @(
         'RecommendedActionCode=CHECK_FIREWALL_POLICY',
         'OperationDurationMs=1200',
         'PackageValidation=PASS',
         'RecoveryJournal=NONE',
-        'Service=NOT_INSTALLED',
+        $(if ($hasTransportObservation) {
+            'Service=CONFIGURED'
+        }
+        else {
+            'Service=NOT_INSTALLED'
+        }),
         ('FirewallDecisionCodes=' + $ErrorCode),
-        'LocalTcp18443=NOT_RUN',
-        'Readiness=NOT_RUN'
+        $(if ($hasTransportObservation) {
+            'LocalTcp18443=PASS_OBSERVED'
+        }
+        else {
+            'LocalTcp18443=NOT_RUN'
+        }),
+        $(if ($hasTransportObservation) {
+            'Readiness=FAIL'
+        }
+        else {
+            'Readiness=NOT_RUN'
+        })
     )
-    if ($SchemaVariant -cin @('Health', 'Current')) {
+    if ($SchemaVariant -cin @(
+            'Health',
+            'Current',
+            'HealthObserved',
+            'CurrentObserved'
+        )) {
         $lines += @(
-            'AgentHealthCode=NOT_RUN',
+            $(if ($hasTransportObservation) {
+                'AgentHealthCode=HTTPS_CONNECTION_RESET'
+            }
+            else {
+                'AgentHealthCode=NOT_RUN'
+            }),
             'AgentRestartObserved=FALSE'
+        )
+    }
+    if ($hasTransportObservation) {
+        $lines += @(
+            'ServiceRunningObserved=TRUE',
+            'ListenerOwnedObserved=TRUE',
+            'HttpAttemptCount=3',
+            'LastTransportPhase=REQUEST_STARTED'
         )
     }
 
@@ -279,6 +322,40 @@ try {
     Assert-SswEqual -Expected $agentScenario -Actual $agentCurrentResult.Output `
         -Message 'Current Agent Setup diagnostic selected the wrong fake scenario.'
 
+    $healthScenario =
+        'AgentDeploymentOrchestratorTests.DeployAsync_HealthFailureRestoresUpgradeFilesServiceFirewallAndIdentity'
+    $agentObservedDiagnostic = New-SswAgentSetupDiagnostic `
+        -ErrorCode 'SETUP_HEALTH_FAILED' `
+        -FailedStage 'READINESS' `
+        -SchemaVariant 'CurrentObserved'
+    $agentObservedFixture = Write-SswFixture `
+        -Name 'agent-current-observed-valid.txt' `
+        -Bom $true `
+        -Content $agentObservedDiagnostic
+    $agentObservedResult = Invoke-SswReplay -FixturePath $agentObservedFixture
+    Assert-SswEqual -Expected 0 -Actual $agentObservedResult.ExitCode `
+        -Message 'Agent Setup transport-observation input must succeed.'
+    Assert-SswEqual -Expected $healthScenario -Actual $agentObservedResult.Output `
+        -Message 'Transport observations selected the wrong fake scenario.'
+
+    $agentHealthObservedFixture = Write-SswFixture `
+        -Name 'agent-health-observed-valid.txt' `
+        -Bom $true `
+        -Content (
+            New-SswAgentSetupDiagnostic `
+                -ErrorCode 'SETUP_HEALTH_FAILED' `
+                -FailedStage 'READINESS' `
+                -SchemaVariant 'HealthObserved'
+        )
+    $agentHealthObservedResult = Invoke-SswReplay `
+        -FixturePath $agentHealthObservedFixture
+    Assert-SswEqual -Expected 0 -Actual $agentHealthObservedResult.ExitCode `
+        -Message 'Health-only transport-observation input must succeed.'
+    Assert-SswEqual `
+        -Expected $healthScenario `
+        -Actual $agentHealthObservedResult.Output `
+        -Message 'Health-only observations selected the wrong fake scenario.'
+
     Assert-SswEqual `
         -Expected 23 `
         -Actual ([Regex]::Split(
@@ -291,6 +368,10 @@ try {
         -Expected 28 `
         -Actual ([Regex]::Split($agentCurrentDiagnostic, '\r\n').Count) `
         -Message 'Current Agent Setup v1 fixture schema changed unexpectedly.'
+    Assert-SswEqual `
+        -Expected 32 `
+        -Actual ([Regex]::Split($agentObservedDiagnostic, '\r\n').Count) `
+        -Message 'Observed Agent Setup v1 fixture schema changed unexpectedly.'
 
     $settingsScenario =
         'ViewerSettingsTests.SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow'
@@ -425,6 +506,26 @@ try {
         -ErrorCode 'SETUP_FIREWALL_FAILED' `
         -FailedStage 'FIREWALL' `
         -SchemaVariant 'Current'
+    $validObservedAgent = New-SswAgentSetupDiagnostic `
+        -ErrorCode 'SETUP_HEALTH_FAILED' `
+        -FailedStage 'READINESS' `
+        -SchemaVariant 'CurrentObserved'
+    $contaminatedTransportFixture = Write-SswFixture `
+        -Name 'transport-contaminated.txt' `
+        -Content (
+            $validObservedAgent -replace
+                'LastTransportPhase=REQUEST_STARTED',
+                'LastTransportPhase=C:\ProgramData\private'
+        )
+    $contaminatedTransportResult = Invoke-SswReplay `
+        -FixturePath $contaminatedTransportFixture
+    Assert-SswEqual -Expected 1 -Actual $contaminatedTransportResult.ExitCode `
+        -Message 'Contaminated transport observation must be rejected.'
+    Assert-SswEqual `
+        -Expected 'FIELD_DIAGNOSTIC_INPUT_REJECTED' `
+        -Actual $contaminatedTransportResult.Output `
+        -Message 'Contaminated transport observation must return only a safe code.'
+
     $schemaPayloads = @(
         ($validViewer -replace "`r`nFailedStage=TCP", ''),
         ($validViewer + "`r`nErrorCode=AGENT_TIMEOUT"),
@@ -436,6 +537,35 @@ try {
         ($validCurrentAgent -replace "`r`nPrimaryFailureCode=SETUP_FIREWALL_FAILED", ''),
         ($validCurrentAgent -replace "`r`nAgentRestartObserved=FALSE", ''),
         ($validCurrentAgent + "`r`nNote=SAFE_VALUE"),
+        ($validObservedAgent -replace
+            "`r`nServiceRunningObserved=TRUE", ''),
+        ($validObservedAgent -replace
+            "`r`nListenerOwnedObserved=TRUE", ''),
+        ($validObservedAgent -replace
+            "`r`nHttpAttemptCount=3", ''),
+        ($validObservedAgent -replace
+            "`r`nLastTransportPhase=REQUEST_STARTED", ''),
+        ($validObservedAgent -replace
+            'ServiceRunningObserved=TRUE',
+            'ServiceRunningObserved=YES'),
+        ($validObservedAgent -replace
+            'ListenerOwnedObserved=TRUE',
+            'ListenerOwnedObserved=UNKNOWN'),
+        ($validObservedAgent -replace
+            'HttpAttemptCount=3',
+            'HttpAttemptCount=10001'),
+        ($validObservedAgent -replace
+            'LastTransportPhase=REQUEST_STARTED',
+            'LastTransportPhase=TLS'),
+        ($validAgent -replace
+            "`r`nStageCount=1",
+            (
+                "`r`nServiceRunningObserved=FALSE" +
+                "`r`nListenerOwnedObserved=FALSE" +
+                "`r`nHttpAttemptCount=0" +
+                "`r`nLastTransportPhase=NOT_STARTED" +
+                "`r`nStageCount=1"
+            )),
         ($validAgent -replace
             "`r`nRecommendedActionCode=CHECK_FIREWALL_POLICY",
             (
