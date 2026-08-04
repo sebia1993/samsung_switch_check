@@ -97,6 +97,11 @@ function ConvertFrom-SswFieldDiagnostic {
         $lines = $lines[0..($lines.Length - 2)]
     }
 
+    if ($lines.Length -ge 1 -and
+        $lines[0] -ceq 'SSW_FIELD_DIAGNOSTIC/2') {
+        return ConvertFrom-SswFieldDiagnosticV2 -Lines $lines
+    }
+
     if ($lines.Length -lt 4 -or
         $lines.Length -gt 400 -or
         $lines[0] -cne 'SSW_FIELD_DIAGNOSTIC/1') {
@@ -220,6 +225,52 @@ function Assert-SswIntegerRange {
             [ref]$parsed) -or
         $parsed -lt $Minimum -or
         $parsed -gt $Maximum) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+}
+
+function Assert-SswAllowedToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Allowed
+    )
+
+    if ($Allowed -cnotcontains $Value) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+}
+
+function Assert-SswCompactDuration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    if ($Value -ceq 'unknown') {
+        return
+    }
+
+    Assert-SswIntegerRange -Value $Value -Minimum 0 -Maximum 86400000
+}
+
+function Assert-SswProductVersionToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value,
+        [Parameter(Mandatory = $true)]
+        [string[]]$UnavailableTokens
+    )
+
+    if ($UnavailableTokens -ccontains $Value) {
+        return
+    }
+
+    if ($Value -cnotmatch (
+            '^(?=.{1,64}$)' +
+            '[0-9]{1,10}\.[0-9]{1,10}\.[0-9]{1,10}' +
+            '(?:-[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)?$')) {
         Stop-SswFieldDiagnostic -Code $script:SchemaError
     }
 }
@@ -509,6 +560,583 @@ function Assert-SswViewerSchema {
     elseif ($Values.ErrorCode -ceq 'NONE' -or $Values.FailedStage -ceq 'NONE') {
         Stop-SswFieldDiagnostic -Code $script:SchemaError
     }
+}
+
+function ConvertFrom-SswFieldDiagnosticV2 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Lines
+    )
+
+    if ($Lines.Length -lt 4 -or $Lines.Length -gt 12) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    foreach ($line in $Lines) {
+        if ($line.Length -eq 0 -or $line.Length -gt 88) {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+    }
+
+    $payloadLines = $Lines[1..($Lines.Length - 1)]
+    $payloadText = [string]::Join("`n", $payloadLines)
+    if (Test-SswFieldDiagnosticContamination -Text $payloadText) {
+        Stop-SswFieldDiagnostic -Code $script:InputError
+    }
+
+    $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' (
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $values = @{}
+    foreach ($line in $payloadLines) {
+        $separator = $line.IndexOf('=')
+        if ($separator -le 0 -or $separator -eq ($line.Length - 1)) {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+
+        $key = $line.Substring(0, $separator)
+        $value = $line.Substring($separator + 1)
+        if ($key -cne $key.Trim() -or
+            $value -cne $value.Trim() -or
+            $value.Contains(' ') -or
+            $key -cnotmatch '^[A-Za-z][A-Za-z0-9]{0,31}$' -or
+            -not $seenKeys.Add($key)) {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+
+        $values[$key] = $value
+    }
+
+    foreach ($requiredKey in @('Component', 'ErrorCode', 'FailedStage')) {
+        if (-not $values.ContainsKey($requiredKey)) {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+    }
+
+    if ($values.Component -ceq 'AGENT_SETUP') {
+        Assert-SswAgentSetupV2Schema -Values $values
+    }
+    elseif ($values.Component -ceq 'VIEWER') {
+        Assert-SswViewerV2Schema -Values $values
+    }
+    else {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    return [pscustomobject]@{
+        Component = $values.Component
+        ErrorCode = $values.ErrorCode
+        FailedStage = $values.FailedStage
+    }
+}
+
+function Get-SswAgentV2ErrorCodes {
+    return @(
+        'OK',
+        'UNAVAILABLE',
+        'SETUP_PACKAGE_NOT_FOUND',
+        'SETUP_MANIFEST_INVALID',
+        'SETUP_PACKAGE_HASH_MISMATCH',
+        'SETUP_VIEWER_IP_INVALID',
+        'SETUP_NETWORK_SELECTION_INVALID',
+        'SETUP_EXISTING_NETWORKS_NOT_LOADED',
+        'SETUP_ADMINISTRATOR_REQUIRED',
+        'SETUP_PATH_INVALID',
+        'SETUP_PATH_UNTRUSTED',
+        'SETUP_PATH_NOT_WRITABLE',
+        'SETUP_CONFIGURATION_INVALID',
+        'SETUP_SERVICE_FAILED',
+        'SETUP_FIREWALL_FAILED',
+        'SETUP_HEALTH_FAILED',
+        'SETUP_ROLLBACK_FAILED',
+        'SETUP_RECOVERY_REQUIRED',
+        'ROLLBACK_STATE_MISMATCH',
+        'ROLLBACK_SERVICE_STOP_FAILED',
+        'ROLLBACK_FILE_RESTORE_FAILED',
+        'ROLLBACK_DATA_CLEANUP_FAILED',
+        'ROLLBACK_SERVICE_RESTORE_FAILED',
+        'ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED',
+        'ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED',
+        'ROLLBACK_JOURNAL_WRITE_FAILED',
+        'ROLLBACK_EVIDENCE_CLEANUP_FAILED',
+        'ROLLBACK_STAGING_CLEANUP_FAILED',
+        'ROLLBACK_BACKUP_CLEANUP_FAILED',
+        'ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED',
+        'ROLLBACK_JOURNAL_CLEANUP_FAILED',
+        'SETUP_ALREADY_RUNNING',
+        'SETUP_CANCELLED',
+        'SETUP_UNEXPECTED',
+        'DIAGNOSTIC_WRITE_FAILED'
+    )
+}
+
+function Get-SswAgentV2StageCodes {
+    return @(
+        (Get-SswAgentV2ErrorCodes)
+        'ADMINISTRATOR_OK',
+        'INPUT_VALID',
+        'PACKAGE_VALID',
+        'PATHS_READY',
+        'FIREWALL_OVERLAP_PROTECTED',
+        'FIREWALL_GATE_READY',
+        'SERVICE_FOUND',
+        'SERVICE_NOT_INSTALLED',
+        'FIREWALL_EXACT',
+        'FIREWALL_UPDATE_REQUIRED',
+        'FIREWALL_NOT_INSTALLED',
+        'PACKAGE_STAGED',
+        'SERVICE_CONFIGURED',
+        'FIREWALL_CONFIGURED',
+        'SERVICE_STARTED',
+        'AGENT_READY',
+        'AGENT_NOT_READY',
+        'BACKUP_CLEANUP_PENDING',
+        'JOURNAL_CLEANUP_PENDING',
+        'RECOVERY_NOT_REQUIRED',
+        'ROLLBACK_COMPLETED',
+        'ROLLBACK_RECOVERY_CLEANED',
+        'COMMITTED_TRANSACTION_CLEANED',
+        'UNAVAILABLE'
+    )
+}
+
+function Resolve-SswAgentV2Action {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorCode
+    )
+
+    if ($ErrorCode -ceq 'OK') { return 'NONE' }
+    if ($ErrorCode -cin @(
+            'SETUP_PACKAGE_NOT_FOUND',
+            'SETUP_MANIFEST_INVALID',
+            'SETUP_PACKAGE_HASH_MISMATCH')) {
+        return 'REPLACE_RELEASE_PACKAGE'
+    }
+    if ($ErrorCode -ceq 'SETUP_VIEWER_IP_INVALID') {
+        return 'ENTER_VIEWER_FIXED_IPV4'
+    }
+    if ($ErrorCode -ceq 'SETUP_NETWORK_SELECTION_INVALID') {
+        return 'SELECT_MANAGEMENT_NETWORK'
+    }
+    if ($ErrorCode -ceq 'SETUP_EXISTING_NETWORKS_NOT_LOADED') {
+        return 'REVIEW_EXISTING_NETWORKS'
+    }
+    if ($ErrorCode -ceq 'SETUP_ADMINISTRATOR_REQUIRED') {
+        return 'RUN_AS_ADMINISTRATOR'
+    }
+    if ($ErrorCode -cin @(
+            'SETUP_PATH_INVALID',
+            'SETUP_PATH_UNTRUSTED',
+            'SETUP_PATH_NOT_WRITABLE')) {
+        return 'CHECK_INSTALL_PERMISSIONS'
+    }
+    if ($ErrorCode -ceq 'SETUP_CONFIGURATION_INVALID') {
+        return 'REVIEW_CONFIGURATION'
+    }
+    if ($ErrorCode -ceq 'SETUP_SERVICE_FAILED') {
+        return 'CHECK_WINDOWS_SERVICE'
+    }
+    if ($ErrorCode -ceq 'SETUP_FIREWALL_FAILED') {
+        return 'CHECK_FIREWALL_POLICY'
+    }
+    if ($ErrorCode -ceq 'SETUP_HEALTH_FAILED') {
+        return 'CHECK_AGENT_READINESS'
+    }
+    if ($ErrorCode -cin @(
+            'SETUP_ROLLBACK_FAILED',
+            'SETUP_RECOVERY_REQUIRED',
+            'ROLLBACK_STATE_MISMATCH',
+            'ROLLBACK_SERVICE_STOP_FAILED',
+            'ROLLBACK_FILE_RESTORE_FAILED',
+            'ROLLBACK_DATA_CLEANUP_FAILED',
+            'ROLLBACK_SERVICE_RESTORE_FAILED',
+            'ROLLBACK_HTTPS_FIREWALL_RESTORE_FAILED',
+            'ROLLBACK_LEGACY_FIREWALL_RESTORE_FAILED',
+            'ROLLBACK_JOURNAL_WRITE_FAILED',
+            'ROLLBACK_EVIDENCE_CLEANUP_FAILED',
+            'ROLLBACK_STAGING_CLEANUP_FAILED',
+            'ROLLBACK_BACKUP_CLEANUP_FAILED',
+            'ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED',
+            'ROLLBACK_JOURNAL_CLEANUP_FAILED')) {
+        return 'RUN_OR_REVIEW_RECOVERY'
+    }
+    if ($ErrorCode -ceq 'SETUP_ALREADY_RUNNING') { return 'WAIT_AND_RETRY' }
+    if ($ErrorCode -ceq 'SETUP_CANCELLED') { return 'RETRY_WHEN_READY' }
+    if ($ErrorCode -ceq 'DIAGNOSTIC_WRITE_FAILED') {
+        return 'CHOOSE_WRITABLE_LOCATION'
+    }
+
+    return 'COLLECT_DIAGNOSTIC'
+}
+
+function Assert-SswAgentSetupV2Schema {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Values
+    )
+
+    $keys = @(
+        'Component',
+        'ProductVersion',
+        'Environment',
+        'Run',
+        'FailedStage',
+        'ErrorCode',
+        'Failure',
+        'Action',
+        'State',
+        'Health',
+        'Stages'
+    )
+    Assert-SswKeys -Values $Values -RequiredKeys $keys -IsAllowed {
+        param($key)
+        return $keys -ccontains $key
+    }
+    if ($Values.Count -ne $keys.Count) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    Assert-SswProductVersionToken -Value $Values.ProductVersion `
+        -UnavailableTokens @('UNAVAILABLE')
+    if ($Values.Environment -cnotmatch (
+            '^[0-9]{8}T[0-9]{9}Z\|' +
+            '(?:UNAVAILABLE|WIN_[0-9]+_[0-9]+_[0-9]+_[0-9]+)\|' +
+            '(?:X86|X64|ARM|ARM64|UNAVAILABLE)$')) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    $run = $Values.Run -csplit '\|'
+    if ($run.Count -ne 3) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswAllowedToken -Value $run[0] `
+        -Allowed @('PREFLIGHT', 'INSTALL', 'RECOVERY', 'UNAVAILABLE')
+    Assert-SswAllowedToken -Value $run[1] -Allowed @('SUCCESS', 'FAILURE')
+    Assert-SswCompactDuration -Value $run[2]
+
+    $failureStages = @(
+        'NONE',
+        'OPERATION_LOCK',
+        'ADMINISTRATOR',
+        'RECOVERY_JOURNAL',
+        'INPUT',
+        'PACKAGE_VALIDATION',
+        'FILESYSTEM',
+        'CONFIGURATION',
+        'FILE_STAGING',
+        'SERVICE_STOP',
+        'FILE_ACTIVATION',
+        'SERVICE_CONFIGURATION',
+        'FIREWALL',
+        'SERVICE_START',
+        'READINESS',
+        'COMMIT_CLEANUP',
+        'RECOVERY',
+        'UI_OPERATION',
+        'UNKNOWN'
+    )
+    $errorCodes = @(Get-SswAgentV2ErrorCodes)
+    Assert-SswAllowedToken -Value $Values.FailedStage -Allowed $failureStages
+    Assert-SswAllowedToken -Value $Values.ErrorCode -Allowed $errorCodes
+
+    $failure = $Values.Failure -csplit '\|'
+    if ($failure.Count -ne 3) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswAllowedToken -Value $failure[0] `
+        -Allowed (@('NONE') + $errorCodes)
+    Assert-SswAllowedToken -Value $failure[1] -Allowed @(
+        'NOT_RUN',
+        'CLASSIFIED',
+        'ACCESS_DENIED',
+        'IO',
+        'TIMEOUT',
+        'WINDOWS_API',
+        'INVALID_STATE',
+        'PLATFORM',
+        'UNKNOWN'
+    )
+    Assert-SswCompactDuration -Value $failure[2]
+
+    if ($Values.Action -cne (Resolve-SswAgentV2Action $Values.ErrorCode)) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    $state = $Values.State -csplit '\|'
+    if ($state.Count -ne 6) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswAllowedToken -Value $state[0] -Allowed @('PASS', 'FAIL', 'NOT_RUN')
+    Assert-SswAllowedToken -Value $state[1] `
+        -Allowed @('NONE', 'PENDING_RECOVERABLE', 'PENDING_BLOCKED')
+    Assert-SswAllowedToken -Value $state[2] -Allowed @(
+        'FAIL',
+        'RUNNING_READY',
+        'CONFIGURED',
+        'NOT_INSTALLED',
+        'FOUND',
+        'RUNNING',
+        'STOPPED',
+        'UNKNOWN'
+    )
+    Assert-SswAllowedToken -Value $state[3] -Allowed @(
+        'NONE',
+        'READY',
+        'EXACT',
+        'PROTECTED',
+        'UPDATE',
+        'NOT_INSTALLED',
+        'CONFIGURED',
+        'FAIL'
+    )
+    Assert-SswAllowedToken -Value $state[4] `
+        -Allowed @('PASS', 'PASS_OBSERVED', 'NOT_CONFIRMED', 'NOT_RUN')
+    Assert-SswAllowedToken -Value $state[5] -Allowed @('PASS', 'FAIL', 'NOT_RUN')
+
+    $health = $Values.Health -csplit '\|'
+    if ($health.Count -ne 4) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswAllowedToken -Value $health[0] -Allowed @(
+        'NOT_RUN',
+        'READY',
+        'SERVICEUNAVAILABLE',
+        'SERVICEINSPECTIONFAILED',
+        'TCPNOTLISTENING',
+        'TCPOWNEDBYOTHERPROCESS',
+        'TCPOWNERSHIPQUERYFAILED',
+        'HTTPS_REQUEST_FAILED',
+        'HTTPSTATUSINVALID',
+        'PAYLOADTOOLARGE',
+        'PAYLOADINVALID',
+        'APIVERSIONMISMATCH',
+        'PROTOCOLMISMATCH',
+        'PRODUCTVERSIONMISMATCH',
+        'DEADLINEEXCEEDED',
+        'HTTPS_TLS_FAILED',
+        'HTTPS_REQUEST_TIMEOUT',
+        'HTTPS_CONNECTION_RESET',
+        'HTTPS_EOF',
+        'HTTPS_CONNECT_FAILED'
+    )
+    if ($health[1] -cnotmatch '^[TF]{3}$') {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+    Assert-SswIntegerRange -Value $health[2] -Minimum 0 -Maximum 10000
+    Assert-SswAllowedToken -Value $health[3] -Allowed @(
+        'NOT_STARTED',
+        'LISTENER_OWNED',
+        'REQUEST_STARTED',
+        'RESPONSE_HEADERS',
+        'RESPONSE_BODY',
+        'READINESS_VALIDATED'
+    )
+
+    $stages = $Values.Stages -csplit '\|'
+    if ($stages.Count -ne 2) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswIntegerRange -Value $stages[0] -Minimum 0 -Maximum 64
+    $stageCount = [int]$stages[0]
+    if ($stageCount -eq 0) {
+        if ($stages[1] -cne 'NONE:N') {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+    }
+    else {
+        $tail = $stages[1] -csplit '>'
+        if ($tail.Count -lt 1 -or $tail.Count -gt $stageCount) {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+        $stageCodes = @(Get-SswAgentV2StageCodes)
+        foreach ($entry in $tail) {
+            $parts = $entry -csplit ':'
+            if ($parts.Count -ne 2 -or $parts[0] -ceq 'NONE') {
+                Stop-SswFieldDiagnostic -Code $script:SchemaError
+            }
+            Assert-SswAllowedToken -Value $parts[0] -Allowed $stageCodes
+            Assert-SswAllowedToken -Value $parts[1] -Allowed @('S', 'W', 'F', 'R', 'N')
+        }
+    }
+
+    if ($run[1] -ceq 'SUCCESS') {
+        if ($Values.ErrorCode -cne 'OK' -or
+            $Values.FailedStage -cne 'NONE' -or
+            $failure[0] -cne 'NONE' -or
+            $failure[1] -cne 'NOT_RUN' -or
+            $failure[2] -cne 'unknown') {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+    }
+    elseif ($Values.ErrorCode -ceq 'OK' -or
+        $Values.FailedStage -ceq 'NONE' -or
+        $failure[0] -ceq 'NONE' -or
+        $failure[1] -ceq 'NOT_RUN') {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+}
+
+function Get-SswViewerV2ErrorCodes {
+    return @(
+        'NONE',
+        'AGENT_ACCESS_DENIED',
+        'AGENT_CLIENT_NOT_ALLOWED',
+        'AGENT_CONNECTION_REFUSED',
+        'AGENT_DNS_FAILED',
+        'AGENT_HTTP_ERROR',
+        'AGENT_IDENTITY_CHANGED',
+        'AGENT_INTERNAL_ERROR',
+        'AGENT_NOT_READY',
+        'AGENT_PROTOCOL_MISMATCH',
+        'AGENT_RESPONSE_INVALID',
+        'AGENT_TIMEOUT',
+        'AGENT_UNREACHABLE',
+        'AGENT_VERSION_MISMATCH',
+        'LOCAL_AGENT_PREFLIGHT_FAILED',
+        'LOCAL_AGENT_PREFLIGHT_TIMEOUT',
+        'LOCAL_PRIVATE_IPV4_DISCOVERY_FAILED',
+        'LOCAL_PRIVATE_IPV4_NOT_FOUND',
+        'VIEWER_CONFIGURATION_INVALID',
+        'VIEWER_CONNECTION_REQUIRED',
+        'VIEWER_SETTINGS_WRITE_FAILED',
+        'VIEWER_UNEXPECTED_ERROR'
+    )
+}
+
+function Resolve-SswViewerV2Action {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ErrorCode
+    )
+
+    if ($ErrorCode -ceq 'NONE') { return 'NONE' }
+    if ($ErrorCode -ceq 'AGENT_DNS_FAILED') { return 'CHECK_AGENT_ADDRESS_DNS' }
+    if ($ErrorCode -cin @(
+            'AGENT_CONNECTION_REFUSED',
+            'AGENT_NOT_READY',
+            'LOCAL_AGENT_PREFLIGHT_FAILED')) {
+        return 'CHECK_AGENT_SERVICE'
+    }
+    if ($ErrorCode -cin @(
+            'AGENT_TIMEOUT',
+            'AGENT_UNREACHABLE',
+            'LOCAL_AGENT_PREFLIGHT_TIMEOUT')) {
+        return 'CHECK_NETWORK_FIREWALL'
+    }
+    if ($ErrorCode -cin @('AGENT_ACCESS_DENIED', 'AGENT_CLIENT_NOT_ALLOWED')) {
+        return 'CHECK_ALLOWED_VIEWER_IP'
+    }
+    if ($ErrorCode -cin @(
+            'AGENT_PROTOCOL_MISMATCH',
+            'AGENT_VERSION_MISMATCH',
+            'AGENT_RESPONSE_INVALID')) {
+        return 'USE_MATCHING_RELEASE'
+    }
+    if ($ErrorCode -ceq 'AGENT_IDENTITY_CHANGED') {
+        return 'VERIFY_AGENT_REPLACEMENT'
+    }
+    if ($ErrorCode -cin @(
+            'LOCAL_PRIVATE_IPV4_DISCOVERY_FAILED',
+            'LOCAL_PRIVATE_IPV4_NOT_FOUND')) {
+        return 'CHECK_LOCAL_NETWORK_ADAPTER'
+    }
+    if ($ErrorCode -ceq 'VIEWER_SETTINGS_WRITE_FAILED') {
+        return 'CHECK_VIEWER_STORAGE'
+    }
+    if ($ErrorCode -cin @(
+            'VIEWER_CONFIGURATION_INVALID',
+            'VIEWER_CONNECTION_REQUIRED')) {
+        return 'CHECK_VIEWER_CONNECTION_SETTINGS'
+    }
+
+    return 'CHECK_AGENT_DIAGNOSTIC'
+}
+
+function Assert-SswViewerV2Schema {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Values
+    )
+
+    $keys = @(
+        'Component',
+        'ProductVersion',
+        'Environment',
+        'Run',
+        'FailedStage',
+        'ErrorCode',
+        'Action',
+        'Stages',
+        'TimingMs',
+        'Agent'
+    )
+    Assert-SswKeys -Values $Values -RequiredKeys $keys -IsAllowed {
+        param($key)
+        return $keys -ccontains $key
+    }
+    if ($Values.Count -ne $keys.Count) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    Assert-SswProductVersionToken -Value $Values.ProductVersion `
+        -UnavailableTokens @('UNKNOWN', 'UNAVAILABLE')
+    if ($Values.Environment -cnotmatch (
+            '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:' +
+            '[0-9]{2}\.[0-9]{7}(?:Z|[+-][0-9]{2}:[0-9]{2})\|' +
+            '(?:UNKNOWN|[0-9]{1,6})\|' +
+            '(?:X86|X64|ARM|ARM64|UNKNOWN)$')) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    $run = $Values.Run -csplit '\|'
+    if ($run.Count -ne 3) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswAllowedToken -Value $run[0] -Allowed @('NORMAL', 'SAME_PC')
+    if ($run[1] -cne 'AGENT_CONNECTION_CHECK') {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+    Assert-SswAllowedToken -Value $run[2] -Allowed @('SUCCESS', 'FAILED')
+
+    $failedStages = @(
+        'NONE',
+        'ADDRESS',
+        'DNS',
+        'TCP',
+        'HTTPS',
+        'IDENTITY',
+        'SETTINGS',
+        'UNKNOWN'
+    )
+    $errorCodes = @(Get-SswViewerV2ErrorCodes)
+    Assert-SswAllowedToken -Value $Values.FailedStage -Allowed $failedStages
+    Assert-SswAllowedToken -Value $Values.ErrorCode -Allowed $errorCodes
+    if ($Values.Action -cne (Resolve-SswViewerV2Action $Values.ErrorCode)) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    if ($Values.Stages -cnotmatch (
+            '^ADDR:(OK|FAIL|SKIP|PENDING)\|' +
+            'DNS:(OK|FAIL|SKIP|PENDING)\|' +
+            'TCP:(OK|FAIL|SKIP|PENDING)\|' +
+            'HTTPS:(OK|FAIL|SKIP|PENDING)\|' +
+            'ID:(OK|FAIL|SKIP|PENDING)$')) {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    $timings = $Values.TimingMs -csplit '\|'
+    if ($timings.Count -ne 5) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    foreach ($timing in $timings) {
+        Assert-SswIntegerRange -Value $timing -Minimum 0 -Maximum 300000
+    }
+
+    $agent = $Values.Agent -csplit '\|'
+    if ($agent.Count -ne 3) { Stop-SswFieldDiagnostic -Code $script:SchemaError }
+    Assert-SswIntegerRange -Value $agent[0] -Minimum 0 -Maximum 6
+    Assert-SswProductVersionToken -Value $agent[1] `
+        -UnavailableTokens @('UNKNOWN', 'UNAVAILABLE')
+    if ($agent[2] -cnotmatch '^(UNKNOWN|[0-9]{1,4})$') {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
+    if ($run[2] -ceq 'SUCCESS') {
+        if ($Values.ErrorCode -cne 'NONE' -or $Values.FailedStage -cne 'NONE') {
+            Stop-SswFieldDiagnostic -Code $script:SchemaError
+        }
+    }
+    elseif ($Values.ErrorCode -ceq 'NONE' -or $Values.FailedStage -ceq 'NONE') {
+        Stop-SswFieldDiagnostic -Code $script:SchemaError
+    }
+
 }
 
 function Resolve-SswFieldDiagnosticScenario {

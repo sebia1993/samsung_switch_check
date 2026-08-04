@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.13 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.14 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.13-poc"
+VERSION = "0.10.14-poc"
 DOCUMENT_DATE = "2026-08-04"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -924,16 +924,18 @@ Viewer PC IPv4 예     : 10.20.30.25
     add_code_block(
         doc,
         """
-AgentHealthCode=HTTPS_REQUEST_TIMEOUT
-ServiceRunningObserved=TRUE
-ListenerOwnedObserved=TRUE
-HttpAttemptCount=3
-LastTransportPhase=REQUEST_STARTED
-AgentRestartObserved=FALSE
-
-Stage.01.Code=SERVICE_STARTED
-Stage.02.Code=SETUP_HEALTH_FAILED
-Stage.03.Code=ROLLBACK_COMPLETED
+SSW_FIELD_DIAGNOSTIC/2
+Component=AGENT_SETUP
+ProductVersion=0.10.14-poc
+Environment=20260804T120000000Z|WIN_10_0_26100_0|X64
+Run=INSTALL|FAILURE|64182
+FailedStage=READINESS
+ErrorCode=SETUP_HEALTH_FAILED
+Failure=SETUP_HEALTH_FAILED|CLASSIFIED|62011
+Action=CHECK_AGENT_READINESS
+State=PASS|NONE|CONFIGURED|CONFIGURED|PASS|FAIL
+Health=HTTPS_REQUEST_TIMEOUT|FTT|3|REQUEST_STARTED
+Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         """,
     )
     add_callout(
@@ -941,19 +943,19 @@ Stage.03.Code=ROLLBACK_COMPLETED
         "진단만 세분화됨",
         "SERVICE_STARTED → SETUP_HEALTH_FAILED → ROLLBACK_COMPLETED 순서와 각 단계 소요 시간은 "
         "실패 위치를 구분하기 위한 기록입니다. 설치, 방화벽, Agent 신원, rollback과 보안 검증 "
-        "흐름은 바뀌지 않습니다. TRUE는 검사 중 관찰한 사실일 뿐 현재 상태를 영구 보장하지 "
-        "않으며, FALSE는 반드시 반대 상태를 확인했다는 뜻이 아니라 관찰하지 못했음을 뜻할 수 "
-        "있습니다.",
+        "흐름은 바뀌지 않습니다. Health의 세 글자는 재시작·서비스·listener 순서이며 T는 검사 중 "
+        "관찰함, F는 관찰하지 못함을 뜻합니다. 이 값은 현재 상태를 영구 보장하지 않습니다.",
         "info",
     )
     add_callout(
         doc,
         "성공·실패 후 익명 진단 저장",
-        "검사, 설치 또는 복구가 끝나면 '익명 진단 저장'으로 SSW_FIELD_DIAGNOSTIC/1 UTF-8 BOM "
-        "TXT를 수동 저장할 수 있습니다. 자동 저장하지 않으며 제품·Windows 버전, 안전한 단계·"
-        "결과·오류·조치 코드와 제한된 소요 시간만 포함합니다. 실제 IP/CIDR, PC·사용자명, 계정, "
-        "인증서 정보, 절대 경로, 방화벽·예외 원문, 명령과 장비 출력은 포함하지 않습니다. "
-        "저장 실패는 DIAGNOSTIC_WRITE_FAILED로 표시됩니다.",
+        "검사, 설치 또는 복구가 끝나면 '익명 진단 저장'으로 SSW_FIELD_DIAGNOSTIC/2 UTF-8 BOM "
+        "TXT를 수동 저장할 수 있습니다. 사진 한 장으로 전달할 수 있도록 최대 12줄, 줄당 88자로 "
+        "제한하며 제품·Windows 버전, 안전한 단계·결과·오류·조치 코드와 핵심 상태를 보존합니다. "
+        "실제 IP/CIDR, PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽·예외 원문, 명령과 장비 "
+        "출력은 포함하지 않습니다. 과거 /1 파일은 재현 도구에서 계속 분석할 수 있으며 저장 실패는 "
+        "DIAGNOSTIC_WRITE_FAILED로 표시됩니다.",
         "info",
     )
     add_callout(
@@ -1089,10 +1091,10 @@ Stage.03.Code=ROLLBACK_COMPLETED
         doc,
         "Agent 연결 익명 진단",
         "일반 연결과 같은 PC 테스트가 성공 또는 실패로 끝나면 '익명 진단 저장'을 사용할 수 "
-        "있습니다. 주소·DNS·TCP/18443·HTTPS·Identity 단계 상태와 제한된 소요 시간, 후보 수와 "
-        "확인된 Agent/API 버전만 기록하며 입력 주소, DNS 이름, PC·사용자명, 계정, 경로, 예외 "
-        "원문과 장비 명령·출력은 제외합니다. 연결 성공 뒤 창은 저장 결과를 보여 주며, 필요하면 "
-        "진단을 저장한 다음 닫습니다.",
+        "있습니다. 사진 한 장용 최대 12줄 TXT에는 주소·DNS·TCP/18443·HTTPS·Identity 단계 상태와 "
+        "제한된 소요 시간, 후보 수와 확인된 Agent/API 버전만 기록하며 입력 주소, DNS 이름, "
+        "PC·사용자명, 계정, 경로, 예외 원문과 장비 명령·출력은 제외합니다. 연결 성공 뒤 창은 "
+        "저장 결과를 보여 주며, 필요하면 진단을 저장한 다음 닫습니다.",
         "info",
     )
     add_callout(
@@ -1100,7 +1102,7 @@ Stage.03.Code=ROLLBACK_COMPLETED
         "세 가지 진단을 구분하세요",
         "SWD1은 Agent Setup 또는 Viewer 연결 실패를 전화·메신저로 짧게 전달하는 코드입니다. "
         "Agent Setup의 '진단정보 복사'는 실패 전용 긴 비식별 요약을 클립보드에 복사하고, "
-        "'익명 진단 저장'은 작업이나 연결 검사가 끝난 뒤 SSW_FIELD_DIAGNOSTIC/1 상세 TXT를 "
+        "'익명 진단 저장'은 작업이나 연결 검사가 끝난 뒤 SSW_FIELD_DIAGNOSTIC/2 한 장용 TXT를 "
         "사용자가 선택해 저장합니다. SWD1은 기존 진단을 대체하지 않으며 접속 권한을 부여하지 "
         "않습니다.",
         "warning",

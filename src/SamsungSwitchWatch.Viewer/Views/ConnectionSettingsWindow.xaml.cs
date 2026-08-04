@@ -445,7 +445,7 @@ public partial class ConnectionSettingsWindow : Window
         if (result.Succeeded)
         {
             ValidationText.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-            ValidationText.Text = "익명 진단을 저장했습니다.";
+            ValidationText.Text = "사진 한 장용 익명 진단 TXT를 저장했습니다.";
         }
         else
         {

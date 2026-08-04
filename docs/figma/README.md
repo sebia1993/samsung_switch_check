@@ -174,9 +174,9 @@ diagnostics.
 1. Agent Setup and Viewer never save a diagnostic automatically.
 2. `익명 진단 저장` appears only after a check has completed, whether it
    succeeded or failed.
-3. The file uses the versioned `SSW_FIELD_DIAGNOSTIC/1` text contract and
-   UTF-8 with BOM so it opens correctly on Korean Windows.
-4. Stable stage, result and error codes plus bounded stage timings are
+3. The file uses the versioned `SSW_FIELD_DIAGNOSTIC/2` compact text contract,
+   no more than 12 lines or 88 characters per line, and UTF-8 with BOM.
+4. Stable stage, result and error codes plus compact bounded state are
    retained. IP/CIDR, PC and user names, credentials, certificate details,
    paths, raw firewall data, exception text and switch command output are
    excluded.
@@ -208,9 +208,10 @@ define the Agent Setup and Viewer variants.
    approval.
 5. CRC detects common transcription errors; it does not provide encryption,
    signing, or identity proof.
-6. Agent Setup keeps its existing failure-only clipboard diagnostic, and both
-   products keep the manually saved `SSW_FIELD_DIAGNOSTIC/1` TXT. The short
-   code does not replace either diagnostic path.
+6. Agent Setup keeps its existing failure-only clipboard diagnostic, while both
+   products manually save the one-photo `SSW_FIELD_DIAGNOSTIC/2` TXT. Existing
+   `/1` files remain replay-compatible. The short code does not replace either
+   diagnostic path.
 
 ## Historical references
 
