@@ -123,8 +123,9 @@ TOFU 첫 연결은 중앙 인증기관 검증이 아닙니다. 최초 연결 전
 - [ ] `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Agent Setup에 현재 Viewer 고정 IPv4를 다시
       입력하라는 안내가 표시됨
 - [ ] 연결 성공과 실패 후 `익명 진단 저장`을 사용할 수 있고 파일이 자동 생성되지는 않음
-- [ ] 진단 첫 줄이 `SSW_FIELD_DIAGNOSTIC/1`이고 IP/CIDR·PC/사용자명·계정·경로·예외
-      원문·명령/출력이 없음
+- [ ] 진단 첫 줄이 `SSW_FIELD_DIAGNOSTIC/2`이고 전체가 최대 12줄·줄당 88자임
+- [ ] 진단에 IP/CIDR·PC/사용자명·계정·경로·예외 원문·명령/출력이 없음
+- [ ] 과거 `SSW_FIELD_DIAGNOSTIC/1` Fixture도 재현 도구에서 정상 분석됨
 - [ ] 연결 실패 때만 `SWD1-XXXX-XXXX-XXXX-XXXX` 지원 코드가 표시됨
 - [ ] 지원 코드를 선택해 `Ctrl+C`로 복사할 수 있고 별도 복사 버튼이 추가되지 않음
 - [ ] 연결 성공, 새 연결 확인 또는 Agent 주소 변경 시 이전 지원 코드가 숨겨지고 지워짐

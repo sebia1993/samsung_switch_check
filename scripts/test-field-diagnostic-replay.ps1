@@ -217,6 +217,39 @@ function New-SswAgentSetupDiagnostic {
     return $lines -join "`r`n"
 }
 
+function New-SswViewerV2Diagnostic {
+    return @(
+        'SSW_FIELD_DIAGNOSTIC/2',
+        'Component=VIEWER',
+        'ProductVersion=0.10.14-poc',
+        'Environment=1970-01-01T00:00:00.0000000+00:00|UNKNOWN|UNKNOWN',
+        'Run=NORMAL|AGENT_CONNECTION_CHECK|FAILED',
+        'FailedStage=TCP',
+        'ErrorCode=AGENT_CONNECTION_REFUSED',
+        'Action=CHECK_AGENT_SERVICE',
+        'Stages=ADDR:PENDING|DNS:PENDING|TCP:FAIL|HTTPS:SKIP|ID:SKIP',
+        'TimingMs=0|0|3|0|0',
+        'Agent=1|UNKNOWN|UNKNOWN'
+    ) -join "`r`n"
+}
+
+function New-SswAgentSetupV2Diagnostic {
+    return @(
+        'SSW_FIELD_DIAGNOSTIC/2',
+        'Component=AGENT_SETUP',
+        'ProductVersion=0.10.14-poc',
+        'Environment=20260804T010203000Z|WIN_10_0_26100_0|X64',
+        'Run=INSTALL|FAILURE|64182',
+        'FailedStage=READINESS',
+        'ErrorCode=SETUP_HEALTH_FAILED',
+        'Failure=SETUP_HEALTH_FAILED|CLASSIFIED|62011',
+        'Action=CHECK_AGENT_READINESS',
+        'State=PASS|NONE|CONFIGURED|CONFIGURED|PASS_OBSERVED|FAIL',
+        'Health=HTTPS_REQUEST_TIMEOUT|FTT|3|REQUEST_STARTED',
+        'Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S'
+    ) -join "`r`n"
+}
+
 function Invoke-SswReplay {
     param(
         [Parameter(Mandatory = $true)]
@@ -258,6 +291,28 @@ function Invoke-SswReplay {
         ExitCode = $exitCode
         Output = (($stdout + $stderr).Trim())
     }
+}
+
+function Assert-SswReplayRejected {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Content,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedCode,
+        [bool]$Bom = $true
+    )
+
+    $fixture = Write-SswFixture `
+        -Name $Name `
+        -Content $Content `
+        -Bom $Bom
+    $result = Invoke-SswReplay -FixturePath $fixture
+    Assert-SswEqual -Expected 1 -Actual $result.ExitCode `
+        -Message ($Name + ' must be rejected.')
+    Assert-SswEqual -Expected $ExpectedCode -Actual $result.Output `
+        -Message ($Name + ' returned the wrong stable rejection code.')
 }
 
 try {
@@ -372,6 +427,42 @@ try {
         -Expected 32 `
         -Actual ([Regex]::Split($agentObservedDiagnostic, '\r\n').Count) `
         -Message 'Observed Agent Setup v1 fixture schema changed unexpectedly.'
+
+    $viewerV2Diagnostic = New-SswViewerV2Diagnostic
+    $viewerV2Lines = [Regex]::Split($viewerV2Diagnostic, '\r\n')
+    Assert-SswEqual -Expected 11 -Actual $viewerV2Lines.Count `
+        -Message 'Viewer v2 must remain a compact 11-line diagnostic.'
+    Assert-SswTrue `
+        -Condition (-not ($viewerV2Lines | Where-Object { $_.Length -gt 88 })) `
+        -Message 'Viewer v2 lines must not exceed 88 characters.'
+    $viewerV2Fixture = Write-SswFixture `
+        -Name 'viewer-v2-valid.txt' `
+        -Bom $true `
+        -Content $viewerV2Diagnostic
+    $viewerV2Result = Invoke-SswReplay -FixturePath $viewerV2Fixture
+    Assert-SswEqual -Expected 0 -Actual $viewerV2Result.ExitCode `
+        -Message 'Valid Viewer v2 input must succeed.'
+    Assert-SswEqual -Expected $viewerScenario -Actual $viewerV2Result.Output `
+        -Message 'Viewer v2 selected the wrong existing fake scenario.'
+
+    $agentV2Diagnostic = New-SswAgentSetupV2Diagnostic
+    $agentV2Lines = [Regex]::Split($agentV2Diagnostic, '\r\n')
+    Assert-SswEqual -Expected 12 -Actual $agentV2Lines.Count `
+        -Message 'Agent Setup v2 must remain a compact 12-line diagnostic.'
+    Assert-SswTrue `
+        -Condition (-not ($agentV2Lines | Where-Object { $_.Length -gt 88 })) `
+        -Message 'Agent Setup v2 lines must not exceed 88 characters.'
+    $agentV2Fixture = Write-SswFixture `
+        -Name 'agent-v2-valid.txt' `
+        -Bom $true `
+        -Content $agentV2Diagnostic
+    $agentV2Result = Invoke-SswReplay -FixturePath $agentV2Fixture
+    Assert-SswEqual -Expected 0 -Actual $agentV2Result.ExitCode `
+        -Message (
+            'Valid Agent Setup v2 input must succeed: ' +
+            $agentV2Result.Output)
+    Assert-SswEqual -Expected $healthScenario -Actual $agentV2Result.Output `
+        -Message 'Agent Setup v2 selected the wrong existing fake scenario.'
 
     $settingsScenario =
         'ViewerSettingsTests.SaveCoordinator_SaveOrThrowPreservesFailClosedConnectionFlow'
@@ -525,6 +616,75 @@ try {
         -Expected 'FIELD_DIAGNOSTIC_INPUT_REJECTED' `
         -Actual $contaminatedTransportResult.Output `
         -Message 'Contaminated transport observation must return only a safe code.'
+
+    Assert-SswReplayRejected `
+        -Name 'viewer-v2-bomless.txt' `
+        -Content $viewerV2Diagnostic `
+        -Bom $false `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_BOM_REQUIRED'
+    Assert-SswReplayRejected `
+        -Name 'viewer-v2-contaminated.txt' `
+        -Content (
+            $viewerV2Diagnostic -replace
+                'FailedStage=TCP',
+                'FailedStage=C:\private') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_INPUT_REJECTED'
+    Assert-SswReplayRejected `
+        -Name 'viewer-v2-unknown-key.txt' `
+        -Content (
+            $viewerV2Diagnostic -replace
+                'Agent=1\|UNKNOWN\|UNKNOWN',
+                'Unknown=SAFE') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'viewer-v2-duplicate-key.txt' `
+        -Content (
+            $viewerV2Diagnostic +
+            "`r`nErrorCode=AGENT_CONNECTION_REFUSED") `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'viewer-v2-timing-range.txt' `
+        -Content (
+            $viewerV2Diagnostic -replace
+                'TimingMs=0\|0\|3\|0\|0',
+                'TimingMs=0|0|300001|0|0') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+
+    $overlongStages = 'Stages=' + ('A' * 82)
+    Assert-SswEqual -Expected 89 -Actual $overlongStages.Length `
+        -Message 'The overlong v2 fixture must cross the 88-character boundary.'
+    Assert-SswReplayRejected `
+        -Name 'agent-v2-overlong-line.txt' `
+        -Content (
+            $agentV2Diagnostic -replace
+                'Stages=.*$',
+                $overlongStages) `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'agent-v2-too-many-lines.txt' `
+        -Content ($agentV2Diagnostic + "`r`nExtra=SAFE") `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'agent-v2-attempt-range.txt' `
+        -Content (
+            $agentV2Diagnostic -replace
+                'Health=HTTPS_REQUEST_TIMEOUT\|FTT\|3\|REQUEST_STARTED',
+                'Health=HTTPS_REQUEST_TIMEOUT|FTT|10001|REQUEST_STARTED') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'agent-v2-zero-stage-malformed.txt' `
+        -Content (
+            $agentV2Diagnostic -replace
+                'Stages=.*$',
+                'Stages=0|NONE') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
+    Assert-SswReplayRejected `
+        -Name 'agent-v2-unknown-stage-code.txt' `
+        -Content (
+            $agentV2Diagnostic -replace
+                'Stages=.*$',
+                'Stages=1|SYNTHETIC_STAGE:F') `
+        -ExpectedCode 'FIELD_DIAGNOSTIC_SCHEMA_INVALID'
 
     $schemaPayloads = @(
         ($validViewer -replace "`r`nFailedStage=TCP", ''),

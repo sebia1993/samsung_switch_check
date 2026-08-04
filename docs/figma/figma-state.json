@@ -145,7 +145,7 @@
     "manualEvidenceDeletionAllowed": false
   },
   "fieldDiagnosticFlow": {
-    "schema": "SSW_FIELD_DIAGNOSTIC/1",
+    "schema": "SSW_FIELD_DIAGNOSTIC/2",
     "automaticSave": false,
     "availableAfterCompletedCheck": true,
     "agentSetupNode": "60:340",

@@ -24,7 +24,7 @@ internal sealed record ViewerFieldDiagnosticSnapshot(
 
 internal static class ViewerFieldDiagnostic
 {
-    internal const string Schema = "SSW_FIELD_DIAGNOSTIC/1";
+    internal const string Schema = "SSW_FIELD_DIAGNOSTIC/2";
     internal const string Component = "VIEWER";
     internal const string Operation = "AGENT_CONNECTION_CHECK";
 
@@ -134,36 +134,59 @@ internal static class ViewerFieldDiagnostic
         ArgumentNullException.ThrowIfNull(snapshot);
 
         var stages = NormalizeStages(snapshot.Stages, null);
-        var builder = new StringBuilder(768);
-        builder.AppendLine(Schema);
+        var builder = new StringBuilder(512);
+        AppendLine(builder, Schema);
         Append(builder, "Component", Component);
         Append(builder, "ProductVersion", SafeVersion(snapshot.ProductVersion));
-        Append(builder, "GeneratedUtc", snapshot.GeneratedUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-        Append(builder, "WindowsBuild", SafeWindowsBuild(snapshot.WindowsBuild));
-        Append(builder, "Architecture", SafeArchitecture(snapshot.Architecture));
-        Append(builder, "Operation", Operation);
-        Append(builder, "Result", snapshot.Result == "SUCCESS" ? "SUCCESS" : "FAILED");
-        Append(builder, "FailedStage", AllowedStageName(snapshot.FailedStage));
-        var errorCode = AllowlistedErrorCode(snapshot.ErrorCode);
-        Append(builder, "ErrorCode", errorCode);
-        Append(builder, "RecommendedActionCode", RecommendedAction(errorCode));
-        Append(builder, "Mode", AllowedModes.Contains(snapshot.Mode) ? snapshot.Mode : "NORMAL");
-
-        foreach (var stage in Enum.GetValues<AgentConnectionProbeStage>())
-        {
-            var value = stages.Single(item => item.Stage == stage);
-            var key = StageKey(stage);
-            Append(builder, key + "Status", StateName(value.State));
-            Append(builder, key + "DurationMs", ClampDuration(value.DurationMs).ToString(CultureInfo.InvariantCulture));
-        }
-
         Append(
             builder,
-            "CandidateCount",
-            Math.Clamp(snapshot.CandidateCount, 0, LocalAgentPreflight.DefaultMaxCandidateAttempts)
-                .ToString(CultureInfo.InvariantCulture));
-        Append(builder, "AgentProductVersion", SafeVersion(snapshot.AgentProductVersion));
-        Append(builder, "ApiVersion", SafeApiVersion(snapshot.ApiVersion));
+            "Environment",
+            string.Join(
+                '|',
+                snapshot.GeneratedUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                SafeWindowsBuild(snapshot.WindowsBuild),
+                SafeArchitecture(snapshot.Architecture)));
+        Append(
+            builder,
+            "Run",
+            string.Join(
+                '|',
+                AllowedModes.Contains(snapshot.Mode) ? snapshot.Mode : "NORMAL",
+                Operation,
+                snapshot.Result == "SUCCESS" ? "SUCCESS" : "FAILED"));
+        var failedStage = AllowedStageName(snapshot.FailedStage);
+        Append(builder, "FailedStage", failedStage);
+        var errorCode = AllowlistedErrorCode(snapshot.ErrorCode);
+        Append(builder, "ErrorCode", errorCode);
+        Append(builder, "Action", RecommendedAction(errorCode));
+        Append(
+            builder,
+            "Stages",
+            string.Join(
+                '|',
+                Enum.GetValues<AgentConnectionProbeStage>()
+                    .Select(stage =>
+                        CompactStageKey(stage) + ':' + CompactStateName(
+                            stages.Single(item => item.Stage == stage),
+                            failedStage))));
+        Append(
+            builder,
+            "TimingMs",
+            string.Join(
+                '|',
+                Enum.GetValues<AgentConnectionProbeStage>()
+                    .Select(stage => ClampDuration(
+                            stages.Single(item => item.Stage == stage).DurationMs)
+                        .ToString(CultureInfo.InvariantCulture))));
+        Append(
+            builder,
+            "Agent",
+            string.Join(
+                '|',
+                Math.Clamp(snapshot.CandidateCount, 0, LocalAgentPreflight.DefaultMaxCandidateAttempts)
+                    .ToString(CultureInfo.InvariantCulture),
+                SafeVersion(snapshot.AgentProductVersion),
+                SafeApiVersion(snapshot.ApiVersion)));
         return builder.ToString();
     }
 
@@ -242,7 +265,10 @@ internal static class ViewerFieldDiagnostic
     }
 
     private static void Append(StringBuilder builder, string key, string value) =>
-        builder.Append(key).Append('=').AppendLine(value);
+        AppendLine(builder, key + '=' + value);
+
+    private static void AppendLine(StringBuilder builder, string value) =>
+        builder.Append(value).Append("\r\n");
 
     private static string SafeVersion(string? value)
     {
@@ -380,15 +406,54 @@ internal static class ViewerFieldDiagnostic
         _ => "UNKNOWN"
     };
 
-    private static string StageKey(AgentConnectionProbeStage stage) => stage switch
+    private static string CompactStageKey(AgentConnectionProbeStage stage) => stage switch
     {
-        AgentConnectionProbeStage.Address => "Address",
-        AgentConnectionProbeStage.Dns => "Dns",
-        AgentConnectionProbeStage.Tcp => "Tcp",
-        AgentConnectionProbeStage.Https => "Https",
-        AgentConnectionProbeStage.Identity => "Identity",
-        _ => "Unknown"
+        AgentConnectionProbeStage.Address => "ADDR",
+        AgentConnectionProbeStage.Dns => "DNS",
+        AgentConnectionProbeStage.Tcp => "TCP",
+        AgentConnectionProbeStage.Https => "HTTPS",
+        AgentConnectionProbeStage.Identity => "ID",
+        _ => "UNKNOWN"
     };
+
+    private static string CompactStateName(
+        AgentConnectionProbeStageSnapshot stage,
+        string failedStage)
+    {
+        if (stage.State == AgentConnectionProbeState.Succeeded)
+        {
+            return "OK";
+        }
+
+        if (stage.State == AgentConnectionProbeState.Failed)
+        {
+            return "FAIL";
+        }
+
+        if (TryParseProbeStage(failedStage, out var failedProbeStage)
+            && stage.Stage > failedProbeStage)
+        {
+            return "SKIP";
+        }
+
+        return "PENDING";
+    }
+
+    private static bool TryParseProbeStage(
+        string stageName,
+        out AgentConnectionProbeStage stage)
+    {
+        stage = stageName switch
+        {
+            "ADDRESS" => AgentConnectionProbeStage.Address,
+            "DNS" => AgentConnectionProbeStage.Dns,
+            "TCP" => AgentConnectionProbeStage.Tcp,
+            "HTTPS" => AgentConnectionProbeStage.Https,
+            "IDENTITY" => AgentConnectionProbeStage.Identity,
+            _ => default
+        };
+        return stageName is "ADDRESS" or "DNS" or "TCP" or "HTTPS" or "IDENTITY";
+    }
 
     private static AgentConnectionProbeState AllowedState(AgentConnectionProbeState state) =>
         Enum.IsDefined(state) ? state : AgentConnectionProbeState.Pending;

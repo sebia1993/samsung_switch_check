@@ -576,46 +576,31 @@ public sealed class SetupUiPresentationTests
                 result,
                 recovery));
 
-        Assert.StartsWith("SSW_FIELD_DIAGNOSTIC/1\r\n", text);
+        AssertCompactFieldDiagnostic(text);
+        Assert.StartsWith("SSW_FIELD_DIAGNOSTIC/2\r\n", text);
         Assert.Contains("Component=AGENT_SETUP", text);
         Assert.Contains("ProductVersion=0.10.8-poc", text);
-        Assert.Contains("GeneratedUtc=20260729T010203000Z", text);
-        Assert.Contains("WindowsBuild=WIN_10_0_26100_0", text);
-        Assert.Contains("Architecture=X64", text);
-        Assert.Contains("Operation=INSTALL", text);
-        Assert.Contains("Result=FAILURE", text);
+        Assert.Contains(
+            "Environment=20260729T010203000Z|WIN_10_0_26100_0|X64",
+            text);
+        Assert.Contains("Run=INSTALL|FAILURE|321", text);
         Assert.Contains("FailedStage=FIREWALL", text);
         Assert.Contains(
             $"ErrorCode={SetupErrorCodes.FirewallFailed}",
             text);
         Assert.Contains(
-            $"PrimaryFailureCode={SetupErrorCodes.FirewallFailed}",
+            $"Failure={SetupErrorCodes.FirewallFailed}|CLASSIFIED|unknown",
             text);
-        Assert.Contains("FailureCategory=CLASSIFIED", text);
-        Assert.Contains("FailureStageDurationMs=unknown", text);
         Assert.Contains(
-            "RecommendedActionCode=CHECK_FIREWALL_POLICY",
+            "Action=CHECK_FIREWALL_POLICY",
             text);
-        Assert.Contains("OperationDurationMs=321", text);
-        Assert.Contains("PackageValidation=PASS", text);
-        Assert.Contains("RecoveryJournal=PENDING_RECOVERABLE", text);
-        Assert.Contains("Service=CONFIGURED", text);
         Assert.Contains(
-            FirewallRuleMismatchCodes.RemoteAddress,
+            "State=PASS|PENDING_RECOVERABLE|CONFIGURED|FAIL|NOT_RUN|NOT_RUN",
             text);
-        Assert.Contains("LocalTcp18443=NOT_RUN", text);
-        Assert.Contains("Readiness=NOT_RUN", text);
-        Assert.Contains("AgentHealthCode=NOT_RUN", text);
-        Assert.Contains("AgentRestartObserved=FALSE", text);
-        Assert.Contains("ServiceRunningObserved=FALSE", text);
-        Assert.Contains("ListenerOwnedObserved=FALSE", text);
-        Assert.Contains("HttpAttemptCount=0", text);
-        Assert.Contains("LastTransportPhase=NOT_STARTED", text);
-        Assert.Contains("StageCount=3", text);
-        Assert.Contains("Stage.01.Code=PACKAGE_VALID", text);
-        Assert.Contains("Stage.01.Status=SUCCESS", text);
-        Assert.Matches(@"Stage\.01\.DurationMs=\d+", text);
-        Assert.Matches(@"Stage\.03\.ElapsedMs=\d+", text);
+        Assert.Contains("Health=NOT_RUN|FFF|0|NOT_STARTED", text);
+        Assert.Contains(
+            "Stages=3|PACKAGE_VALID:S>SERVICE_CONFIGURED:S>SETUP_FIREWALL_FAILED:F",
+            text);
         Assert.DoesNotContain("10.20.30.40", text);
         Assert.DoesNotContain("192.168.40.20", text);
         Assert.DoesNotContain(@"C:\", text);
@@ -663,11 +648,17 @@ public sealed class SetupUiPresentationTests
                 result,
                 recovery));
 
+        Assert.Contains("FailedStage=SERVICE_START", copied);
+        Assert.Contains("FailureCategory=ACCESS_DENIED", copied);
+        Assert.Matches(@"FailureStageDurationMs=\d+", copied);
+        Assert.Contains("FailedStage=SERVICE_START", field);
+        Assert.Matches(
+            @"Failure=SETUP_UNEXPECTED\|ACCESS_DENIED\|\d+",
+            field);
+        AssertCompactFieldDiagnostic(field);
+
         foreach (var text in new[] { copied, field })
         {
-            Assert.Contains("FailedStage=SERVICE_START", text);
-            Assert.Contains("FailureCategory=ACCESS_DENIED", text);
-            Assert.Matches(@"FailureStageDurationMs=\d+", text);
             Assert.DoesNotContain("sensitive", text);
             Assert.DoesNotContain("DOMAIN", text);
             Assert.DoesNotContain(@"C:\", text);
@@ -710,15 +701,17 @@ public sealed class SetupUiPresentationTests
                 result,
                 PendingRecoveryInspection.None));
 
-        foreach (var text in new[] { fieldText, failureText })
-        {
-            Assert.Contains("FailedStage=RECOVERY", text);
-            Assert.Contains(
-                $"PrimaryFailureCode={SetupErrorCodes.HealthFailed}",
-                text);
-            Assert.Contains("FailureCategory=CLASSIFIED", text);
-            Assert.Contains("FailureStageDurationMs=unknown", text);
-        }
+        Assert.Contains("FailedStage=RECOVERY", fieldText);
+        Assert.Contains(
+            $"Failure={SetupErrorCodes.HealthFailed}|CLASSIFIED|unknown",
+            fieldText);
+        AssertCompactFieldDiagnostic(fieldText);
+        Assert.Contains("FailedStage=RECOVERY", failureText);
+        Assert.Contains(
+            $"PrimaryFailureCode={SetupErrorCodes.HealthFailed}",
+            failureText);
+        Assert.Contains("FailureCategory=CLASSIFIED", failureText);
+        Assert.Contains("FailureStageDurationMs=unknown", failureText);
 
         Assert.Contains(
             $"ErrorCode={SetupErrorCodes.RollbackFailed}",
@@ -762,25 +755,18 @@ public sealed class SetupUiPresentationTests
                 result,
                 PendingRecoveryInspection.None));
 
-        Assert.Contains("Operation=PREFLIGHT", text);
-        Assert.Contains("Result=SUCCESS", text);
+        AssertCompactFieldDiagnostic(text);
+        Assert.Contains("Run=PREFLIGHT|SUCCESS|0", text);
         Assert.Contains("FailedStage=NONE", text);
         Assert.Contains("ErrorCode=OK", text);
-        Assert.Contains("PrimaryFailureCode=NONE", text);
-        Assert.Contains("FailureCategory=NOT_RUN", text);
-        Assert.Contains("FailureStageDurationMs=unknown", text);
-        Assert.Contains("RecommendedActionCode=NONE", text);
-        Assert.Contains("PackageValidation=PASS", text);
-        Assert.Contains("RecoveryJournal=NONE", text);
-        Assert.Contains("Service=RUNNING_READY", text);
-        Assert.Contains("LocalTcp18443=PASS", text);
-        Assert.Contains("Readiness=PASS", text);
-        Assert.Contains("AgentHealthCode=NOT_RUN", text);
-        Assert.Contains("AgentRestartObserved=FALSE", text);
-        Assert.Contains("ServiceRunningObserved=TRUE", text);
-        Assert.Contains("ListenerOwnedObserved=TRUE", text);
-        Assert.Contains("HttpAttemptCount=1", text);
-        Assert.Contains("LastTransportPhase=READINESS_VALIDATED", text);
+        Assert.Contains("Failure=NONE|NOT_RUN|unknown", text);
+        Assert.Contains("Action=NONE", text);
+        Assert.Contains(
+            "State=PASS|NONE|RUNNING_READY|NONE|PASS|PASS",
+            text);
+        Assert.Contains(
+            "Health=NOT_RUN|FTT|1|READINESS_VALIDATED",
+            text);
     }
 
     [Fact]
@@ -829,14 +815,12 @@ public sealed class SetupUiPresentationTests
         Assert.Contains("HttpAttemptCount=3", failureText);
         Assert.Contains("LastTransportPhase=RESPONSE_BODY", failureText);
         Assert.Contains(
-            "AgentHealthCode=TCPOWNEDBYOTHERPROCESS",
+            "Health=TCPOWNEDBYOTHERPROCESS|TTT|3|RESPONSE_BODY",
             fieldText);
-        Assert.Contains("AgentRestartObserved=TRUE", fieldText);
-        Assert.Contains("ServiceRunningObserved=TRUE", fieldText);
-        Assert.Contains("ListenerOwnedObserved=TRUE", fieldText);
-        Assert.Contains("HttpAttemptCount=3", fieldText);
-        Assert.Contains("LastTransportPhase=RESPONSE_BODY", fieldText);
-        Assert.Contains("LocalTcp18443=PASS_OBSERVED", fieldText);
+        Assert.Contains(
+            "|PASS_OBSERVED|FAIL",
+            fieldText);
+        AssertCompactFieldDiagnostic(fieldText);
         Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
         Assert.Equal(
             Swd1AgentHealthCode.TcpOwnedByOtherProcess,
@@ -890,7 +874,7 @@ public sealed class SetupUiPresentationTests
                 PendingRecoveryInspection.None));
         var supportCode = SetupFieldDiagnosticFormatter.CreateSupportCode(context);
 
-        Assert.Contains($"AgentHealthCode={expectedDiagnosticCode}", text);
+        Assert.Contains($"Health={expectedDiagnosticCode}|", text);
         Assert.Contains(
             $"AgentHealthCode={expectedDiagnosticCode}",
             failureText);
@@ -1013,13 +997,15 @@ public sealed class SetupUiPresentationTests
                 PendingRecoveryInspection.None));
 
         Assert.Contains("ProductVersion=UNAVAILABLE", text);
-        Assert.Contains("WindowsBuild=UNAVAILABLE", text);
-        Assert.Contains("Architecture=UNAVAILABLE", text);
-        Assert.Contains("Operation=UNAVAILABLE", text);
+        Assert.Contains(
+            "Environment=19700101T000000000Z|UNAVAILABLE|UNAVAILABLE",
+            text);
+        Assert.Contains("Run=UNAVAILABLE|FAILURE|unknown", text);
         Assert.Contains("FailedStage=UNKNOWN", text);
         Assert.Contains("ErrorCode=UNAVAILABLE", text);
-        Assert.Contains("OperationDurationMs=unknown", text);
-        Assert.Contains("Stage.01.Code=UNAVAILABLE", text);
+        Assert.Contains("Failure=UNAVAILABLE|CLASSIFIED|unknown", text);
+        Assert.Contains("Stages=1|UNAVAILABLE:F", text);
+        AssertCompactFieldDiagnostic(text);
         Assert.DoesNotContain(sensitive, text);
         Assert.DoesNotContain(@"C:\", text);
         Assert.DoesNotContain("DOMAIN", text);
@@ -1056,11 +1042,108 @@ public sealed class SetupUiPresentationTests
                 result,
                 PendingRecoveryInspection.None));
 
-        Assert.Contains($"Stage.01.Code={code}", text);
+        Assert.Contains($"Stages=1|{code}:F", text);
         Assert.Contains($"ErrorCode={code}", text);
         Assert.Contains("FailedStage=RECOVERY", text);
         Assert.Contains(
-            "RecommendedActionCode=RUN_OR_REVIEW_RECOVERY",
+            "Action=RUN_OR_REVIEW_RECOVERY",
+            text);
+        AssertCompactFieldDiagnostic(text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_HealthFailureKeepsGenericHttpsObservation()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.HealthFailed,
+            "private detail",
+            []) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.HealthFailed,
+            AgentHealthCode =
+                AgentHealthProbeCode.HttpsRequestFailed.ToString(),
+            AgentServiceRunningObserved = true,
+            AgentListenerOwnedObserved = true,
+            AgentHttpAttemptCount = 3,
+            AgentLastTransportPhase =
+                AgentHealthTransportPhase.RequestStarted
+        };
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.14-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.FromMilliseconds(64_182),
+                result,
+                PendingRecoveryInspection.None));
+
+        Assert.Contains("ErrorCode=SETUP_HEALTH_FAILED", text);
+        Assert.Contains(
+            "Failure=SETUP_HEALTH_FAILED|CLASSIFIED|unknown",
+            text);
+        Assert.Contains(
+            "Health=HTTPS_REQUEST_FAILED|FTT|3|REQUEST_STARTED",
+            text);
+        AssertCompactFieldDiagnostic(text);
+    }
+
+    [Fact]
+    public void FieldDiagnostic_ManyLongStagesStayWithinOnePhotoContract()
+    {
+        var steps = new SetupStepRecorder();
+        for (var index = 0; index < 20; index++)
+        {
+            steps.Add(new SetupStepResult(
+                "PACKAGE_VALID",
+                "package",
+                SetupStepState.Succeeded,
+                "safe"));
+        }
+
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.RollbackFailedDirectoryCleanupFailed,
+            "cleanup",
+            SetupStepState.Failed,
+            "safe"));
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.RollbackLegacyFirewallRestoreFailed,
+            "rollback",
+            SetupStepState.Warning,
+            "safe"));
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.RollbackFailed,
+            "safe",
+            steps) with
+        {
+            PrimaryFailureCode =
+                SetupErrorCodes.RollbackFailedDirectoryCleanupFailed
+        };
+
+        var text = SetupFieldDiagnosticFormatter.Format(
+            new SetupFieldDiagnosticContext(
+                "0.10.14-poc",
+                DateTimeOffset.UnixEpoch,
+                "10.0.26100.0",
+                "X64",
+                "install",
+                TimeSpan.Zero,
+                result,
+                PendingRecoveryInspection.None));
+        var stageLine = text.Split("\r\n", StringSplitOptions.None)[11];
+
+        AssertCompactFieldDiagnostic(text);
+        Assert.StartsWith("Stages=22|", stageLine);
+        Assert.Contains(
+            $"{SetupErrorCodes.RollbackLegacyFirewallRestoreFailed}:W",
+            stageLine);
+        Assert.DoesNotContain(
+            $"{SetupErrorCodes.RollbackFailedDirectoryCleanupFailed}:F",
+            stageLine);
+        Assert.Contains(
+            $"Failure={SetupErrorCodes.RollbackFailedDirectoryCleanupFailed}|CLASSIFIED|unknown",
             text);
     }
 
@@ -1177,5 +1260,34 @@ public sealed class SetupUiPresentationTests
         Assert.Equal(SetupErrorCodes.Ok, result.ErrorCode);
         Assert.False(contentCalled);
         Assert.False(writeCalled);
+    }
+
+    private static void AssertCompactFieldDiagnostic(string text)
+    {
+        var withoutCrlf = text.Replace("\r\n", string.Empty);
+        Assert.DoesNotContain('\r', withoutCrlf);
+        Assert.DoesNotContain('\n', withoutCrlf);
+
+        var lines = text.Split("\r\n", StringSplitOptions.None);
+        Assert.Equal(12, lines.Length);
+        Assert.Equal("SSW_FIELD_DIAGNOSTIC/2", lines[0]);
+        Assert.StartsWith("Component=", lines[1]);
+        Assert.StartsWith("ProductVersion=", lines[2]);
+        Assert.StartsWith("Environment=", lines[3]);
+        Assert.StartsWith("Run=", lines[4]);
+        Assert.StartsWith("FailedStage=", lines[5]);
+        Assert.StartsWith("ErrorCode=", lines[6]);
+        Assert.StartsWith("Failure=", lines[7]);
+        Assert.StartsWith("Action=", lines[8]);
+        Assert.StartsWith("State=", lines[9]);
+        Assert.StartsWith("Health=", lines[10]);
+        Assert.StartsWith("Stages=", lines[11]);
+        Assert.All(lines, line =>
+        {
+            Assert.NotEmpty(line);
+            Assert.True(
+                line.Length <= 88,
+                $"Diagnostic line exceeds 88 characters: {line}");
+        });
     }
 }

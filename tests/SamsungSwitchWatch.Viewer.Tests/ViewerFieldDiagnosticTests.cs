@@ -47,20 +47,27 @@ public sealed class ViewerFieldDiagnosticTests
             architecture: "x64");
         var text = ViewerFieldDiagnostic.Format(snapshot);
 
-        Assert.StartsWith("SSW_FIELD_DIAGNOSTIC/1\r\n", text, StringComparison.Ordinal);
+        AssertCompactPhotoFormat(text);
+        Assert.StartsWith("SSW_FIELD_DIAGNOSTIC/2\r\n", text, StringComparison.Ordinal);
         Assert.Contains("Component=VIEWER\r\n", text, StringComparison.Ordinal);
         Assert.Contains("ProductVersion=UNKNOWN\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Mode=SAME_PC\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Operation=AGENT_CONNECTION_CHECK\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Result=SUCCESS\r\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Environment=2026-07-29T01:02:03.0000000+00:00|22631|X64\r\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Run=SAME_PC|AGENT_CONNECTION_CHECK|SUCCESS\r\n",
+            text,
+            StringComparison.Ordinal);
         Assert.Contains("FailedStage=NONE\r\n", text, StringComparison.Ordinal);
         Assert.Contains("ErrorCode=NONE\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("RecommendedActionCode=NONE\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AddressStatus=SUCCEEDED\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("IdentityDurationMs=5\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("CandidateCount=2\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AgentProductVersion=0.10.8-poc\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("ApiVersion=4\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Action=NONE\r\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Stages=ADDR:OK|DNS:OK|TCP:OK|HTTPS:OK|ID:OK\r\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("TimingMs=1|2|3|4|5\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Agent=2|0.10.8-poc|4\r\n", text, StringComparison.Ordinal);
         Assert.DoesNotContain("192.0.2.10", text, StringComparison.Ordinal);
         Assert.DoesNotContain("operator", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("hunter2", text, StringComparison.Ordinal);
@@ -87,22 +94,27 @@ public sealed class ViewerFieldDiagnosticTests
             architecture: "unknown-cpu");
         var text = ViewerFieldDiagnostic.Format(snapshot);
 
-        Assert.Contains("Mode=NORMAL\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Result=FAILED\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("FailedStage=TCP\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("ErrorCode=AGENT_CONNECTION_REFUSED\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("RecommendedActionCode=CHECK_AGENT_SERVICE\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("TcpStatus=FAILED\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("TcpDurationMs=0\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("HttpsStatus=NOT_RUN\r\n", text, StringComparison.Ordinal);
+        AssertCompactPhotoFormat(text);
         Assert.Contains(
-            $"CandidateCount={LocalAgentPreflight.DefaultMaxCandidateAttempts}\r\n",
+            "Run=NORMAL|AGENT_CONNECTION_CHECK|FAILED\r\n",
             text,
             StringComparison.Ordinal);
-        Assert.Contains("WindowsBuild=UNKNOWN\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("Architecture=UNKNOWN\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AgentProductVersion=UNKNOWN\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("ApiVersion=UNKNOWN\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("FailedStage=TCP\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("ErrorCode=AGENT_CONNECTION_REFUSED\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Action=CHECK_AGENT_SERVICE\r\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Stages=ADDR:PENDING|DNS:PENDING|TCP:FAIL|HTTPS:SKIP|ID:SKIP\r\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("TimingMs=0|0|0|0|0\r\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            $"Agent={LocalAgentPreflight.DefaultMaxCandidateAttempts}|UNKNOWN|UNKNOWN\r\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Environment=1970-01-01T00:00:00.0000000+00:00|UNKNOWN|UNKNOWN\r\n",
+            text,
+            StringComparison.Ordinal);
         Assert.DoesNotContain(result.Detail, text, StringComparison.Ordinal);
     }
 
@@ -219,11 +231,10 @@ public sealed class ViewerFieldDiagnosticTests
         Assert.Equal("FAILED", snapshot.Result);
         Assert.Equal(expectedStage, snapshot.FailedStage);
         Assert.Equal(errorCode, snapshot.ErrorCode);
+        AssertCompactPhotoFormat(text);
         Assert.Contains($"FailedStage={expectedStage}\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AddressDurationMs=11\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("IdentityDurationMs=15\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AgentProductVersion=0.11.0-poc\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("ApiVersion=4\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("TimingMs=11|12|13|14|15\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Agent=3|0.11.0-poc|4\r\n", text, StringComparison.Ordinal);
         Assert.True(
             Swd1SupportCode.TryDecode(
                 supportCode,
@@ -244,7 +255,7 @@ public sealed class ViewerFieldDiagnosticTests
         {
             Assert.Equal("CHECK_VIEWER_STORAGE", snapshot.RecommendedActionCode);
             Assert.Contains(
-                "RecommendedActionCode=CHECK_VIEWER_STORAGE\r\n",
+                "Action=CHECK_VIEWER_STORAGE\r\n",
                 text,
                 StringComparison.Ordinal);
         }
@@ -272,8 +283,8 @@ public sealed class ViewerFieldDiagnosticTests
         Assert.Equal("FAILED", snapshot.Result);
         Assert.Equal("0.10.9-poc", snapshot.AgentProductVersion);
         Assert.Equal("4", snapshot.ApiVersion);
-        Assert.Contains("AgentProductVersion=0.10.9-poc\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("ApiVersion=4\r\n", text, StringComparison.Ordinal);
+        AssertCompactPhotoFormat(text);
+        Assert.Contains("Agent=1|0.10.9-poc|4\r\n", text, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -301,8 +312,58 @@ public sealed class ViewerFieldDiagnosticTests
         Assert.Equal("UNKNOWN", snapshot.ProductVersion);
         Assert.Equal("UNKNOWN", snapshot.AgentProductVersion);
         Assert.Contains("ProductVersion=UNKNOWN\r\n", text, StringComparison.Ordinal);
-        Assert.Contains("AgentProductVersion=UNKNOWN\r\n", text, StringComparison.Ordinal);
+        Assert.Contains("Agent=1|UNKNOWN|4\r\n", text, StringComparison.Ordinal);
         Assert.DoesNotContain(untrustedVersion, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Format_MaximumAllowedValuesStayWithinPhotoBounds()
+    {
+        var maximumVersion =
+            "1234567890.1234567890.1234567890-1234567890123456789012345678901";
+        var identity = new AgentIdentityDto(
+            9_999,
+            "not-exported",
+            "not-exported",
+            new string('B', 64),
+            "https",
+            8,
+            65_536)
+        {
+            ProductVersion = maximumVersion
+        };
+        var result = AgentConnectionProbeResult.Success(identity, "not exported") with
+        {
+            StageSnapshots =
+                [
+                    new(AgentConnectionProbeStage.Address, AgentConnectionProbeState.Running, long.MaxValue),
+                    new(AgentConnectionProbeStage.Dns, AgentConnectionProbeState.Pending, long.MinValue),
+                    new(AgentConnectionProbeStage.Tcp, AgentConnectionProbeState.Succeeded, long.MaxValue),
+                    new(AgentConnectionProbeStage.Https, AgentConnectionProbeState.Failed, long.MaxValue),
+                    new(AgentConnectionProbeStage.Identity, AgentConnectionProbeState.Pending, long.MaxValue)
+                ]
+        };
+        var snapshot = ViewerFieldDiagnostic.Create(
+            "SAME_PC",
+            result,
+            int.MaxValue,
+            generatedUtc: DateTimeOffset.MaxValue,
+            productVersion: maximumVersion,
+            windowsBuild: "999999",
+            architecture: "arm64");
+
+        var text = ViewerFieldDiagnostic.Format(snapshot);
+
+        AssertCompactPhotoFormat(text);
+        Assert.Contains($"ProductVersion={maximumVersion}\r\n", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Stages=ADDR:PENDING|DNS:PENDING|TCP:OK|HTTPS:FAIL|ID:PENDING\r\n",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"Agent={LocalAgentPreflight.DefaultMaxCandidateAttempts}|{maximumVersion}|9999\r\n",
+            text,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -363,4 +424,13 @@ public sealed class ViewerFieldDiagnosticTests
         {
             ProductVersion = productVersion
         };
+
+    private static void AssertCompactPhotoFormat(string text)
+    {
+        Assert.EndsWith("\r\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", text.Replace("\r\n", string.Empty, StringComparison.Ordinal));
+        var lines = text.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(11, lines.Length);
+        Assert.All(lines, line => Assert.InRange(line.Length, 1, 88));
+    }
 }

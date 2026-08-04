@@ -601,7 +601,7 @@ internal static class Program
                          (AgentConnectionProbeStage.Dns, "Agent PC IPv4 형식을 확인했습니다."),
                          (AgentConnectionProbeStage.Tcp, "TCP/18443 연결에 성공했습니다."),
                          (AgentConnectionProbeStage.Https, "HTTPS 보호 연결을 확인했습니다."),
-                         (AgentConnectionProbeStage.Identity, "Agent 0.10.13-poc · API v4 확인")
+                         (AgentConnectionProbeStage.Identity, "Agent 0.10.14-poc · API v4 확인")
                      })
             {
                 progress?.Report(new LocalAgentPreflightUpdate(
@@ -623,11 +623,11 @@ internal static class Program
                 8,
                 65_536)
             {
-                ProductVersion = "0.10.13-poc"
+                ProductVersion = "0.10.14-poc"
             };
             var probeResult = AgentConnectionProbeResult.Success(
                 identity,
-                "Agent 0.10.13-poc · API v4 확인");
+                "Agent 0.10.14-poc · API v4 확인");
             return Task.FromResult(new LocalAgentPreflightResult(
                 true,
                 candidate,
@@ -792,7 +792,7 @@ internal static class Program
             binder: null,
             args:
             [
-                "0.10.13-poc",
+                "0.10.14-poc",
                 DemoNow,
                 "10.0.22631.0",
                 "X64",

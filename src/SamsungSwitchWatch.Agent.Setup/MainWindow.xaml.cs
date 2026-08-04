@@ -971,7 +971,7 @@ public partial class MainWindow : Window
         if (saveResult.State == SetupFieldDiagnosticSaveState.Succeeded)
         {
             DiagnosticsCopyFeedbackText.Text =
-                "IP·계정·경로·원문을 제외한 익명 진단 TXT를 저장했습니다.";
+                "사진 한 장용 익명 진단 TXT를 저장했습니다.";
             DiagnosticsCopyFeedbackText.Foreground = Brushes.SeaGreen;
             DiagnosticsCopyFeedbackText.Visibility = Visibility.Visible;
             return;

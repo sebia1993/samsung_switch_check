@@ -569,6 +569,7 @@ internal sealed record SetupFieldDiagnosticContext(
 
 internal static class SetupFieldDiagnosticFormatter
 {
+    private const int MaximumLineLength = 88;
     private const string Unavailable = "UNAVAILABLE";
     private const string NotRun = "NOT_RUN";
 
@@ -682,85 +683,27 @@ internal static class SetupFieldDiagnosticFormatter
             resultCode);
         var failure = SetupFailureDiagnosticProjection.Create(context.Result);
         var stages = BuildStages(context.Result);
-        var firewallDecisionCodes = BuildFirewallDecisionCodes(
-            context.Result,
-            stages);
-
         var lines = new List<string>
         {
-            "SSW_FIELD_DIAGNOSTIC/1",
+            "SSW_FIELD_DIAGNOSTIC/2",
             "Component=AGENT_SETUP",
             $"ProductVersion={SafeToken(context.ProductVersion)}",
-            $"GeneratedUtc={context.GeneratedUtc.UtcDateTime:yyyyMMddTHHmmssfffZ}",
-            $"WindowsBuild={WindowsBuildToken(context.WindowsBuild)}",
-            $"Architecture={ArchitectureToken(context.Architecture)}",
-            $"Operation={operation}",
-            $"Result={(context.Result.Succeeded ? "SUCCESS" : "FAILURE")}",
+            $"Environment={context.GeneratedUtc.UtcDateTime:yyyyMMddTHHmmssfffZ}|{WindowsBuildToken(context.WindowsBuild)}|{ArchitectureToken(context.Architecture)}",
+            $"Run={operation}|{(context.Result.Succeeded ? "SUCCESS" : "FAILURE")}|{DurationToken(context.OperationDuration.TotalMilliseconds)}",
             $"FailedStage={
                 (context.Result.Succeeded ? "NONE" : failure.Stage)}",
             $"ErrorCode={
                 (context.Result.Succeeded ? SetupErrorCodes.Ok : resultCode)}",
-            $"PrimaryFailureCode={
-                (context.Result.Succeeded ? "NONE" : primaryCode)}",
-            $"FailureCategory={
-                (context.Result.Succeeded ? NotRun : failure.Category)}",
-            $"FailureStageDurationMs={
-                (context.Result.Succeeded
-                    ? "unknown"
-                    : MillisecondsToken(failure.DurationMilliseconds))}",
-            $"RecommendedActionCode={
+            $"Failure={(context.Result.Succeeded ? "NONE" : primaryCode)}|{(context.Result.Succeeded ? NotRun : failure.Category)}|{(context.Result.Succeeded ? "unknown" : MillisecondsToken(failure.DurationMilliseconds))}",
+            $"Action={
                 RecommendedActionCode(
                     context.Result.Succeeded
                         ? SetupErrorCodes.Ok
                         : resultCode)}",
-            $"OperationDurationMs={
-                DurationToken(context.OperationDuration.TotalMilliseconds)}",
-            $"PackageValidation={PackageValidation(context.Result, stages)}",
-            $"RecoveryJournal={RecoveryJournal(context.Recovery)}",
-            $"Service={ServiceStatus(context.Result, context.Recovery, stages)}",
-            $"FirewallDecisionCodes={
-                (firewallDecisionCodes.Count == 0
-                    ? "NONE"
-                    : string.Join(",", firewallDecisionCodes))}",
-            $"LocalTcp18443={
-                LocalTcpStatus(context.Result, context.Recovery, stages)}",
-            $"Readiness={ReadinessStatus(context.Result, stages)}",
-            $"AgentHealthCode={AgentHealthCode(context.Result, context.Recovery)}",
-            $"AgentRestartObserved={
-                (context.Result.AgentRestartObserved ||
-                 context.Recovery.AgentRestartObserved
-                    ? "TRUE"
-                    : "FALSE")}",
-            $"ServiceRunningObserved={
-                BooleanToken(
-                    context.Result.AgentServiceRunningObserved ||
-                    context.Recovery.AgentServiceRunningObserved)}",
-            $"ListenerOwnedObserved={
-                BooleanToken(
-                    context.Result.AgentListenerOwnedObserved ||
-                    context.Recovery.AgentListenerOwnedObserved)}",
-            $"HttpAttemptCount={
-                AttemptCountToken(
-                    Math.Max(
-                        context.Result.AgentHttpAttemptCount,
-                        context.Recovery.AgentHttpAttemptCount))}",
-            $"LastTransportPhase={
-                TransportPhaseToken(
-                    LastTransportPhase(
-                        context.Result,
-                        context.Recovery))}",
-            $"StageCount={stages.Count.ToString(CultureInfo.InvariantCulture)}"
+            $"State={PackageValidation(context.Result, stages)}|{RecoveryJournal(context.Recovery)}|{ServiceStatus(context.Result, context.Recovery, stages)}|{FirewallSummary(context.Result, stages)}|{LocalTcpStatus(context.Result, context.Recovery, stages)}|{ReadinessStatus(context.Result, stages)}",
+            $"Health={AgentHealthCode(context.Result, context.Recovery)}|{ObservationFlags(context.Result, context.Recovery)}|{AttemptCountToken(Math.Max(context.Result.AgentHttpAttemptCount, context.Recovery.AgentHttpAttemptCount))}|{TransportPhaseToken(LastTransportPhase(context.Result, context.Recovery))}",
+            CompactStages(stages)
         };
-
-        for (var index = 0; index < stages.Count; index++)
-        {
-            var stage = stages[index];
-            var prefix = $"Stage.{index + 1:D2}";
-            lines.Add($"{prefix}.Code={stage.Code}");
-            lines.Add($"{prefix}.Status={StageStateToken(stage.State)}");
-            lines.Add($"{prefix}.DurationMs={MillisecondsToken(stage.DurationMilliseconds)}");
-            lines.Add($"{prefix}.ElapsedMs={MillisecondsToken(stage.ElapsedMilliseconds)}");
-        }
 
         return string.Join("\r\n", lines);
     }
@@ -830,6 +773,8 @@ internal static class SetupFieldDiagnosticFormatter
                 AgentHealthProbeCode.HttpsEof => "HTTPS_EOF",
                 AgentHealthProbeCode.HttpsConnectFailed =>
                     "HTTPS_CONNECT_FAILED",
+                AgentHealthProbeCode.HttpsRequestFailed =>
+                    "HTTPS_REQUEST_FAILED",
                 _ => code.ToString().ToUpperInvariant()
             }
             : NotRun;
@@ -898,6 +843,144 @@ internal static class SetupFieldDiagnosticFormatter
             .ToArray();
         return codes;
     }
+
+    private static string FirewallSummary(
+        SetupOperationResult result,
+        IReadOnlyList<SetupStageDiagnostic> stages)
+    {
+        var decisions = stages
+            .Select(stage => stage.Code)
+            .Concat(
+                result.DiagnosticMetadata?.SafeDecisionCodes ??
+                Array.Empty<string>())
+            .Append(result.Code)
+            .Concat(result.RollbackFailureCodes)
+            .Where(AllowedFirewallDecisionCodes.Contains)
+            .ToArray();
+
+        if (decisions.Any(code => code is
+                SetupErrorCodes.FirewallFailed or
+                SetupErrorCodes.RollbackHttpsFirewallRestoreFailed or
+                SetupErrorCodes.RollbackLegacyFirewallRestoreFailed))
+        {
+            return "FAIL";
+        }
+
+        for (var index = decisions.Length - 1; index >= 0; index--)
+        {
+            var summary = decisions[index] switch
+            {
+                "FIREWALL_GATE_READY" => "READY",
+                "FIREWALL_EXACT" => "EXACT",
+                "FIREWALL_OVERLAP_PROTECTED" => "PROTECTED",
+                "FIREWALL_UPDATE_REQUIRED" => "UPDATE",
+                "FIREWALL_NOT_INSTALLED" => "NOT_INSTALLED",
+                "FIREWALL_CONFIGURED" => "CONFIGURED",
+                FirewallRuleMismatchCodes.Missing or
+                FirewallRuleMismatchCodes.Disabled or
+                FirewallRuleMismatchCodes.Direction or
+                FirewallRuleMismatchCodes.Action or
+                FirewallRuleMismatchCodes.Protocol or
+                FirewallRuleMismatchCodes.LocalPort or
+                FirewallRuleMismatchCodes.RemoteAddress or
+                FirewallRuleMismatchCodes.Profiles or
+                FirewallRuleMismatchCodes.EdgeTraversal => "UPDATE",
+                _ => null
+            };
+            if (summary is not null)
+            {
+                return summary;
+            }
+        }
+
+        return "NONE";
+    }
+
+    private static string ObservationFlags(
+        SetupOperationResult result,
+        PendingRecoveryInspection recovery) =>
+        string.Concat(
+            CompactBoolean(
+                result.AgentRestartObserved ||
+                recovery.AgentRestartObserved),
+            CompactBoolean(
+                result.AgentServiceRunningObserved ||
+                recovery.AgentServiceRunningObserved),
+            CompactBoolean(
+                result.AgentListenerOwnedObserved ||
+                recovery.AgentListenerOwnedObserved));
+
+    private static string CompactStages(
+        IReadOnlyList<SetupStageDiagnostic> stages)
+    {
+        var prefix = $"Stages={stages.Count.ToString(CultureInfo.InvariantCulture)}|";
+        if (stages.Count == 0)
+        {
+            return $"{prefix}NONE:N";
+        }
+
+        var tokens = stages
+            .Select(stage => $"{stage.Code}:{CompactStageState(stage.State)}")
+            .ToArray();
+        var selected = new SortedSet<int> { stages.Count - 1 };
+        var latestFailedIndex = -1;
+        for (var index = stages.Count - 1; index >= 0; index--)
+        {
+            if (stages[index].State == SetupStepState.Failed)
+            {
+                latestFailedIndex = index;
+                break;
+            }
+        }
+
+        if (latestFailedIndex >= 0)
+        {
+            TryAddCompactStage(prefix, tokens, selected, latestFailedIndex);
+        }
+
+        for (var index = stages.Count - 2; index >= 0; index--)
+        {
+            TryAddCompactStage(prefix, tokens, selected, index);
+        }
+
+        return BuildCompactStageLine(prefix, tokens, selected);
+    }
+
+    private static void TryAddCompactStage(
+        string prefix,
+        IReadOnlyList<string> tokens,
+        SortedSet<int> selected,
+        int index)
+    {
+        if (!selected.Add(index))
+        {
+            return;
+        }
+
+        if (BuildCompactStageLine(prefix, tokens, selected).Length >
+            MaximumLineLength)
+        {
+            selected.Remove(index);
+        }
+    }
+
+    private static string BuildCompactStageLine(
+        string prefix,
+        IReadOnlyList<string> tokens,
+        IEnumerable<int> selected) =>
+        prefix + string.Join(">", selected.Select(index => tokens[index]));
+
+    private static string CompactStageState(SetupStepState state) =>
+        state switch
+        {
+            SetupStepState.Succeeded => "S",
+            SetupStepState.Warning => "W",
+            SetupStepState.Failed => "F",
+            SetupStepState.Running => "R",
+            _ => "N"
+        };
+
+    private static char CompactBoolean(bool value) => value ? 'T' : 'F';
 
     private static string PackageValidation(
         SetupOperationResult result,
