@@ -1147,7 +1147,7 @@ function Resolve-SswFieldDiagnosticScenario {
 
     $scenarios = @{
         'AGENT_SETUP|SETUP_FIREWALL_FAILED|FIREWALL' =
-            'AgentDeploymentOrchestratorTests.DeployAsync_FirewallVerificationTimeoutRollsBackWithSanitizedMismatch'
+            'AgentDeploymentOrchestratorTests.DeployAsync_FirewallVerificationTimeoutKeepsReadyAgentAndWarns'
         'AGENT_SETUP|SETUP_HEALTH_FAILED|READINESS' =
             'AgentDeploymentOrchestratorTests.DeployAsync_HealthFailureRestoresUpgradeFilesServiceFirewallAndIdentity'
         'AGENT_SETUP|SETUP_RECOVERY_REQUIRED|RECOVERY_JOURNAL' =

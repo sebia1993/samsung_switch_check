@@ -3,7 +3,7 @@
 원격 PC의 숨겨진 Windows 서비스가 삼성 iES 스위치에 Telnet으로 접속하고, 운영자 PC의
 Viewer가 장비 등록·조회 명령·결과 확인·주기 감시를 담당하는 Windows 전용 POC입니다.
 
-현재 버전은 `v0.10.15-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
+현재 버전은 `v0.10.16-poc`입니다. IES4224GP, IES4028XP, IES4226XP의 실제 펌웨어별
 명령과 출력은 사내 현장 검증 전까지 확정된 것으로 간주하지 않습니다.
 
 ## 한눈에 보는 구조
@@ -30,8 +30,8 @@ SamsungSwitchWatch.Viewer.exe              SamsungSwitchWatchAgent 서비스
 
 공식 GitHub Release Assets에서 다음 두 ZIP만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.15-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.15-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.16-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.16-poc-win-x64.zip`
 
 두 패키지는 Windows x64용 self-contained 빌드이므로 Python이나 .NET을 별도로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
@@ -64,9 +64,8 @@ staging·backup·failed·journal 중 어느 안전 단계에서 실패했는지
 `.__staging_*`, `.__backup_*`, `.__failed_*` 폴더나 작업 기록을 수동으로 삭제·이동·이름
 변경하지 마십시오.
 
-`0.10.15-poc`는 일부 Windows 환경에서 Agent 서비스와 TCP/18443 수신이 확인된 뒤에도
-Schannel이 일시 키로 불러온 ECDSA 개인 키를 TLS 서버에 사용하지 못해 로컬 HTTPS 준비 검사가
-계속 실패하던 경로를 수정합니다. Agent는 DPAPI LocalMachine으로 보호한 기존 신원을 유지하며,
+`0.10.16-poc`는 `0.10.15-poc`에서 수정한 일부 Windows Schannel 환경의 로컬 HTTPS 준비 경로를
+그대로 유지합니다. Agent는 DPAPI LocalMachine으로 보호한 기존 신원을 유지하며,
 개인 키를 내보내거나 사용자 키 저장소에 별도 키 컨테이너로 영구 유지하지 않고 서비스 계정의
 사용자 키 집합으로 프로세스 수명 동안 불러옵니다. Agent가 종료되면 호스트가 인증서 수명을
 정리합니다.
@@ -163,8 +162,17 @@ Viewer의 연결 진단은 다음 순서로 표시됩니다.
 Windows가 단일 호스트 방화벽 주소를 `/32` 대신 `/255.255.255.255`로 반환해도 Setup은
 같은 Viewer IPv4인지 의미 기준으로 확인합니다. 적용 직후 Windows 반영 지연은 최대 2초까지만
 재확인하며, 그 뒤에도 방향·동작·프로토콜·포트·주소·프로필·Edge Traversal 중 하나가 다르면
-`SETUP_FIREWALL_FAILED`와 민감정보가 없는 불일치 코드를 표시하고 설치 전 상태로 복구합니다.
+정확한 제품 소유 규칙만 원격 연결 준비 완료로 인정합니다. 규칙 적용·재조회 또는 회사 GPO
+정책 확인이 실패하면 `FIREWALL_REMOTE_ACCESS_UNCONFIRMED` 경고를 표시하지만, Agent의 로컬
+HTTPS/API/버전 준비 상태가 정상이라면 설치된 서비스는 유지합니다. 이 경우 Viewer에서 원격
+연결을 확인하고 필요하면 Windows 관리자에게 방화벽·GPO 정책을 요청해야 합니다. 제품은
+`Any`, `LocalSubnet` 또는 넓은 대역 규칙을 만들지 않습니다.
 이 오류를 피하려고 규칙을 `Any`, `LocalSubnet` 또는 넓은 대역으로 수동 변경하지 마십시오.
+
+정확한 제품 규칙까지 확인되면 `설치 완료 · 원격 연결 준비됨`, 방화벽 확인만 남으면
+`설치 완료 · 원격 Viewer 연결 확인 필요`로 표시합니다. Viewer의 TCP/18443 단계가 실패하면
+방화벽·GPO·라우팅을 확인하고, TCP는 성공했지만 HTTPS 단계가 실패하면 Agent PC의 로컬
+HTTPS/TLS 준비 상태를 확인합니다.
 
 ## 보안 경계
 
@@ -190,7 +198,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.15-poc
+.\scripts\build-release.ps1 -Version 0.10.16-poc
 ```
 
 실제 장비 대신 합성 Telnet 서버와 비식별 Fixture를 사용합니다. Mock 통과를 실제 펌웨어
@@ -212,6 +220,7 @@ ZIP 정확히 두 개입니다.
 - [보안 모델](docs/SECURITY.md)
 - [현장 POC 점검표](docs/FIELD_POC_CHECKLIST_KO.md)
 - [릴리스 절차](docs/RELEASE_PROCESS_KO.md)
+- [0.10.16-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.16_POC_KO.md)
 - [0.10.15-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.15_POC_KO.md)
 - [0.10.14-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.14_POC_KO.md)
 - [0.10.13-poc 릴리스 노트](docs/RELEASE_NOTES_0.10.13_POC_KO.md)

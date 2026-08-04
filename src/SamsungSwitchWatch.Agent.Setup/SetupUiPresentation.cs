@@ -38,6 +38,62 @@ internal enum SetupRecoveryCompletionSeverity
     Error
 }
 
+internal enum SetupInstallCompletionSeverity
+{
+    Success,
+    Warning,
+    Error
+}
+
+internal sealed record SetupInstallCompletionState(
+    SetupInstallCompletionSeverity Severity,
+    string StatusText,
+    string GuidanceText);
+
+internal static class SetupInstallCompletionPolicy
+{
+    public static SetupInstallCompletionState Evaluate(
+        SetupOperationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!result.Succeeded)
+        {
+            return new SetupInstallCompletionState(
+                SetupInstallCompletionSeverity.Error,
+                $"설치 실패 · {result.Code}",
+                "설치에 실패했습니다. 아래 실패 단계와 지원 코드를 확인하세요.");
+        }
+
+        var warnings = result.Steps
+            .Where(step => step.State == SetupStepState.Warning)
+            .ToArray();
+        if (warnings.Any(step => string.Equals(
+                step.Code,
+                SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+                StringComparison.Ordinal)))
+        {
+            return new SetupInstallCompletionState(
+                SetupInstallCompletionSeverity.Warning,
+                "설치 완료 · 원격 Viewer 연결 확인 필요",
+                "Viewer에서 Agent 연결 테스트를 실행해 원격 연결을 확인하세요.");
+        }
+
+        if (warnings.Length > 0)
+        {
+            return new SetupInstallCompletionState(
+                SetupInstallCompletionSeverity.Warning,
+                $"설치 완료 · 경고 {warnings.Length}건",
+                "아래 경고 내용을 확인한 뒤 Viewer에서 Agent 연결 테스트를 실행하세요.");
+        }
+
+        return new SetupInstallCompletionState(
+            SetupInstallCompletionSeverity.Success,
+            "설치 완료 · 원격 연결 준비됨",
+            "Viewer에서 Agent 연결 테스트를 실행해 연결 상태를 확인하세요.");
+    }
+}
+
 internal sealed record SetupRecoveryCompletionState(
     bool ReadyForInstall,
     bool UseInspectionResult,

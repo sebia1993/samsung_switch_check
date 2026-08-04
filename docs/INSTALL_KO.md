@@ -2,22 +2,22 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.10.15-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.10.16-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.10.15-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.10.15-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.10.16-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.10.16-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. Agent와 Viewer는 반드시 같은 Release의 조합을 사용합니다.
 
-`0.10.15-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.10.16-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.10.15-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.10.16-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 검사를 다시 확인한 다음 운영자가 설치 또는 업데이트를 별도로 시작해야 합니다. 복구가
 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -118,17 +118,25 @@ Windows 방화벽은 같은 단일 호스트 규칙을 조회할 때 주소를 `
 Domain/Private·Edge Traversal 비활성 조건도 모두 그대로 확인합니다.
 
 규칙을 적용한 직후 Windows가 아직 새 값을 반환하지 않을 수 있어 즉시 한 번 확인한 뒤 200ms
-간격으로 최대 2초까지만 재확인합니다. 이 제한 안에 정확한 규칙을 확인하지 못하면 성공으로
-처리하지 않고 `SETUP_FIREWALL_FAILED`와 민감정보가 없는 불일치 코드를 표시한 뒤 기존
-프로그램·서비스·방화벽 상태를 rollback합니다.
+간격으로 최대 2초까지만 재확인합니다. 이 제한 안에 정확한 규칙을 확인하지 못하거나 Windows
+방화벽 서비스·활성 프로필·로컬 규칙 병합 GPO·제품 규칙 소유권을 확인하지 못하면
+`FIREWALL_REMOTE_ACCESS_UNCONFIRMED` 경고를 표시합니다. Setup은 방화벽 변경분만 설치 전
+상태로 복원하려고 시도하고 복원 확인 여부를 경고에 포함하며, Agent 서비스와 프로그램은
+유지합니다. 입력한 Viewer IPv4를 Agent API에서 다시 확인하는 접근 제한도 유지합니다.
 
-다음 조건은 경고가 아니라 설치 중단 사유입니다.
+이 경고는 설치 실패가 아니라 **원격 Viewer 연결을 아직 확인하지 못했다**는 뜻입니다. 설치
+결과는 `설치 완료 · 원격 Viewer 연결 확인 필요`로 표시되며, Viewer에서 연결 테스트를 실행해
+TCP/18443 경로를 최종 확인해야 합니다. 다음 환경에서 경고가 발생할 수 있습니다.
 
 - Windows 방화벽 서비스 또는 활성 프로필 방화벽이 꺼짐
 - 활성 프로필의 기본 인바운드 정책이 허용
 - Public 프로필만 활성
 - 그룹 정책이 로컬 방화벽 규칙 병합을 차단
 - 제품 전용 규칙 이름을 다른 프로그램이 사용
+- 제품 규칙 적용 또는 재조회가 실패하거나 정확한 `/32` 규칙으로 확인되지 않음
+
+Setup은 이런 상황에서도 `Any`, `LocalSubnet` 또는 넓은 대역 규칙을 대체로 만들지 않습니다.
+Viewer TCP 연결에 실패하면 Windows 관리자에게 승인된 방화벽·GPO 정책을 요청하십시오.
 
 설치 후 Viewer 연결이 안 되면 Agent Setup을 다시 열어 `검사`부터 실행하십시오. 명령줄
 PowerShell을 실행하거나 실행 정책을 변경할 필요가 없습니다.
@@ -162,8 +170,8 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
 - 설치 후 준비 상태가 실패하면 단계는 `SERVICE_STARTED`, `SETUP_HEALTH_FAILED`,
   `ROLLBACK_COMPLETED` 순으로 표시되고, 준비 상태 대기 시간과 rollback 시간이 각 단계에
   따로 기록됩니다.
-- `0.10.15-poc`는 서비스와 TCP/18443은 정상인데 로컬 HTTPS만 계속 실패하던 일부 Windows
-  Schannel 환경을 수정합니다. Agent ECDSA 신원은 기존 DPAPI LocalMachine 보호 파일을
+- `0.10.16-poc`는 이전 릴리스에서 수정한 일부 Windows Schannel 환경의 로컬 HTTPS 준비
+  경로를 유지합니다. Agent ECDSA 신원은 기존 DPAPI LocalMachine 보호 파일을
   유지하면서 개인 키를 내보내거나 사용자 키 저장소에 별도 키 컨테이너로 영구 유지하지 않고
   서비스 계정의 사용자 키 집합으로 Agent 프로세스 수명 동안 불러옵니다. Agent 종료 시에는
   호스트가 인증서 수명을 정리합니다. Setup은 매 재시도마다 새 HTTPS 연결을 HTTP/1.1로 만든
@@ -209,7 +217,7 @@ PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예
 
 복구 완료 메시지가 나타났다면 같은 실패 화면에서 설치를 자동으로 다시 시작하지 않습니다.
 Setup을 닫지 않아도 되지만, 상태가 `복구 필요 없음`으로 바뀌고 설치 버튼이 다시 활성화됐는지
-확인한 뒤 `0.10.15-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. 같은 health
+확인한 뒤 `0.10.16-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. 같은 health
 분류가 반복되면 재설치를 계속 반복하지 말고 SWD1 코드 또는 `진단정보 복사` 결과를
 전달하십시오.
 
@@ -385,6 +393,17 @@ Viewer가 Agent PC의 TCP/18443에 연결하지 못했습니다.
 5. Windows 방화벽 프로필이 Domain 또는 Private인지 확인합니다.
 6. EDR·백신·사내 방화벽 차단은 보안 담당자에게 확인합니다.
 
+이 오류는 HTTPS 인증서 오류가 아니라 Viewer에서 Agent PC의 TCP/18443까지 연결되지 않은
+상태입니다. Agent 설치가 `설치 완료 · 원격 Viewer 연결 확인 필요`로 끝났다면 방화벽 또는 회사
+GPO가 로컬 제품 규칙을 허용하는지 Windows 관리자에게 먼저 확인하십시오.
+
+### AGENT_PROTOCOL_MISMATCH / TLS_IDENTITY_INVALID
+
+TCP/18443 연결은 성공했지만 Agent의 HTTPS/TLS 응답을 확인하지 못했습니다. Agent PC에서
+Agent Setup의 `검사`를 실행해 `Setup → 127.0.0.1:18443 → Agent 서비스` 로컬 HTTPS 준비
+상태를 확인하십시오. TCP 단계가 성공한 경우 Viewer PC의 방화벽 규칙을 넓혀도 이 오류는
+해결되지 않습니다.
+
 ### AGENT_IDENTITY_CHANGED
 
 같은 Agent 주소에서 이전과 다른 HTTPS 신원이 확인됐습니다. Agent PC 교체 또는 데이터를
@@ -394,24 +413,24 @@ Viewer가 Agent PC의 TCP/18443에 연결하지 못했습니다.
 
 Agent와 Viewer가 서로 다른 Release입니다. 두 PC 모두 같은 버전의 공식 ZIP으로 맞춥니다.
 
-### SETUP_FIREWALL_FAILED
+### FIREWALL_REMOTE_ACCESS_UNCONFIRMED
 
-Agent Setup이 제품 소유 Viewer 전용 방화벽 규칙을 안전 기준과 일치한다고 확인하지 못했습니다.
-Cause에는 실제 Viewer 주소나 규칙 원문 대신 `FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한
-불일치 코드만 표시됩니다.
+Agent의 로컬 HTTPS/API/버전 준비 상태는 정상이라 설치는 완료됐지만, Setup이 제품 소유 Viewer
+전용 `/32` 방화벽 규칙의 적용 또는 재확인을 완료하지 못했습니다. Cause에는 실제 Viewer 주소나
+규칙 원문 대신 `FIREWALL_REMOTE_ADDRESS_MISMATCH` 같은 안전한 불일치 코드만 표시됩니다.
 
-1. 오류 창과 불일치 코드를 기록합니다.
-2. Setup이 미완료 작업을 표시하면 설치를 다시 누르지 말고 `이전 상태 복구`를 실행합니다.
-3. 복구가 완료된 뒤 같은 Release의 Agent ZIP을 새 로컬 폴더에 다시 압축 해제하고 Setup의
-   `검사`를 실행합니다.
-4. Windows 방화벽 서비스와 Domain/Private 프로필이 켜져 있는지 확인합니다.
-5. 복구가 실패하거나 안전하지 않은 상태로 차단되면 `진단정보 복사`의 안전한 요약만 사내
-   Windows 관리자에게 전달합니다.
+1. Viewer에서 Agent 연결 테스트를 실행합니다.
+2. TCP/18443이 연결되면 별도 조치 없이 사용할 수 있습니다. Agent 내부 Viewer IPv4 검증은
+   계속 적용됩니다.
+3. TCP 단계가 실패하면 Agent PC의 Windows 방화벽 서비스, Domain/Private 프로필과 회사 GPO의
+   로컬 규칙 병합 정책을 Windows 관리자에게 확인합니다.
+4. Setup을 반복 설치하거나 제품 규칙을 수동으로 넓히지 않습니다.
 
-방화벽 규칙을 직접 만들거나 `Any`, `LocalSubnet`, 사설망 전체와 `/31` 이하의 넓은 prefix로
-확대하여 우회하지 마십시오. 제품 규칙의 원격 주소가 같은 Viewer IPv4의 `IP`,
-`IP/32`, `IP/255.255.255.255`로 보이는 차이는 정상적인 단일 호스트 표기 차이이며 Setup이
-자동으로 처리합니다.
+`SETUP_FIREWALL_FAILED`는 이전 버전 또는 복구가 필요한 예외 경로에서 보일 수 있는 호환 코드입니다.
+현재 버전에서 단순 방화벽·GPO·적용·재조회 문제는 Agent 전체 설치 rollback 대신 위 경고로
+처리합니다. `Any`, `LocalSubnet`, 사설망 전체와 `/31` 이하의 넓은 prefix를 만들어 우회하지
+마십시오. 제품 규칙의 원격 주소가 같은 Viewer IPv4의 `IP`, `IP/32`,
+`IP/255.255.255.255`로 보이는 차이는 정상적인 단일 호스트 표기 차이이며 Setup이 자동 처리합니다.
 
 ### SETUP_RECOVERY_REQUIRED / SETUP_ROLLBACK_FAILED
 

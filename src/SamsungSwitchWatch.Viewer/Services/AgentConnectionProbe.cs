@@ -235,7 +235,9 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
             if (Volatile.Read(ref httpsReported) == 0)
             {
                 const string code = "AGENT_RESPONSE_INVALID";
-                var tlsDetail = "HTTPS 인증서 확인 결과를 받지 못했습니다. Agent와 Viewer 버전을 확인해 주세요.";
+                var tlsDetail = ViewerConnectionMessages.ForProbeFailure(
+                    AgentConnectionProbeStage.Https,
+                    code);
                 Report(progress, AgentConnectionProbeStage.Https, AgentConnectionProbeState.Failed,
                     tlsDetail, code);
                 return AgentConnectionProbeResult.Failure(
@@ -291,7 +293,9 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
             var failedStage = Volatile.Read(ref httpsReported) == 0
                 ? AgentConnectionProbeStage.Https
                 : AgentConnectionProbeStage.Identity;
-            var detail = ViewerConnectionMessages.ForCode(typed.ErrorCode);
+            var detail = ViewerConnectionMessages.ForProbeFailure(
+                failedStage,
+                typed.ErrorCode);
             Report(progress, failedStage, AgentConnectionProbeState.Failed, detail, typed.ErrorCode);
             return AgentConnectionProbeResult.Failure(
                 failedStage,
@@ -321,7 +325,7 @@ internal sealed class AgentConnectionProbe : IAgentConnectionProbe
         AgentClientException failure,
         IProgress<AgentConnectionProbeUpdate>? progress)
     {
-        var detail = ViewerConnectionMessages.ForCode(failure.ErrorCode);
+        var detail = ViewerConnectionMessages.ForProbeFailure(stage, failure.ErrorCode);
         Report(progress, stage, AgentConnectionProbeState.Failed, detail, failure.ErrorCode);
         return AgentConnectionProbeResult.Failure(stage, failure.ErrorCode, detail);
     }

@@ -333,7 +333,7 @@ try {
         -Message 'Viewer diagnostic selected the wrong existing fake scenario.'
 
     $agentScenario =
-        'AgentDeploymentOrchestratorTests.DeployAsync_FirewallVerificationTimeoutRollsBackWithSanitizedMismatch'
+        'AgentDeploymentOrchestratorTests.DeployAsync_FirewallVerificationTimeoutKeepsReadyAgentAndWarns'
     $agentFixture = Write-SswFixture `
         -Name 'agent-valid.txt' `
         -Bom $true `

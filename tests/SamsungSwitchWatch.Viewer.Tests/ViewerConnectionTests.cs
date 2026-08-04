@@ -767,7 +767,7 @@ public sealed class ViewerConnectionTests
     [InlineData("AGENT_TIMEOUT", "초과")]
     [InlineData("AGENT_ACCESS_DENIED", "방화벽")]
     [InlineData("AGENT_CLIENT_NOT_ALLOWED", "Agent Setup")]
-    [InlineData("AGENT_PROTOCOL_MISMATCH", "최신")]
+    [InlineData("AGENT_PROTOCOL_MISMATCH", "로컬 HTTPS")]
     [InlineData("AGENT_VERSION_MISMATCH", "같은 릴리스")]
     public void ConnectionMessages_AreActionableAndDoNotRequestSecrets(string code, string expected)
     {

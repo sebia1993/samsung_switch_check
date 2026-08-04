@@ -21,6 +21,8 @@ public sealed class AgentDeploymentOrchestrator(
     private const int FirewallVerificationRetryCount = 10;
     private static readonly TimeSpan FirewallVerificationRetryDelay =
         TimeSpan.FromMilliseconds(200);
+    private const string UnavailableFirewallSnapshotDescription =
+        "SNAPSHOT_UNAVAILABLE";
 
     public async Task<SetupOperationResult> DeployAsync(
         SetupRequest request,
@@ -308,6 +310,10 @@ public sealed class AgentDeploymentOrchestrator(
         FirewallRuleSnapshot? previousHttpsFirewall = null;
         FirewallRuleSnapshot? previousHttpFirewall = null;
         AgentHealthProbeResult? agentHealth = null;
+        var firewallConfigurationEligible = true;
+        var firewallWarningPending = false;
+        var firewallRemoteAccessConfirmed = false;
+        var firewallMutationStarted = false;
         var journalStore = new DeploymentJournalStore(fileSystem, paths);
         DeploymentJournal? journal = null;
 
@@ -361,14 +367,29 @@ public sealed class AgentDeploymentOrchestrator(
             }
 
             steps.MarkActiveStage(SetupFailureStage.Firewall);
-            previousHttpsFirewall = firewallManager.Capture(SetupConstants.FirewallRuleName);
-            previousHttpFirewall = firewallManager.Capture(SetupConstants.LegacyFirewallRuleName);
-            var firewallAssessment = firewallManager.AssertSecurityGate(
-                SetupConstants.HttpsPort,
-                paths.AgentExecutablePath);
-            SetupDiagnosticsService.AddFirewallWarnings(
-                steps,
-                firewallAssessment);
+            try
+            {
+                previousHttpsFirewall = firewallManager.Capture(
+                    SetupConstants.FirewallRuleName);
+                previousHttpFirewall = firewallManager.Capture(
+                    SetupConstants.LegacyFirewallRuleName);
+                var firewallAssessment = firewallManager.AssertSecurityGate(
+                    SetupConstants.HttpsPort,
+                    paths.AgentExecutablePath);
+                SetupDiagnosticsService.AddFirewallWarnings(
+                    steps,
+                    firewallAssessment);
+            }
+            catch (SetupException exception) when (
+                exception.Code == SetupErrorCodes.FirewallFailed)
+            {
+                firewallConfigurationEligible = false;
+                firewallWarningPending = true;
+                previousHttpsFirewall = UnavailableFirewallSnapshot(
+                    SetupConstants.FirewallRuleName);
+                previousHttpFirewall = UnavailableFirewallSnapshot(
+                    SetupConstants.LegacyFirewallRuleName);
+            }
 
             journal = new DeploymentJournal(
                 DeploymentJournalStore.CurrentFormatVersion,
@@ -515,35 +536,6 @@ public sealed class AgentDeploymentOrchestrator(
                 "서비스 구성",
                 "창 없는 Agent 자동 시작 서비스를 구성했습니다."));
 
-            steps.MarkActiveStage(SetupFailureStage.Firewall);
-            firewallManager.RemoveOwnedRule(SetupConstants.LegacyFirewallRuleName);
-            firewallManager.ApplyViewerRule(
-                SetupConstants.FirewallRuleName,
-                SetupConstants.HttpsPort,
-                request.ViewerIpv4);
-            var firewallVerification = await VerifyViewerFirewallRuleAsync(
-                request.ViewerIpv4,
-                cancellationToken);
-            if (!firewallVerification.IsExact)
-            {
-                steps.AddSafeDecisionCode(
-                    firewallVerification.MismatchCode);
-                throw new SetupException(
-                    SetupErrorCodes.FirewallFailed,
-                    "Viewer 전용 방화벽 규칙을 확인하지 못했습니다. " +
-                    $"({firewallVerification.MismatchCode})");
-            }
-            _ = firewallManager.AssertSecurityGate(
-                SetupConstants.HttpsPort,
-                paths.AgentExecutablePath);
-            journal = journal with { Stage = "firewall-configured" };
-            journalStore.Write(journal);
-
-            steps.Add(Succeeded(
-                "FIREWALL_CONFIGURED",
-                "방화벽 구성",
-                $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
-
             steps.MarkActiveStage(SetupFailureStage.ServiceStart);
             serviceManager.Start(SetupConstants.ServiceName, TimeSpan.FromSeconds(30));
             journal = journal with { Stage = "service-started" };
@@ -588,6 +580,70 @@ public sealed class AgentDeploymentOrchestrator(
 
             steps.MarkActiveStage(SetupFailureStage.ServiceConfiguration);
             serviceManager.ConfigureRecovery(SetupConstants.ServiceName);
+
+            if (firewallWarningPending)
+            {
+                AddFirewallRemoteAccessWarning(
+                    steps,
+                    firewallStateRestored: true);
+            }
+
+            if (firewallConfigurationEligible)
+            {
+                try
+                {
+                    steps.MarkActiveStage(SetupFailureStage.Firewall);
+                    firewallMutationStarted = true;
+                    firewallManager.RemoveOwnedRule(SetupConstants.LegacyFirewallRuleName);
+                    firewallManager.ApplyViewerRule(
+                        SetupConstants.FirewallRuleName,
+                        SetupConstants.HttpsPort,
+                        request.ViewerIpv4);
+                    var firewallVerification = await VerifyViewerFirewallRuleAsync(
+                        request.ViewerIpv4,
+                        cancellationToken);
+                    if (!firewallVerification.IsExact)
+                    {
+                        steps.AddSafeDecisionCode(
+                            firewallVerification.MismatchCode);
+                        throw new SetupException(
+                            SetupErrorCodes.FirewallFailed,
+                            "Viewer 전용 방화벽 규칙을 확인하지 못했습니다.");
+                    }
+
+                    _ = firewallManager.AssertSecurityGate(
+                        SetupConstants.HttpsPort,
+                        paths.AgentExecutablePath);
+                    journal = journal with { Stage = "firewall-configured" };
+                    journalStore.Write(journal);
+                    firewallRemoteAccessConfirmed = true;
+
+                    steps.Add(Succeeded(
+                        "FIREWALL_CONFIGURED",
+                        "방화벽 구성",
+                        $"제품 소유 Viewer {request.ViewerIpv4}/32 HTTPS/18443 규칙을 구성했고 Agent 원격 업무 API도 동일한 Viewer IP만 허용합니다."));
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (SetupException exception) when (
+                    exception.Code == SetupErrorCodes.FirewallFailed)
+                {
+                    var firewallStateRestored =
+                        !firewallMutationStarted ||
+                        TryRestoreFirewallSnapshotsBestEffort(
+                            previousHttpsFirewall,
+                            previousHttpFirewall);
+                    if (firewallStateRestored)
+                    {
+                        firewallMutationStarted = false;
+                    }
+                    AddFirewallRemoteAccessWarning(
+                        steps,
+                        firewallStateRestored);
+                }
+            }
 
             // Health success is the transaction commit boundary. Backup cleanup
             // must never turn a working installation into a rollback attempt
@@ -652,7 +708,9 @@ public sealed class AgentDeploymentOrchestrator(
             }
 
             return SetupOperationResult.Success(
-                "Agent 설치 또는 업데이트가 완료되었습니다.",
+                firewallRemoteAccessConfirmed
+                    ? "Agent 설치 또는 업데이트가 완료되었습니다."
+                    : "Agent 설치 또는 업데이트가 완료됐지만 원격 Viewer 연결은 확인이 필요합니다.",
                 steps) with
             {
                 AgentHealthCode = agentHealth.Value.Code.ToString(),
@@ -689,6 +747,7 @@ public sealed class AgentDeploymentOrchestrator(
                     dataDirectoryExistedBefore,
                     dataDirectoryCreated,
                     mutationStarted,
+                    firewallMutationStarted,
                     primaryCode,
                     primaryMessage,
                     steps,
@@ -724,6 +783,7 @@ public sealed class AgentDeploymentOrchestrator(
                     dataDirectoryExistedBefore,
                     dataDirectoryCreated,
                     mutationStarted,
+                    firewallMutationStarted,
                     exception.Code,
                     exception.Message,
                     steps,
@@ -763,6 +823,7 @@ public sealed class AgentDeploymentOrchestrator(
                     dataDirectoryExistedBefore,
                     dataDirectoryCreated,
                     mutationStarted,
+                    firewallMutationStarted,
                     primaryCode,
                     primaryMessage,
                     steps,
@@ -810,6 +871,69 @@ public sealed class AgentDeploymentOrchestrator(
         return verification;
     }
 
+    private bool TryRestoreFirewallSnapshotsBestEffort(
+        FirewallRuleSnapshot? previousHttpsFirewall,
+        FirewallRuleSnapshot? previousHttpFirewall)
+    {
+        var restored = true;
+        foreach (var snapshot in new[]
+                 {
+                     previousHttpsFirewall,
+                     previousHttpFirewall
+                 })
+        {
+            if (snapshot is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                firewallManager.Restore(snapshot);
+            }
+            catch
+            {
+                restored = false;
+            }
+        }
+
+        return restored;
+    }
+
+    private static FirewallRuleSnapshot UnavailableFirewallSnapshot(
+        string ruleName) =>
+        FirewallRuleSnapshot.Missing(ruleName) with
+        {
+            Description = UnavailableFirewallSnapshotDescription
+        };
+
+    private static bool FirewallSnapshotsAreUnavailable(
+        FirewallRuleSnapshot? previousHttpsFirewall,
+        FirewallRuleSnapshot? previousHttpFirewall) =>
+        string.Equals(
+            previousHttpsFirewall?.Description,
+            UnavailableFirewallSnapshotDescription,
+            StringComparison.Ordinal) ||
+        string.Equals(
+            previousHttpFirewall?.Description,
+            UnavailableFirewallSnapshotDescription,
+            StringComparison.Ordinal);
+
+    private static void AddFirewallRemoteAccessWarning(
+        SetupStepRecorder steps,
+        bool firewallStateRestored)
+    {
+        steps.AddSafeDecisionCode(
+            SetupErrorCodes.FirewallRemoteAccessUnconfirmed);
+        steps.Add(new SetupStepResult(
+            SetupErrorCodes.FirewallRemoteAccessUnconfirmed,
+            "원격 Viewer 연결",
+            SetupStepState.Warning,
+            firewallStateRestored
+                ? "Agent 로컬 HTTPS는 정상입니다. Viewer 전용 방화벽 규칙을 자동 구성하지 못했으므로 원격 연결이 되지 않으면 회사 방화벽 정책을 확인하세요."
+                : "Agent 로컬 HTTPS는 정상입니다. Viewer 전용 방화벽 규칙 구성과 변경 전 상태 복구 여부를 확인하지 못했으므로 회사 방화벽 정책을 확인하세요."));
+    }
+
     private async Task<RollbackOutcome> TryRollbackAsync(
         DeploymentJournalStore journalStore,
         DeploymentJournal? journal,
@@ -824,6 +948,7 @@ public sealed class AgentDeploymentOrchestrator(
         bool dataDirectoryExistedBefore,
         bool dataDirectoryCreated,
         bool mutationStarted,
+        bool firewallMutationStarted,
         string primaryFailureCode,
         string primaryFailureMessage,
         SetupStepRecorder steps,
@@ -1115,9 +1240,9 @@ public sealed class AgentDeploymentOrchestrator(
 
         // The two product-owned firewall rules are independent resources.
         // Always try both, even when one restore fails.
-        var httpsFirewallRestored = !mutationStarted;
-        var legacyFirewallRestored = !mutationStarted;
-        if (mutationStarted)
+        var httpsFirewallRestored = !firewallMutationStarted;
+        var legacyFirewallRestored = !firewallMutationStarted;
+        if (firewallMutationStarted)
         {
             try
             {
@@ -1764,6 +1889,10 @@ public sealed class AgentDeploymentOrchestrator(
             pending.DataDirectoryExistedBefore,
             pending.DataDirectoryCreated,
             pending.MutationStarted,
+            pending.MutationStarted &&
+            !FirewallSnapshotsAreUnavailable(
+                pending.PreviousHttpsFirewall,
+                pending.PreviousHttpFirewall),
             primaryCode,
             primaryMessage,
             steps,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.10.15 operator manual.
+"""Build the Korean Samsung Switch Watch v0.10.16 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.10.15-poc"
+VERSION = "0.10.16-poc"
 DOCUMENT_DATE = "2026-08-04"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -833,6 +833,17 @@ Viewer PC                 Agent PC                    Samsung Switch
     )
     add_callout(
         doc,
+        "방화벽 확인 경고는 Agent 설치 실패가 아님",
+        "제품 Viewer /32 규칙의 적용·재조회 또는 회사 GPO 확인이 실패하면 "
+        "FIREWALL_REMOTE_ACCESS_UNCONFIRMED 경고와 '설치 완료 · 원격 Viewer 연결 확인 필요'를 "
+        "표시합니다. 로컬 HTTPS/API/버전이 정상인 Agent 서비스와 프로그램은 유지하며, "
+        "방화벽 변경분만 설치 전 상태로 복원을 시도하고 결과를 경고에 남깁니다. Viewer에서 연결 테스트를 실행하고 TCP/18443이 "
+        "실패할 때만 Windows 관리자에게 방화벽·GPO 경로를 요청하세요. Setup은 Any, LocalSubnet "
+        "또는 넓은 대역 규칙을 대신 만들지 않습니다.",
+        "warning",
+    )
+    add_callout(
+        doc,
         "Windows의 /32 표시 차이는 자동 처리",
         "Windows가 같은 Viewer 단일 호스트를 IP, IP/32 또는 "
         "IP/255.255.255.255로 반환해도 Setup은 같은 주소인지 의미 기준으로 확인합니다. "
@@ -872,8 +883,10 @@ Viewer PC IPv4 예     : 10.20.30.25
         doc,
         "업데이트 안정성",
         "Setup은 BUILD-MANIFEST.json과 Agent 실행 파일 SHA-256을 확인하고, Program Files의 "
-        "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램·방화벽 변경 중 "
-        "현재 작업이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 다음 실행에서 완료되지 않은 "
+        "임시 staging에 복사한 파일을 다시 검사한 뒤 교체합니다. 서비스·프로그램 또는 로컬 "
+        "HTTPS/API/버전 확인이 실패하면 설치 전 상태로 되돌리기를 시도합니다. 방화벽·GPO·규칙 "
+        "적용/재조회만 실패하면 방화벽 변경분 복원을 시도하고 Agent 설치는 경고 상태로 유지합니다. "
+        "다음 실행에서 완료되지 않은 "
         "journal이 남아 있으면 자동 복구하지 않고 별도의 '이전 상태 복구' 작업을 요구합니다. "
         "새 서비스의 자동 재시작은 readiness 성공 뒤에만 적용하고, 검사 중에는 현재 서비스 "
         "PID와 TCP/18443 소유를 매번 다시 확인합니다. rollback 전에는 관찰한 서비스 프로세스 "
@@ -926,7 +939,7 @@ Viewer PC IPv4 예     : 10.20.30.25
         """
 SSW_FIELD_DIAGNOSTIC/2
 Component=AGENT_SETUP
-ProductVersion=0.10.15-poc
+ProductVersion=0.10.16-poc
 Environment=20260804T120000000Z|WIN_10_0_26100_0|X64
 Run=INSTALL|FAILURE|64182
 FailedStage=READINESS
@@ -975,16 +988,17 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
     )
     add_callout(
         doc,
-        "설치 실패와 Viewer 연결 거부",
-        "Agent Setup에 설치 실패가 표시되면 실패 단계와 Cause를 먼저 확인하세요. "
-        "SETUP_FIREWALL_FAILED는 적용 직후 최대 2초 동안 재확인해도 제품 방화벽 규칙이 "
-        "정확하지 않다는 뜻입니다. Setup은 실제 주소 대신 안전한 불일치 코드를 표시하고 "
-        "설치 전 상태로 복구합니다. 규칙을 Any, LocalSubnet 또는 넓은 대역으로 수동 확대하지 "
-        "마세요. "
-        "설치 성공 뒤 AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP나 localhost가 아니라 "
+        "설치 경고와 Viewer 연결 거부",
+        "Agent Setup에 FIREWALL_REMOTE_ACCESS_UNCONFIRMED가 표시되면 Agent 설치는 완료됐지만 "
+        "제품 방화벽 규칙의 적용·재조회 또는 회사 GPO를 확인하지 못했다는 뜻입니다. Viewer에서 "
+        "연결 테스트를 실행하고, TCP/18443이 실패할 때 Windows 관리자에게 확인하세요. 규칙을 "
+        "Any, LocalSubnet 또는 넓은 대역으로 수동 확대하지 마세요. "
+        "AGENT_CONNECTION_REFUSED가 보이면 Viewer에 스위치 IP나 localhost가 아니라 "
         "Agent를 설치한 PC의 실제 주소를 입력했는지 먼저 확인하세요. 동일 PC 사전 테스트도 "
         "localhost 대신 이 PC의 실제 RFC1918 사설 IPv4를 사용합니다. 그 다음 "
         "Agent Setup의 검사에서 SamsungSwitchWatchAgent 서비스와 TCP/18443을 점검합니다. "
+        "TCP 단계는 성공하고 HTTPS 단계가 실패하면 방화벽이 아니라 Agent PC의 로컬 HTTPS/TLS "
+        "준비 상태를 확인합니다. "
         "AGENT_CLIENT_NOT_ALLOWED이면 현재 Viewer PC의 고정 IPv4를 Agent Setup에 다시 "
         "입력하고 설치/업데이트합니다. "
         f"서비스를 수동 등록하지 말고 {VERSION} Agent Setup을 사용하세요.",
@@ -1376,12 +1390,13 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
             ("AGENT_UNREACHABLE", "Viewer와 Agent PC 사이 라우팅 → 방화벽 → EDR 차단"),
             ("AGENT_VERSION_MISMATCH", "같은 Release의 Agent ZIP과 Viewer ZIP으로 함께 업데이트"),
             ("AGENT_IDENTITY_CHANGED", "Agent PC 교체/재설치 사실을 관리자에게 확인한 뒤 다시 연결"),
-            ("AGENT_PROTOCOL_MISMATCH / TLS_IDENTITY_INVALID", "Agent Setup의 준비 상태 → PC 교체 여부 → HTTPS 신원 파일"),
+            ("AGENT_PROTOCOL_MISMATCH / TLS_IDENTITY_INVALID", "TCP 성공 확인 → Agent PC의 로컬 HTTPS/TLS 준비 상태 → PC 교체 여부와 HTTPS 신원"),
             ("SETUP_PACKAGE_NOT_FOUND", "Agent ZIP 전체 압축 해제 → Setup과 Agent EXE·BUILD-MANIFEST 존재 확인"),
             ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → Viewer 고정 IPv4 확인 → 설치/업데이트 계속"),
-            ("SETUP_FIREWALL_FAILED", "안전한 불일치 코드 기록 → rollback 완료 확인 → 방화벽 서비스·Domain/Private·그룹 정책"),
+            ("FIREWALL_REMOTE_ACCESS_UNCONFIRMED", "Agent 설치 유지 확인 → Viewer 연결 테스트 → TCP 실패 시 방화벽 서비스·Domain/Private·회사 GPO 확인"),
+            ("SETUP_FIREWALL_FAILED", "이전 버전/복구 호환 경로 → 안전한 불일치 코드와 rollback 상태 확인"),
             ("SETUP_HEALTH_FAILED", "Agent PC 내부 Setup → 127.0.0.1:18443 → Agent 서비스 구간 확인 → AgentHealthCode와 안전 관측값 확인 → 같은 설치 반복 대신 Windows 이벤트·TLS 정책·EDR 확인"),
             ("SETUP_RECOVERY_REQUIRED", "설치/업데이트를 누르지 말고 '이전 상태 복구' 실행 → 복구 완료 확인 → 설치/업데이트를 별도로 시작"),
             ("SETUP_ROLLBACK_FAILED", "'진단정보 복사'로 최초 실패 코드와 ROLLBACK_* 단계 확인 → 증거 폴더를 그대로 보존 → Windows 관리자에게 전달"),
@@ -1447,9 +1462,10 @@ Stages=7|SERVICE_STARTED:S>SETUP_HEALTH_FAILED:F>ROLLBACK_COMPLETED:S
         "방화벽 검증 실패 시",
         "FIREWALL_REMOTE_ADDRESS_MISMATCH 같은 코드는 어떤 필드가 안전 기준과 달랐는지만 "
         "알려 주며 실제 Viewer 주소나 규칙 원문은 포함하지 않습니다. Windows의 정상적인 "
-        "IP/32와 IP/255.255.255.255 표기 차이는 자동 처리됩니다. Setup이 rollback을 "
-        "완료한 뒤 같은 Release ZIP으로 검사를 다시 실행하고, 계속 실패하면 코드만 Windows "
-        "관리자에게 전달하세요. 규칙을 직접 넓혀 우회하지 마세요.",
+        "IP/32와 IP/255.255.255.255 표기 차이는 자동 처리됩니다. "
+        "FIREWALL_REMOTE_ACCESS_UNCONFIRMED이면 Agent 설치는 유지되며 Viewer 연결 테스트로 "
+        "원격 TCP/18443을 확인합니다. 실패하면 코드만 Windows 관리자에게 전달하고, 규칙을 "
+        "직접 넓혀 우회하지 마세요.",
         "warning",
     )
     add_heading(doc, "현장 진단", 2, heading_num_id)

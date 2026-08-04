@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.10.15-poc
+.\scripts\build-release.ps1 -Version 0.10.16-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -48,8 +48,10 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
 - Treat Windows Firewall readback forms `IP`, `IP/32`, and
   `IP/255.255.255.255` as equivalent only for the same single Viewer host. Never accept another
   prefix, list, range, `Any`, `LocalSubnet`, or IPv6 as an exact Viewer rule.
-- Keep post-apply firewall verification bounded, preserve strict non-address fields, roll back on
-  mismatch, and expose only stable mismatch codes rather than raw addresses or rule contents.
+- Keep post-apply firewall verification bounded and preserve strict non-address fields. On a
+  firewall/GPO/apply/readback-only mismatch, restore only the attempted firewall change, retain a
+  locally healthy Agent install and expose `FIREWALL_REMOTE_ACCESS_UNCONFIRMED` plus stable mismatch
+  codes rather than raw addresses or rule contents. Never create `Any`, `LocalSubnet` or a broad rule.
 - Persistent Agent ECDSA identity is stored only under ProgramData and protected with DPAPI LocalMachine.
 - Agent DataDirectory is exactly `%ProgramData%\SamsungSwitchWatch`; reject custom paths and even
   empty pre-existing roots during a new install.
@@ -76,8 +78,9 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
 - Internal Actions artifacts contain six validation files; GitHub Release custom Assets contain only the versioned Agent and Viewer ZIP files.
 - Keep Setup preflight readiness compatible with the legacy API v4 minimum payload. For
   install/update completion, do not relax the local HTTPS success response, API v4, HTTPS
-  protocol, or exact package-version checks. A transport failure must remain a failed deployment
-  with rollback rather than a warning or assumed success.
+  protocol, or exact package-version checks. A local HTTPS/API/version transport failure must remain
+  a failed deployment with rollback rather than a warning or assumed success. A firewall-only
+  failure is a remote-access warning only after local readiness succeeds.
 - Load the production Agent ECDSA PFX for Schannel into the service account's UserKeySet for the
   Agent process lifetime, without Exportable or PersistKeySet. The host must own and dispose this
   certificate after Kestrel stops so the temporary user-key container is removed. Keep each Setup

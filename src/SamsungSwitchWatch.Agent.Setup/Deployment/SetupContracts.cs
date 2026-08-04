@@ -35,6 +35,8 @@ public static class SetupErrorCodes
     public const string ConfigurationInvalid = "SETUP_CONFIGURATION_INVALID";
     public const string ServiceFailed = "SETUP_SERVICE_FAILED";
     public const string FirewallFailed = "SETUP_FIREWALL_FAILED";
+    public const string FirewallRemoteAccessUnconfirmed =
+        "FIREWALL_REMOTE_ACCESS_UNCONFIRMED";
     public const string HealthFailed = "SETUP_HEALTH_FAILED";
     public const string RollbackFailed = "SETUP_ROLLBACK_FAILED";
     public const string RecoveryRequired = "SETUP_RECOVERY_REQUIRED";
