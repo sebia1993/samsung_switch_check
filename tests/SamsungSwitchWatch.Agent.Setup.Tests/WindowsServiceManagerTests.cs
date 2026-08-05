@@ -14,7 +14,10 @@ public sealed class WindowsServiceManagerTests
     public void CaptureAccess_UsesReadOnlyScmAndServiceRights()
     {
         Assert.Equal(0x00000001u, WindowsServiceManager.ScManagerConnectAccess);
-        Assert.Equal(0x00020005u, WindowsServiceManager.ServiceCaptureAccess);
+        Assert.Equal(0x00000005u, WindowsServiceManager.ServiceCaptureAccess);
+        Assert.Equal(
+            0x00020000u,
+            WindowsServiceManager.ServiceSecurityCaptureAccess);
         const uint mutationRights =
             0x00000002 | // SERVICE_CHANGE_CONFIG
             0x00000010 | // SERVICE_START
@@ -23,6 +26,70 @@ public sealed class WindowsServiceManagerTests
             0x00040000 | // WRITE_DAC
             0x00080000;  // WRITE_OWNER
         Assert.Equal(0u, WindowsServiceManager.ServiceCaptureAccess & mutationRights);
+        Assert.Equal(
+            0u,
+            WindowsServiceManager.ServiceSecurityCaptureAccess & mutationRights);
+    }
+
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(1060, false)]
+    [InlineData(1072, false)]
+    public void SecurityDescriptorReadError_OnlyAccessDeniedIsOptional(
+        int error,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            WindowsServiceManager.IsOptionalSecurityDescriptorReadError(error));
+    }
+
+    [Theory]
+    [InlineData(1072, true)]
+    [InlineData(1060, false)]
+    [InlineData(5, false)]
+    public void ServiceDeletionPendingError_OnlyMarkedForDeleteKeepsWaiting(
+        int error,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            WindowsServiceManager.IsServiceDeletionPendingError(error));
+    }
+
+    [Theory]
+    [InlineData(1060, true)]
+    [InlineData(1072, false)]
+    [InlineData(5, false)]
+    public void ServiceDeletionCompleteError_OnlyMissingServiceCompletesWait(
+        int error,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            WindowsServiceManager.IsServiceDeletionCompleteError(error));
+    }
+
+    [Fact]
+    public void OperationAccess_UsesOnlyRequiredServiceRights()
+    {
+        Assert.Equal(0x00000002u, WindowsServiceManager.ScManagerCreateServiceAccess);
+        Assert.Equal(0x00000002u, WindowsServiceManager.ServiceChangeConfigAccess);
+        Assert.Equal(0x00000001u, WindowsServiceManager.ServiceQueryConfigAccess);
+        Assert.Equal(0x00000004u, WindowsServiceManager.ServiceQueryStatusAccess);
+        Assert.Equal(0x00000010u, WindowsServiceManager.ServiceStartAccess);
+        Assert.Equal(0x00000020u, WindowsServiceManager.ServiceStopAccess);
+        Assert.Equal(0x00010000u, WindowsServiceManager.ServiceDeleteAccess);
+        Assert.Equal(0x00040000u, WindowsServiceManager.ServiceWriteDacAccess);
+        Assert.Equal(
+            0u,
+            (WindowsServiceManager.ServiceChangeConfigAccess |
+             WindowsServiceManager.ServiceQueryConfigAccess |
+             WindowsServiceManager.ServiceQueryStatusAccess |
+             WindowsServiceManager.ServiceStartAccess |
+             WindowsServiceManager.ServiceStopAccess |
+             WindowsServiceManager.ServiceDeleteAccess) &
+            WindowsServiceManager.ServiceSecurityCaptureAccess);
     }
 
     [Fact]

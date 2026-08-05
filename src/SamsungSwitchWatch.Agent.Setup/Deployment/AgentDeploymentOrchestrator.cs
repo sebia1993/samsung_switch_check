@@ -352,8 +352,19 @@ public sealed class AgentDeploymentOrchestrator(
             failedDirectory = $"{paths.InstallDirectory}.__failed_{transactionId}";
 
             steps.MarkActiveStage(SetupFailureStage.FileSystem);
-            previousService = serviceManager.Capture(SetupConstants.ServiceName);
+            previousService = await SetupDiagnosticsService.CaptureServiceSnapshotAsync(
+                serviceManager,
+                cancellationToken);
+            SetupDiagnosticsService.AddServiceSnapshotStep(steps, previousService);
             ValidateExistingServiceContract(previousService);
+            if (previousService.Exists && previousService.SecurityDescriptor is null)
+            {
+                steps.Add(new SetupStepResult(
+                    "SERVICE_SECURITY_PRESERVED",
+                    "서비스 보안 설정 유지",
+                    SetupStepState.Warning,
+                    "기존 Agent 서비스의 보안 설명자를 읽지 못해 해당 보안 설정은 변경하지 않고 유지합니다."));
+            }
             dataDirectoryExistedBefore =
                 fileSystem.DirectoryExists(paths.DataDirectory);
             SetupDiagnosticsService.ValidateDeploymentPathsForInstall(
@@ -471,7 +482,9 @@ public sealed class AgentDeploymentOrchestrator(
             // pending states can still own a live process/file handle.
             if (previousService.Exists)
             {
-                serviceManager.Stop(SetupConstants.ServiceName, TimeSpan.FromSeconds(20));
+                serviceManager.Stop(
+                    SetupConstants.ServiceName,
+                    TimeSpan.FromSeconds(20));
             }
 
             steps.MarkActiveStage(SetupFailureStage.FileActivation);
@@ -506,7 +519,11 @@ public sealed class AgentDeploymentOrchestrator(
                 SetupConstants.ServiceName,
                 SetupConstants.ServiceDisplayName,
                 serviceBinaryPath,
-                $@"NT SERVICE\{SetupConstants.ServiceName}");
+                $@"NT SERVICE\{SetupConstants.ServiceName}",
+                existingServiceExpected: previousService.Exists,
+                updateServiceSecurity:
+                    !previousService.Exists ||
+                    previousService.SecurityDescriptor is not null);
             // A recovery restart during readiness can replace the service PID
             // and race the rollback file moves. Recovery is restored/enabled
             // only after this version has passed the bounded readiness gate.

@@ -278,17 +278,8 @@ public partial class MainWindow : Window
 
         var result = await RunOperationAsync(
             "install",
-            "설치 전 점검 중",
-            async cancellationToken =>
-            {
-                var preflight = await _diagnostics.RunAsync(request, cancellationToken);
-                if (!preflight.Succeeded)
-                {
-                    return preflight;
-                }
-
-                return await _deployment.DeployAsync(request, cancellationToken);
-            });
+            "설치/업데이트 중",
+            cancellationToken => _deployment.DeployAsync(request, cancellationToken));
         RefreshRecoveryState(
             preserveFailureDiagnostics: result is { Succeeded: false });
         if (result is not null && !_recoveryInspection.Exists)

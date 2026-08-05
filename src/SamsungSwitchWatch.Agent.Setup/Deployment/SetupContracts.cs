@@ -529,7 +529,9 @@ public interface IServiceManager
         string serviceName,
         string displayName,
         string binaryPath,
-        string accountName);
+        string accountName,
+        bool existingServiceExpected,
+        bool updateServiceSecurity);
     void ConfigureRecovery(string serviceName);
     void DisableRecovery(string serviceName);
     void Start(string serviceName, TimeSpan timeout);

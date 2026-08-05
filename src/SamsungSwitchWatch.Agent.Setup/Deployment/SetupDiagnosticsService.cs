@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Security;
+
 namespace SamsungSwitchWatch.Agent.Setup.Deployment;
 
 public sealed class SetupDiagnosticsService(
@@ -9,6 +12,10 @@ public sealed class SetupDiagnosticsService(
     IAdministratorChecker administratorChecker,
     DeploymentPaths paths)
 {
+    private const int ServiceCaptureAttemptCount = 2;
+    private static readonly TimeSpan ServiceCaptureRetryDelay =
+        TimeSpan.FromMilliseconds(200);
+
     public async Task<SetupOperationResult> RunAsync(
         SetupRequest request,
         CancellationToken cancellationToken)
@@ -57,20 +64,10 @@ public sealed class SetupDiagnosticsService(
                 $"Agent {package.Version} 파일 무결성이 정상입니다."));
 
             steps.MarkActiveStage(SetupFailureStage.FileSystem);
-            var service = serviceManager.Capture(SetupConstants.ServiceName);
-            steps.Add(new SetupStepResult(
-                !service.Exists
-                    ? "SERVICE_NOT_INSTALLED"
-                    : service.Running
-                        ? "SERVICE_RUNNING"
-                        : "SERVICE_STOPPED",
-                "서비스 상태",
-                SetupStepState.Information,
-                service.Exists
-                    ? service.Running
-                        ? "기존 Agent 서비스가 실행 중입니다."
-                        : "기존 Agent 서비스가 중지되어 있습니다."
-                    : "신규 설치 대상입니다."));
+            var service = await CaptureServiceSnapshotAsync(
+                serviceManager,
+                cancellationToken);
+            AddServiceSnapshotStep(steps, service);
             ValidateDeploymentPathsForInstall(fileSystem, paths, service, []);
 
             steps.Add(Success(
@@ -270,6 +267,79 @@ public sealed class SetupDiagnosticsService(
                 exception);
         }
     }
+
+    internal static async Task<ServiceSnapshot> CaptureServiceSnapshotAsync(
+        IServiceManager serviceManager,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(serviceManager);
+        Exception? lastFailure = null;
+        for (var attempt = 1; attempt <= ServiceCaptureAttemptCount; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var snapshot = serviceManager.Capture(SetupConstants.ServiceName);
+                cancellationToken.ThrowIfCancellationRequested();
+                return snapshot;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                IsRecoverableServiceCaptureFailure(exception))
+            {
+                lastFailure = exception;
+                if (attempt < ServiceCaptureAttemptCount)
+                {
+                    await Task.Delay(ServiceCaptureRetryDelay, cancellationToken);
+                }
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (lastFailure is SetupException setupException)
+        {
+            throw new SetupException(
+                setupException.Code,
+                "기존 Agent 서비스 상태를 확인하지 못했습니다. 잠시 후 다시 시도하거나 Windows 서비스 상태를 확인하십시오.",
+                setupException);
+        }
+
+        throw new SetupException(
+            SetupErrorCodes.ServiceFailed,
+            "기존 Agent 서비스 상태를 확인하지 못했습니다. 잠시 후 다시 시도하거나 Windows 서비스 상태를 확인하십시오.",
+            lastFailure);
+    }
+
+    internal static void AddServiceSnapshotStep(
+        SetupStepRecorder steps,
+        ServiceSnapshot service)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        ArgumentNullException.ThrowIfNull(service);
+        steps.Add(new SetupStepResult(
+            !service.Exists
+                ? "SERVICE_NOT_INSTALLED"
+                : service.Running
+                    ? "SERVICE_RUNNING"
+                    : "SERVICE_STOPPED",
+            "서비스 상태",
+            SetupStepState.Information,
+            service.Exists
+                ? service.Running
+                    ? "기존 Agent 서비스가 실행 중입니다."
+                    : "기존 Agent 서비스가 중지되어 있습니다."
+                : "신규 설치 대상입니다."));
+    }
+
+    private static bool IsRecoverableServiceCaptureFailure(Exception exception) =>
+        exception is SetupException { Code: SetupErrorCodes.ServiceFailed } or
+            Win32Exception or
+            UnauthorizedAccessException or
+            SecurityException or
+            IOException;
 
     private static SetupStepResult Success(string code, string label, string message) =>
         new(code, label, SetupStepState.Succeeded, message);
