@@ -29,12 +29,14 @@ public sealed class ViewerShutdownCoordinatorTests
         var processRunning = true;
         var pipeName = "SSW-ViewerSetup-" + Guid.NewGuid().ToString("N");
         var mutexName = @"Local\SSW-ViewerSetup-" + Guid.NewGuid().ToString("N");
+        using var serverReady = new ManualResetEventSlim();
         var server = RunDuplexServerAsync(pipeName, request =>
         {
             Assert.Equal(ViewerShutdownCoordinator.ShutdownRequest, request);
             processRunning = false;
             return ViewerShutdownCoordinator.ShutdownAccepted;
-        });
+        }, serverReady);
+        Assert.True(serverReady.Wait(TimeSpan.FromSeconds(5)));
         var coordinator = new ViewerShutdownCoordinator(
             pipeName,
             mutexName,
@@ -51,9 +53,12 @@ public sealed class ViewerShutdownCoordinatorTests
     {
         var pipeName = "SSW-ViewerSetup-" + Guid.NewGuid().ToString("N");
         var mutexName = @"Local\SSW-ViewerSetup-" + Guid.NewGuid().ToString("N");
+        using var serverReady = new ManualResetEventSlim();
         var server = RunDuplexServerAsync(
             pipeName,
-            _ => ViewerShutdownCoordinator.ShutdownAccepted);
+            _ => ViewerShutdownCoordinator.ShutdownAccepted,
+            serverReady);
+        Assert.True(serverReady.Wait(TimeSpan.FromSeconds(5)));
         var coordinator = new ViewerShutdownCoordinator(
             pipeName,
             mutexName,
@@ -74,6 +79,7 @@ public sealed class ViewerShutdownCoordinatorTests
         var mutexName = @"Local\SSW-ViewerSetup-" + Guid.NewGuid().ToString("N");
         var observed = new TaskCompletionSource<byte>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        using var serverReady = new ManualResetEventSlim();
         var server = Task.Run(async () =>
         {
             using var pipe = new NamedPipeServerStream(
@@ -82,6 +88,7 @@ public sealed class ViewerShutdownCoordinatorTests
                 1,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            serverReady.Set();
             await pipe.WaitForConnectionAsync();
             var request = new byte[1];
             if (await pipe.ReadAsync(request) == 1)
@@ -89,6 +96,7 @@ public sealed class ViewerShutdownCoordinatorTests
                 observed.TrySetResult(request[0]);
             }
         });
+        Assert.True(serverReady.Wait(TimeSpan.FromSeconds(5)));
         var coordinator = new ViewerShutdownCoordinator(
             pipeName,
             mutexName,
@@ -111,7 +119,8 @@ public sealed class ViewerShutdownCoordinatorTests
 
     private static Task RunDuplexServerAsync(
         string pipeName,
-        Func<byte, byte> response) =>
+        Func<byte, byte> response,
+        ManualResetEventSlim serverReady) =>
         Task.Run(async () =>
         {
             using var pipe = new NamedPipeServerStream(
@@ -120,6 +129,7 @@ public sealed class ViewerShutdownCoordinatorTests
                 1,
                 PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            serverReady.Set();
             await pipe.WaitForConnectionAsync();
             var request = new byte[1];
             Assert.Equal(1, await pipe.ReadAsync(request));
