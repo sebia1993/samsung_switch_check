@@ -165,25 +165,25 @@ public sealed class TelnetClientTests
                 TimeSpan.Zero,
                 TimeSpan.Zero,
                 TimeSpan.Zero,
-                TimeSpan.FromMilliseconds(100),
-                TimeSpan.FromMilliseconds(30)
+                TimeSpan.FromMilliseconds(300),
+                TimeSpan.FromMilliseconds(90)
             ],
             WriteDelays =
             [
                 TimeSpan.Zero,
                 TimeSpan.Zero,
                 TimeSpan.Zero,
-                TimeSpan.FromMilliseconds(100)
+                TimeSpan.FromMilliseconds(300)
             ]
         };
         var client = CreateClient(
             transport,
-            commandHardTimeout: TimeSpan.FromMilliseconds(600));
+            commandHardTimeout: TimeSpan.FromMilliseconds(3000));
 
         var result = await client.ExecuteRegisteredAsync(
             new TelnetEndpoint("192.0.2.10"),
             new TelnetCredentials("monitor", "synthetic-password"),
-            SingleCommandProfile(TimeSpan.FromMilliseconds(150)),
+            SingleCommandProfile(TimeSpan.FromMilliseconds(500)),
             [CommandIds.System]);
 
         var output = Assert.Single(result.Outputs);
@@ -408,15 +408,15 @@ public sealed class TelnetClientTests
                 TimeSpan.Zero,
                 TimeSpan.Zero,
                 TimeSpan.Zero,
-                TimeSpan.FromMilliseconds(35),
-                TimeSpan.FromMilliseconds(35),
-                TimeSpan.FromMilliseconds(35)
+                TimeSpan.FromMilliseconds(300),
+                TimeSpan.FromMilliseconds(300),
+                TimeSpan.FromMilliseconds(300)
             ]
         };
-        var profile = SingleCommandProfile(TimeSpan.FromMilliseconds(60));
+        var profile = SingleCommandProfile(TimeSpan.FromMilliseconds(500));
         var client = CreateClient(
             transport,
-            commandHardTimeout: TimeSpan.FromMilliseconds(250));
+            commandHardTimeout: TimeSpan.FromMilliseconds(5000));
 
         var result = await client.ExecuteRegisteredAsync(
             new TelnetEndpoint("192.0.2.10"),

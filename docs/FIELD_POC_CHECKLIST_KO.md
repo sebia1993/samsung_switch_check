@@ -6,10 +6,10 @@
 ## 1. 반입 파일과 버전
 
 - [ ] 동일 GitHub Release에서 Agent ZIP과 Viewer ZIP을 받음
-- [ ] Agent와 Viewer 파일명이 같은 `0.11.3-poc` 버전을 표시함
+- [ ] Agent와 Viewer 파일명이 같은 `0.11.4-poc` 버전을 표시함
 - [ ] 두 ZIP의 SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교함
 - [ ] Agent ZIP에 `SamsungSwitchWatch.Agent.Setup.exe`와 Agent 런타임 파일이 있음
-- [ ] Viewer ZIP에 `SamsungSwitchWatch.Viewer.exe`와 Viewer 런타임 파일이 있음
+- [ ] Viewer ZIP에 `SamsungSwitchWatch.Viewer.Setup.exe`, `SamsungSwitchWatch.Viewer.exe`와 Viewer 런타임 파일이 있음
 - [ ] 공개 ZIP에 `.ps1`, `.cmd`, 소스코드, 테스트 fixture와 불필요한 개발 파일이 없음
 - [ ] 조직의 백신·EDR·SmartScreen 반입 검사를 완료함
 
@@ -85,21 +85,24 @@ API v4가 호환되면 Agent와 Viewer 버전이 달라도 경고 후 연결할 
 HTTPS는 전송 내용을 암호화하지만 Agent 신원을 인증하지 않습니다. 이 위험을 승인한 격리된 사내
 사설망에서만 시험합니다.
 
-## 6. Viewer 포터블 실행
+## 6. Viewer 사용자 전용 설치
 
-- [ ] 0.9 설치형 Viewer를 사용했다면 트레이 메뉴에서 기존 프로그램을 완전히 종료함
-- [ ] `shell:startup`에서 기존 `Samsung Switch Watch` 자동 시작 바로 가기를 제거함
-- [ ] `shell:programs`에서 같은 이름의 기존 시작 메뉴 바로 가기를 제거함
-- [ ] 이전 Viewer가 실행 중일 때 새 Viewer가 동시 실행되지 않고 전환 안내를 표시함
-- [ ] 창이 바로 보이지 않으면 트레이에서 대시보드를 열고 실행 경로가 새 v0.11 폴더인지 확인함
-- [ ] Viewer ZIP을 사용할 로컬 폴더에 완전히 압축 해제함
-- [ ] `SamsungSwitchWatch.Viewer.exe`를 더블클릭해 실행함
-- [ ] Viewer 실행에 UAC가 나타나지 않음
-- [ ] Viewer가 PowerShell 또는 CMD를 실행하지 않음
-- [ ] Viewer가 `Program Files`에 자신을 설치하지 않음
-- [ ] Viewer가 시작 메뉴·바탕 화면·자동 시작을 임의 등록하지 않음
-- [ ] 같은 폴더에서 재실행 가능함
+- [ ] Viewer ZIP을 로컬 임시 폴더에 완전히 압축 해제함
+- [ ] v0.11.4 이후 Viewer 실행 중 업데이트에서 Setup이 안전 종료와 실제 종료 확인을 수행함
+- [ ] v0.11.3 포터블 Viewer가 실행 중이면 Setup이 강제 종료하지 않고 수동 종료를 안내함
+- [ ] `SamsungSwitchWatch.Viewer.Setup.exe` 실행에 UAC가 나타나지 않음
+- [ ] Viewer Setup이 PowerShell, CMD 또는 인터넷을 사용하지 않음
+- [ ] Viewer가 `%LOCALAPPDATA%\Programs\SamsungSwitchWatch\Viewer`에 설치됨
+- [ ] 바탕 화면과 시작 메뉴 바로 가기가 고정 설치 경로를 가리킴
+- [ ] 제품 소유의 이전 시작프로그램 바로 가기는 제거되고 새 자동 시작은 등록되지 않음
+- [ ] 설치 완료 전에 smoke/실행 확인이 실패하면 기존 설치는 복구되고 최초 설치는 미설치 상태로 정리됨
+- [ ] 설치 완료 전에 Viewer가 자동 실행되고 정상 실행 유지가 확인됨
+- [ ] 설치 성공 후 압축 해제한 임시 폴더를 삭제해도 Viewer가 바로 가기로 실행됨
+- [ ] 업데이트가 임의의 다운로드·압축 해제 폴더를 삭제하지 않음
 - [ ] Viewer 설정과 자격 증명은 현재 Windows 사용자 범위로 보존됨
+- [ ] 장비·연결·DPAPI·감시 데이터 파일은 보존되고 `Setup` 하위의 journal·증거 파일만 변경됨
+- [ ] 정상 미완료 journal에서는 설치가 잠기고 복구 완료 후 설치를 별도로 눌러야 함
+- [ ] 손상되거나 안전하지 않은 journal에서는 복구와 설치가 모두 차단됨
 - [ ] 다른 Windows 사용자로 Viewer 데이터를 복사해도 비밀번호가 복호화되지 않음
 - [ ] 인터넷과 Python/.NET 설치 없이 `익명 진단 저장` TXT를 생성하고 메모장에서 한글을 읽을 수 있음
 

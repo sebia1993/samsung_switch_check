@@ -121,9 +121,10 @@ try {
         [pscustomobject]@{
             Name = 'Viewer'
             ZipName = $viewerZipName
-            Exe = 'SamsungSwitchWatch.Viewer.exe'
-            AdditionalExecutables = @()
+            Exe = 'SamsungSwitchWatch.Viewer.Setup.exe'
+            AdditionalExecutables = @('SamsungSwitchWatch.Viewer.exe')
             Required = @(
+                'SamsungSwitchWatch.Viewer.Setup.exe',
                 'SamsungSwitchWatch.Viewer.exe',
                 'D3DCompiler_47_cor3.dll',
                 'PenImc_cor3.dll',

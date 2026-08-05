@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\SamsungSwitchWatch.Agent.Setup\SamsungSwitchWatch.Agent.Setup.csproj" />
     <ProjectReference Include="..\..\src\SamsungSwitchWatch.Viewer\SamsungSwitchWatch.Viewer.csproj" />
+    <ProjectReference Include="..\..\src\SamsungSwitchWatch.Viewer.Setup\SamsungSwitchWatch.Viewer.Setup.csproj" />
   </ItemGroup>
 
 </Project>

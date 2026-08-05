@@ -2,23 +2,23 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.11.3-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.11.4-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.11.3-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.11.3-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.11.4-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.11.4-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. API v4가 호환되면 버전이 달라도 경고 후 연결하지만, 기능 차이와 운영 혼동을 줄이기
 위해 Agent와 Viewer는 같은 Release 조합을 권장합니다.
 
-`0.11.3-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.11.4-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.11.3-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.11.4-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 운영자가 `설치/업데이트`를 한 번 눌러 같은 설치 작업의 내부 검사부터 새 작업을 시작해야 합니다.
 복구가 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -182,7 +182,7 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
 - 서비스 설치 뒤 준비 상태 확인이 실패하면 설치를 되돌리지 않고
   `AGENT_LOCAL_CONNECTION_UNCONFIRMED` 경고를 표시합니다. 파일·서비스 구성 실패와 구분하여
   반복 설치와 불필요한 rollback을 방지합니다.
-- `0.11.3-poc` Agent는 서비스 시작마다 새 RSA 인증서를 생성합니다. Windows Schannel용 임시
+- `0.11.4-poc` Agent는 서비스 시작마다 새 RSA 인증서를 생성합니다. Windows Schannel용 임시
   사용자 키 컨테이너는 프로세스 수명 동안만 사용하고 Agent 종료 시 제거합니다. 영구 Agent
   신원 파일, 인증서 지문과 페어링 토큰은 사용하지 않습니다.
 - rollback 프로그램 폴더 이동은 일시적 파일 잠금에 한해 최대 5회 제한적으로 다시
@@ -217,7 +217,7 @@ PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예
 `SETUP_PATH_NOT_WRITABLE`이 표시되면 패키지나 로컬 HTTPS가 아니라 기존 Agent 제품 폴더의
 권한 또는 파일 상태를 확인하지 못한 것입니다. 잠시 후 한 번만 다시 시도하고 반복되면 화면의
 지원 코드만 전달하십시오. `SETUP_PATH_UNTRUSTED` 또는 `SETUP_PATH_INVALID`는 반복 설치하지
-마십시오. 어떤 경우에도 제품 폴더나 ACL을 수동으로 삭제·변경하지 마십시오. `0.11.3-poc`는
+마십시오. 어떤 경우에도 제품 폴더나 ACL을 수동으로 삭제·변경하지 마십시오. `0.11.4-poc`는
 검사 중 잠시 사라진 하위 파일을 한 번만 다시 확인합니다. 다시 확인해도 실제로 사라진 비루트
 항목은 건너뛰며, 그 밖의 계속되는 접근·I/O 오류는 위 코드로 분류합니다.
 
@@ -230,7 +230,7 @@ PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예
 
 복구 완료 메시지가 나타났다면 같은 실패 화면에서 설치를 자동으로 다시 시작하지 않습니다.
 Setup을 닫지 않아도 되지만, 상태가 `복구 필요 없음`으로 바뀌고 설치 버튼이 다시 활성화됐는지
-확인한 뒤 `0.11.3-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. Setup이 내부
+확인한 뒤 `0.11.4-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. Setup이 내부
 사전 점검부터 새 설치를 수행합니다. 같은 readiness 분류가 반복되면 재설치를 계속 반복하지
 말고 SWD1 코드 또는 `진단정보 복사` 결과를 전달하십시오.
 
@@ -246,36 +246,47 @@ Agent를 먼저 업데이트하고 준비 상태를 확인한 뒤 같은 Release
 `AGENT_CLIENT_NOT_ALLOWED`가 표시되면 Viewer 출발지 주소가 loopback 또는 RFC1918 사설 IPv4인지
 확인하십시오. Agent Setup에 Viewer 주소를 입력하는 절차는 없습니다.
 
-## 4. Viewer 실행
+## 4. Viewer 설치 및 업데이트
 
-Viewer는 설치 프로그램이 없는 포터블 프로그램입니다.
+Viewer는 현재 Windows 사용자 전용 고정 경로에 설치합니다. 인터넷, PowerShell, UAC와 관리자
+권한은 필요하지 않습니다.
 
-### 0.9 설치형 Viewer에서 처음 전환할 때
+### 처음 설치하거나 0.11.3 포터블 Viewer에서 전환할 때
 
-이전 Viewer가 자동 시작으로 실행 중이면 새 포터블 Viewer를 동시에 실행하지 않습니다. 두
-프로그램이 같은 사용자 데이터에 동시에 접근하지 않도록 새 Viewer가 실행을 차단하고 전환
-안내를 표시합니다.
+1. Viewer ZIP을 로컬 임시 폴더에 완전히 압축 해제합니다.
+2. `SamsungSwitchWatch.Viewer.Setup.exe`를 실행하고 `설치/업데이트`를 누릅니다. 0.11.4 이후
+   Viewer가 실행 중이면 Setup이 저장·정리 종료를 요청하고 실제 종료를 확인한 뒤 진행합니다.
+3. `0.11.3-poc` Viewer는 새 업데이트 종료 요청을 이해하지 못합니다. Setup이 실행 중이라고
+   안내하면 기존 Viewer를 수동으로 완전히 종료한 뒤 같은 버튼을 다시 누릅니다. Setup은
+   프로세스를 강제로 종료하지 않습니다.
+4. Setup이 설치된 Viewer를 자동 실행하고 정상 실행 유지를 확인한 완료 화면을 확인합니다.
+   압축을 푼 임시 폴더는 설치 성공 후 삭제해도 됩니다.
 
-1. 작업 표시줄 알림 영역의 기존 Viewer 아이콘을 우클릭해 `프로그램 종료`를 선택합니다.
-   창의 X만 누르면 트레이에 계속 남으므로 완전히 종료해야 합니다.
-2. `Win+R`을 누르고 `shell:startup`을 입력합니다.
-3. 열린 폴더의 `Samsung Switch Watch` 바로 가기를 삭제합니다.
-4. `Win+R` → `shell:programs`에서도 같은 이름의 이전 시작 메뉴 바로 가기를 삭제합니다.
-5. 새 Viewer ZIP을 안정적인 로컬 폴더에 압축 해제하고 실행합니다.
+Setup은 Viewer를 다음 경로에 설치합니다.
 
-기존 `%LOCALAPPDATA%\SamsungSwitchWatch`의 Agent 연결, 장비 목록과 암호화된 자격 증명은
-같은 Windows 사용자에서 유지됩니다. 이전 `Program Files` 사본은 두 바로 가기를 제거한
-뒤 직접 실행하지 않으면 동작하지 않으며, 삭제가 필요할 때는 기존 버전의 승인된 제거
-절차를 사용합니다. 기존 `트레이로 최소화` 설정도 유지되므로 창이 바로 보이지 않으면 알림
-영역의 Viewer 아이콘을 열고, 작업 관리자에서 실행 경로가 새로 압축 해제한 폴더인지
-확인하십시오.
+```text
+%LOCALAPPDATA%\Programs\SamsungSwitchWatch\Viewer
+```
 
-1. Viewer ZIP을 운영자 PC의 항상 사용할 로컬 폴더에 압축 해제합니다.
-2. `SamsungSwitchWatch.Viewer.exe`를 더블클릭합니다.
-3. 필요하면 사용자가 직접 바탕 화면 바로 가기를 만듭니다.
+현재 사용자 바탕 화면과 시작 메뉴에 `Samsung Switch Watch` 바로 가기를 만들거나 현재 설치
+경로로 갱신합니다. 제품이 이전에 만든 시작프로그램 바로 가기는 제거하며 Windows 로그인 자동
+시작은 새로 등록하지 않습니다. 바로 가기 갱신이 실패해도 설치 파일 검증과 실행 확인이 성공하면
+Viewer 설치는 유지하고 경고를 표시합니다.
 
-Viewer 실행에는 UAC와 관리자 권한이 필요하지 않습니다. 시작 메뉴 등록과 Windows 로그인
-자동 시작도 수행하지 않습니다. 자동 감시가 필요할 때는 Viewer를 직접 실행해 둡니다.
+업데이트할 때 Setup은 패키지 manifest와 모든 해시를 먼저 검증하고, 관리되는
+`Viewer.__staging_<작업ID>`에 복사한 뒤 다시 해시를 확인합니다. 현재 설치는
+`Viewer.__backup_<작업ID>`에 보관한 다음 새 버전을 활성화하고,
+`--install-smoke-check`와 정상 실행 유지 여부를 확인한 뒤 완료합니다. 완료 전에 실패하면 이전
+관리 버전이 있으면 복구하고, 최초 설치였다면 새 설치 파일을 `Viewer.__failed_<작업ID>`로
+분리해 정리한 뒤 미설치 상태로 돌아갑니다. 기존 설치와 복구 근거를 안전하게 확인할 수 없으면
+파일을 지우거나 덮어쓰지 않고 중단합니다.
+
+Setup이 관리하는 고정 설치·staging·backup·failed 경로와
+`%LOCALAPPDATA%\SamsungSwitchWatch\Setup`의 journal·증거 파일만 정리 대상입니다. 다운로드
+폴더나 사용자가 ZIP을 푼 임의 폴더는 자동으로 삭제하지 않습니다.
+
+Viewer 실행에는 UAC와 관리자 권한이 필요하지 않습니다. 자동 감시가 필요할 때는 바탕 화면이나
+시작 메뉴의 Viewer 바로 가기로 직접 실행해 둡니다.
 
 Viewer 데이터는 `%LOCALAPPDATA%\SamsungSwitchWatch`에 저장됩니다.
 
@@ -285,8 +296,30 @@ Viewer 데이터는 `%LOCALAPPDATA%\SamsungSwitchWatch`에 저장됩니다.
 - 장비별 감시 설정, 기준값, 이벤트와 감시 공백
 
 수동으로 입력한 명령과 원문 출력은 Viewer 메모리에서만 사용하고 저장하거나 내보내지
-않습니다. Viewer 폴더를 다른 PC로 복사해도 해당 Windows 사용자의 암호화된 비밀번호를
-복호화할 수 없습니다.
+않습니다. Viewer Setup은 장비·연결·자격 증명·감시 데이터 파일을 교체·정리·삭제하지 않으며,
+같은 상위 폴더의 `Setup` 하위 경로에 설치 journal과 증거 파일만 기록·정리합니다. Viewer
+프로그램 폴더를 다른 PC로 복사해도 해당 Windows 사용자의 암호화된 비밀번호를 복호화할 수
+없습니다.
+
+Setup이 미완료 journal을 찾으면 `설치/업데이트`를 잠그고
+`VIEWER_SETUP_RECOVERY_REQUIRED`를 표시합니다. `이전 상태 복구`를 눌러 복구 완료를 확인한
+뒤 `설치/업데이트`를 별도로 다시 실행합니다. 복구 성공이 설치를 자동으로 시작하지는 않습니다.
+
+설치 실패 코드는 다음처럼 구분합니다.
+
+| 코드 | 의미와 우선 확인 |
+|---|---|
+| `VIEWER_SETUP_PACKAGE_INVALID` | ZIP을 다시 완전히 압축 해제하고 공식 Release 해시 확인 |
+| `VIEWER_SETUP_VIEWER_RUNNING` | 트레이 메뉴에서 기존 Viewer를 완전히 종료한 뒤 재시도 |
+| `VIEWER_SETUP_RECOVERY_REQUIRED` | 이전 상태 복구를 먼저 실행하고 완료 후 설치를 별도로 재시도 |
+| `VIEWER_SETUP_ALREADY_RUNNING` | 다른 Viewer Setup 작업을 마친 뒤 재시도 |
+| `VIEWER_SETUP_PATH_INVALID` | 임의의 관리 경로가 아닌 공식 ZIP과 고정 설치 경로인지 확인 |
+| `VIEWER_SETUP_PATH_NOT_WRITABLE` | 사용자 LocalAppData 쓰기 권한과 EDR 차단 확인 |
+| `VIEWER_SETUP_INSTALL_WRITE_FAILED` | 사용자 LocalAppData 쓰기 권한과 EDR 차단 확인 |
+| `VIEWER_SETUP_SMOKE_FAILED` | 새 Viewer 실행 파일 자체점검 실패, 이전 버전 복구 결과 확인 |
+| `VIEWER_SETUP_LAUNCH_FAILED` | 새 Viewer가 실행 상태를 유지하지 못함, 차단 기록과 복구 결과 확인 |
+| `VIEWER_SETUP_CANCELLED` | 작업 취소됨, 복구 필요 표시가 있으면 복구 후 다시 실행 |
+| `VIEWER_SETUP_ROLLBACK_FAILED` | 자동 복구 미완료, 반복 설치하지 말고 진단 코드 전달 |
 
 ## 5. Agent 연결
 
@@ -521,8 +554,8 @@ Agent 설치는 완료됐지만, Setup이 제품 소유 RFC1918 방화벽 규칙
 ## 10. 공개 패키지와 개발자 파일
 
 공개 Agent ZIP에는 Agent Setup, Agent 서비스 실행 파일, 필요한 WPF 네이티브 런타임,
-BUILD-MANIFEST, SBOM과 사용자 문서만 포함합니다. 공개 Viewer ZIP에는 Viewer 실행 파일,
-필요한 WPF 네이티브 런타임, BUILD-MANIFEST, SBOM과 사용자 문서만 포함합니다.
+BUILD-MANIFEST, SBOM과 사용자 문서만 포함합니다. 공개 Viewer ZIP에는 Viewer Setup, Viewer 실행
+파일, 필요한 WPF 네이티브 런타임, BUILD-MANIFEST, SBOM과 사용자 문서만 포함합니다.
 
 PowerShell/CMD 설치·제거·진단 파일은 개발과 레거시 복구를 위해 소스 저장소에만 유지하며
 공개 ZIP에 포함하지 않습니다. 실행 정책을 우회하거나 사용자가 PowerShell 정책을 변경하게

@@ -119,7 +119,14 @@ try {
     $env:ALL_PROXY = 'http://127.0.0.1:1'
     $env:NO_PROXY = '127.0.0.1,localhost'
 
-    Write-SswStep 'Viewer ZIP executable smoke'
+    Write-SswStep 'Viewer Setup ZIP executable smoke'
+    Invoke-SswBoundedExecutable `
+        -FilePath (Join-Path $viewerDirectory 'SamsungSwitchWatch.Viewer.Setup.exe') `
+        -Argument '--package-smoke-check' `
+        -WorkingDirectory $viewerDirectory `
+        -FailurePrefix 'VIEWER_SETUP_PACKAGE_SMOKE'
+
+    Write-SswStep 'Viewer runtime ZIP executable smoke'
     Invoke-SswBoundedExecutable `
         -FilePath (Join-Path $viewerDirectory 'SamsungSwitchWatch.Viewer.exe') `
         -Argument '--install-smoke-check' `

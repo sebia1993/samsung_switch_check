@@ -1,4 +1,5 @@
 using SamsungSwitchWatch.Viewer.Services;
+using System.IO.Pipes;
 
 namespace SamsungSwitchWatch.Viewer.Tests;
 
@@ -105,6 +106,175 @@ public sealed class SingleInstanceCoordinatorTests
         releaseOwner.Set();
         Assert.True(owner.Join(TimeSpan.FromSeconds(5)));
         Assert.Null(ownerFailure);
+    }
+
+    [Fact]
+    public async Task ShutdownRequest_AcknowledgesAndReachesOwner()
+    {
+        var names = Names();
+        using var ownerReady = new ManualResetEventSlim();
+        using var shutdownRequested = new ManualResetEventSlim();
+        using var releaseOwner = new ManualResetEventSlim();
+        Exception? ownerFailure = null;
+        var owner = new Thread(() =>
+        {
+            try
+            {
+                var coordinator = new SingleInstanceCoordinator(
+                    names.Shared,
+                    names.Version,
+                    names.Pipe);
+                if (coordinator.TryAcquire() != SingleInstanceAcquireResult.Acquired)
+                {
+                    throw new InvalidOperationException("Owner did not acquire test mutexes.");
+                }
+                coordinator.ShutdownRequested += (_, _) => shutdownRequested.Set();
+                ownerReady.Set();
+                releaseOwner.Wait();
+                coordinator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                ownerFailure = exception;
+                ownerReady.Set();
+            }
+        });
+        owner.IsBackground = true;
+        owner.Start();
+        Assert.True(ownerReady.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Null(ownerFailure);
+
+        var result = await SingleInstanceCoordinator.RequestShutdownAsync(
+            TimeSpan.FromSeconds(2),
+            pipeName: names.Pipe);
+
+        Assert.Equal(SingleInstanceShutdownRequestResult.Accepted, result);
+        Assert.True(shutdownRequested.Wait(TimeSpan.FromSeconds(5)));
+
+        releaseOwner.Set();
+        Assert.True(owner.Join(TimeSpan.FromSeconds(5)));
+        Assert.Null(ownerFailure);
+    }
+
+    [Fact]
+    public async Task ShutdownRequest_WithoutOwnerHandlerIsRejected()
+    {
+        var names = Names();
+        using var ownerReady = new ManualResetEventSlim();
+        using var releaseOwner = new ManualResetEventSlim();
+        Exception? ownerFailure = null;
+        var owner = new Thread(() =>
+        {
+            try
+            {
+                var coordinator = new SingleInstanceCoordinator(
+                    names.Shared,
+                    names.Version,
+                    names.Pipe);
+                if (coordinator.TryAcquire() != SingleInstanceAcquireResult.Acquired)
+                {
+                    throw new InvalidOperationException("Owner did not acquire test mutexes.");
+                }
+                ownerReady.Set();
+                releaseOwner.Wait();
+                coordinator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                ownerFailure = exception;
+                ownerReady.Set();
+            }
+        });
+        owner.IsBackground = true;
+        owner.Start();
+        Assert.True(ownerReady.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Null(ownerFailure);
+
+        var result = await SingleInstanceCoordinator.RequestShutdownAsync(
+            TimeSpan.FromSeconds(2),
+            pipeName: names.Pipe);
+
+        Assert.Equal(SingleInstanceShutdownRequestResult.Rejected, result);
+
+        releaseOwner.Set();
+        Assert.True(owner.Join(TimeSpan.FromSeconds(5)));
+        Assert.Null(ownerFailure);
+    }
+
+    [Fact]
+    public async Task ShutdownRequest_LegacyInputOnlyPipeIsProtocolUnsupported()
+    {
+        var names = Names();
+        using var serverReady = new ManualResetEventSlim();
+        byte observedRequest = 0;
+        var legacyServer = Task.Run(async () =>
+        {
+            using var pipe = new NamedPipeServerStream(
+                names.Pipe,
+                PipeDirection.In,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            serverReady.Set();
+            await pipe.WaitForConnectionAsync();
+            var request = new byte[1];
+            if (await pipe.ReadAsync(request) > 0)
+            {
+                observedRequest = request[0];
+            }
+        });
+        Assert.True(serverReady.Wait(TimeSpan.FromSeconds(5)));
+
+        var result = await SingleInstanceCoordinator.RequestShutdownAsync(
+            TimeSpan.FromSeconds(2),
+            pipeName: names.Pipe);
+
+        Assert.Equal(SingleInstanceShutdownRequestResult.ProtocolUnsupported, result);
+        await legacyServer.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains(observedRequest, new byte[] { 0x01, 0x02 });
+    }
+
+    [Fact]
+    public async Task ShutdownRequest_NoPipeReturnsUnavailableWithinDeadline()
+    {
+        var names = Names();
+
+        var result = await SingleInstanceCoordinator.RequestShutdownAsync(
+            TimeSpan.FromMilliseconds(800),
+            pipeName: names.Pipe);
+
+        Assert.Equal(SingleInstanceShutdownRequestResult.Unavailable, result);
+    }
+
+    [Fact]
+    public async Task ShutdownRequest_ConnectedOwnerWithoutResponseTimesOut()
+    {
+        var names = Names();
+        using var serverReady = new ManualResetEventSlim();
+        using var releaseServer = new ManualResetEventSlim();
+        var server = Task.Run(async () =>
+        {
+            using var pipe = new NamedPipeServerStream(
+                names.Pipe,
+                PipeDirection.InOut,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            serverReady.Set();
+            await pipe.WaitForConnectionAsync();
+            var request = new byte[1];
+            _ = await pipe.ReadAsync(request);
+            releaseServer.Wait();
+        });
+        Assert.True(serverReady.Wait(TimeSpan.FromSeconds(5)));
+
+        var result = await SingleInstanceCoordinator.RequestShutdownAsync(
+            TimeSpan.FromMilliseconds(500),
+            pipeName: names.Pipe);
+
+        Assert.Equal(SingleInstanceShutdownRequestResult.ResponseTimedOut, result);
+        releaseServer.Set();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     private static (string Shared, string Version, string Pipe) Names()
