@@ -356,17 +356,11 @@ public sealed class AgentDeploymentOrchestrator(
             ValidateExistingServiceContract(previousService);
             dataDirectoryExistedBefore =
                 fileSystem.DirectoryExists(paths.DataDirectory);
-            fileSystem.ValidateDeploymentPaths(
+            SetupDiagnosticsService.ValidateDeploymentPathsForInstall(
+                fileSystem,
                 paths,
                 previousService,
                 [stagingDirectory, backupDirectory, failedDirectory]);
-            if (!fileSystem.CanCreateUnder(paths.InstallDirectory) ||
-                !fileSystem.CanCreateUnder(paths.DataDirectory))
-            {
-                throw new SetupException(
-                    SetupErrorCodes.PathNotWritable,
-                    "Program Files 또는 ProgramData 설치 경로를 사용할 수 없습니다.");
-            }
 
             steps.MarkActiveStage(SetupFailureStage.Firewall);
             try

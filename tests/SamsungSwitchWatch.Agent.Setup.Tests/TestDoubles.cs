@@ -11,7 +11,8 @@ internal sealed class TestFileSystem : ISetupFileSystem
     public bool FailBackupCleanup { get; set; }
     public string? FreshDataDirectory { get; set; }
     public int DataCleanupFailuresRemaining { get; set; }
-    public SetupException? PathValidationException { get; set; }
+    public Exception? PathValidationException { get; set; }
+    public Exception? CanCreateException { get; set; }
     public string? AccessFailurePath { get; set; }
     public DirectoryAccessKind? AccessFailureKind { get; set; }
     public int AccessFailureOccurrence { get; set; } = 1;
@@ -166,7 +167,15 @@ internal sealed class TestFileSystem : ISetupFileSystem
 
         File.Delete(path);
     }
-    public bool CanCreateUnder(string path) => true;
+    public bool CanCreateUnder(string path)
+    {
+        if (CanCreateException is not null)
+        {
+            throw CanCreateException;
+        }
+
+        return true;
+    }
     public void EnsureDirectoryAccess(string path, DirectoryAccessKind accessKind)
     {
         AccessRequests.Add((path, accessKind));

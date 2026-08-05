@@ -206,6 +206,92 @@ public sealed class DeploymentSecurityTests
             PhysicalSetupFileSystem.CreateServiceSid("TrustedInstaller").Value);
     }
 
+    [Fact]
+    public void VanishedEntryPolicy_IgnoresOnlyMissingNonRootChildren()
+    {
+        using var folder = new TemporaryFolder();
+        var root = folder.Path;
+        var child = Path.Combine(root, "gone.tmp");
+
+        Assert.True(PhysicalSetupFileSystem.IsVanishedNonRootEntry(
+            root,
+            child,
+            new FileNotFoundException()));
+        Assert.False(PhysicalSetupFileSystem.IsVanishedNonRootEntry(
+            root,
+            root,
+            new DirectoryNotFoundException()));
+        Assert.False(PhysicalSetupFileSystem.IsVanishedNonRootEntry(
+            root,
+            child,
+            new IOException()));
+    }
+
+    [Fact]
+    public void TransientIoRetry_RetriesOnceAndReturnsSecondResult()
+    {
+        var attempts = 0;
+
+        var result = PhysicalSetupFileSystem.RetryTransientIoOnce(() =>
+        {
+            attempts++;
+            if (attempts == 1)
+            {
+                throw new IOException("transient");
+            }
+
+            return "ready";
+        });
+
+        Assert.Equal("ready", result);
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public void TransientIoRetry_PersistentIoStopsAfterTwoAttempts()
+    {
+        var attempts = 0;
+
+        Assert.Throws<IOException>(() =>
+            PhysicalSetupFileSystem.RetryTransientIoOnce<int>(() =>
+            {
+                attempts++;
+                throw new IOException("persistent");
+            }));
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public void TransientIoRetry_DoesNotRetryAccessDenied()
+    {
+        var attempts = 0;
+
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            PhysicalSetupFileSystem.RetryTransientIoOnce<int>(() =>
+            {
+                attempts++;
+                throw new UnauthorizedAccessException("denied");
+            }));
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public void InspectionRootCheck_RejectsMissingOrNonDirectoryRoot()
+    {
+        using var folder = new TemporaryFolder();
+        var missing = Path.Combine(folder.Path, "missing");
+        var file = Path.Combine(folder.Path, "not-a-directory.txt");
+        File.WriteAllText(file, "fixture");
+
+        var missingFailure = Assert.Throws<SetupException>(() =>
+            PhysicalSetupFileSystem.EnsureInspectionRootAvailable(missing));
+        var fileFailure = Assert.Throws<SetupException>(() =>
+            PhysicalSetupFileSystem.EnsureInspectionRootAvailable(file));
+
+        Assert.Equal(SetupErrorCodes.PathNotWritable, missingFailure.Code);
+        Assert.Equal(SetupErrorCodes.PathNotWritable, fileFailure.Code);
+    }
+
     private static ServiceSnapshot Service(string accountName, bool running) =>
         new(
             true,

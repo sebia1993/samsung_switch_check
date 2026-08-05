@@ -11,6 +11,11 @@ public sealed partial class WindowsServiceManager : IServiceManager
 {
     private const uint ScManagerAllAccess = 0xF003F;
     private const uint ServiceAllAccess = 0xF01FF;
+    internal const uint ScManagerConnectAccess = 0x00000001;
+    internal const uint ServiceCaptureAccess =
+        0x00000001 | // SERVICE_QUERY_CONFIG
+        0x00000004 | // SERVICE_QUERY_STATUS
+        0x00020000;  // READ_CONTROL
     private const uint ServiceWin32OwnProcess = 0x00000010;
     private const uint ServiceErrorNormal = 0x00000001;
     private const uint ServiceNoChange = 0xFFFFFFFF;
@@ -34,10 +39,10 @@ public sealed partial class WindowsServiceManager : IServiceManager
     public ServiceSnapshot Capture(string serviceName)
     {
         EnsureWindows();
-        var scm = OpenScManager();
+        var scm = OpenScManager(ScManagerConnectAccess);
         try
         {
-            var service = NativeMethods.OpenService(scm, serviceName, ServiceAllAccess);
+            var service = NativeMethods.OpenService(scm, serviceName, ServiceCaptureAccess);
             if (service == IntPtr.Zero)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -80,7 +85,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
     internal static bool IsServiceRunningReadOnly(string serviceName)
     {
         EnsureWindows();
-        var scm = NativeMethods.OpenSCManager(null, null, 0x00000001);
+        var scm = NativeMethods.OpenSCManager(null, null, ScManagerConnectAccess);
         if (scm == IntPtr.Zero)
         {
             ThrowServiceFailure();
@@ -330,9 +335,9 @@ public sealed partial class WindowsServiceManager : IServiceManager
         }
     }
 
-    private static IntPtr OpenScManager()
+    private static IntPtr OpenScManager(uint desiredAccess = ScManagerAllAccess)
     {
-        var handle = NativeMethods.OpenSCManager(null, null, ScManagerAllAccess);
+        var handle = NativeMethods.OpenSCManager(null, null, desiredAccess);
         if (handle == IntPtr.Zero)
         {
             ThrowServiceFailure();

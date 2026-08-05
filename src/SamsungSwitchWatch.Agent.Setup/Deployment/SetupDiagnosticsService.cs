@@ -58,14 +58,20 @@ public sealed class SetupDiagnosticsService(
 
             steps.MarkActiveStage(SetupFailureStage.FileSystem);
             var service = serviceManager.Capture(SetupConstants.ServiceName);
-            fileSystem.ValidateDeploymentPaths(paths, service, []);
-            if (!fileSystem.CanCreateUnder(paths.InstallDirectory) ||
-                !fileSystem.CanCreateUnder(paths.DataDirectory))
-            {
-                throw new SetupException(
-                    SetupErrorCodes.PathNotWritable,
-                    "Program Files 또는 ProgramData 설치 경로의 상위 폴더를 확인할 수 없습니다.");
-            }
+            steps.Add(new SetupStepResult(
+                !service.Exists
+                    ? "SERVICE_NOT_INSTALLED"
+                    : service.Running
+                        ? "SERVICE_RUNNING"
+                        : "SERVICE_STOPPED",
+                "서비스 상태",
+                SetupStepState.Information,
+                service.Exists
+                    ? service.Running
+                        ? "기존 Agent 서비스가 실행 중입니다."
+                        : "기존 Agent 서비스가 중지되어 있습니다."
+                    : "신규 설치 대상입니다."));
+            ValidateDeploymentPathsForInstall(fileSystem, paths, service, []);
 
             steps.Add(Success(
                 "PATHS_READY",
@@ -128,14 +134,6 @@ public sealed class SetupDiagnosticsService(
                     SetupStepState.Warning,
                     "방화벽 정책이나 현재 규칙을 확인하지 못했습니다. 설치는 계속할 수 있으며 완료 후 Viewer에서 연결 상태를 확인하세요."));
             }
-
-            steps.Add(new SetupStepResult(
-                service.Exists ? "SERVICE_FOUND" : "SERVICE_NOT_INSTALLED",
-                "서비스 상태",
-                SetupStepState.Information,
-                service.Exists
-                    ? service.Running ? "기존 Agent 서비스가 실행 중입니다." : "기존 Agent 서비스가 중지되어 있습니다."
-                    : "신규 설치 대상입니다."));
 
             if (service.Running)
             {
@@ -231,6 +229,45 @@ public sealed class SetupDiagnosticsService(
             throw new SetupException(
                 SetupErrorCodes.NetworkSelectionInvalid,
                 "스위치가 연결된 사설 관리망을 1~2개 선택하거나 추가하세요.");
+        }
+    }
+
+    internal static void ValidateDeploymentPathsForInstall(
+        ISetupFileSystem fileSystem,
+        DeploymentPaths paths,
+        ServiceSnapshot service,
+        IReadOnlyList<string> transactionPaths)
+    {
+        try
+        {
+            fileSystem.ValidateDeploymentPaths(paths, service, transactionPaths);
+            if (!fileSystem.CanCreateUnder(paths.InstallDirectory) ||
+                !fileSystem.CanCreateUnder(paths.DataDirectory))
+            {
+                throw new SetupException(
+                    SetupErrorCodes.PathNotWritable,
+                    "Program Files 또는 ProgramData 설치 경로의 상위 폴더를 확인할 수 없습니다.");
+            }
+        }
+        catch (SetupException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new SetupException(
+                SetupErrorCodes.PathInvalid,
+                "Agent 설치 또는 데이터 경로 형식을 확인할 수 없습니다.",
+                exception);
+        }
+        catch (Exception exception) when (
+            exception is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            throw new SetupException(
+                SetupErrorCodes.PathNotWritable,
+                "기존 Agent 제품 폴더의 권한 또는 파일 상태를 확인할 수 없습니다.",
+                exception);
         }
     }
 

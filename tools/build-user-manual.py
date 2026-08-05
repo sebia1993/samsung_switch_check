@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.11.1 operator manual.
+"""Build the Korean Samsung Switch Watch v0.11.2 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.11.1-poc"
+VERSION = "0.11.2-poc"
 DOCUMENT_DATE = "2026-08-05"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -1392,6 +1392,8 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             ("SETUP_PACKAGE_NOT_FOUND", "Agent ZIP 전체 압축 해제 → Setup과 Agent EXE·BUILD-MANIFEST 존재 확인"),
             ("SETUP_PACKAGE_HASH_MISMATCH", "실행 중지 → 공식 ZIP을 새 폴더에 다시 압축 해제 → EDR 격리 기록"),
             ("SETUP_SERVICE_FAILED", "Windows 서비스 관리 권한 → 기존 SamsungSwitchWatchAgent 상태"),
+            ("SETUP_PATH_NOT_WRITABLE", "제품 폴더 권한·파일 상태 확인 실패 → 잠시 후 한 번만 재시도 → 반복되면 지원 코드 전달"),
+            ("SETUP_PATH_INVALID / SETUP_PATH_UNTRUSTED", "반복 설치와 폴더·ACL 수동 변경 중지 → 지원 코드 전달"),
             ("FIREWALL_OVERLAP_PROTECTED", "외부 규칙은 보존됨 → 설치 계속 → Viewer 연결 테스트"),
             ("FIREWALL_REMOTE_ACCESS_UNCONFIRMED", "Agent 설치 유지 확인 → Viewer 연결 테스트 → TCP 실패 시 방화벽 서비스·Domain/Private·회사 GPO 확인"),
             ("AGENT_LOCAL_CONNECTION_UNCONFIRMED", "설치는 유지됨 → Viewer 연결 테스트 → 실패 시 Agent 서비스·로컬 HTTPS·EDR 확인"),
@@ -1433,10 +1435,11 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
     add_callout(
         doc,
         "Agent 폴더 신뢰 오류",
-        "SETUP_PATH_INVALID는 활성 install/data 트리의 "
-        "소유권 또는 junction·symlink 검사가 실패했다는 뜻입니다. DataDirectory는 정확히 "
-        "%ProgramData%\\SamsungSwitchWatch만 허용하고 신규 설치의 빈 선점 폴더도 거부합니다. "
-        "폴더와 설치 이력을 보존한 채 사내 Windows 관리자에게 확인하세요.",
+        "SETUP_PATH_NOT_WRITABLE은 기존 Agent 제품 폴더의 권한 또는 파일 상태를 확인하지 "
+        "못했다는 뜻이며 로컬 HTTPS나 방화벽 오류가 아닙니다. 잠시 후 한 번만 재시도하고 "
+        "반복되면 지원 코드만 전달하세요. SETUP_PATH_INVALID는 경로 형식 오류, "
+        "SETUP_PATH_UNTRUSTED는 소유권 또는 junction·symlink 신뢰 검사 실패입니다. "
+        "어떤 경우에도 제품 폴더와 ACL을 수동으로 삭제·변경하지 마세요.",
         "danger",
     )
     spacer = doc.add_paragraph()

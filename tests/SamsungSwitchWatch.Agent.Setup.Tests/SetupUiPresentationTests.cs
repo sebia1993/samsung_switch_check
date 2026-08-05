@@ -122,6 +122,24 @@ public sealed class SetupUiPresentationTests
     }
 
     [Fact]
+    public void InstallCompletion_PathFailureExplainsThatHttpsIsNotTheCause()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.PathNotWritable,
+            "safe path failure",
+            []);
+
+        var completion = SetupInstallCompletionPolicy.Evaluate(result);
+
+        Assert.Equal(
+            SetupInstallCompletionSeverity.Error,
+            completion.Severity);
+        Assert.Contains("HTTPS나 방화벽 문제가 아닙니다", completion.GuidanceText);
+        Assert.Contains("지원 코드만 전달", completion.GuidanceText);
+        Assert.DoesNotContain("UAC", completion.GuidanceText);
+    }
+
+    [Fact]
     public void PendingRecoveryResult_PreservesOriginalFailureCodeAndMessage()
     {
         var inspection = new PendingRecoveryInspection(
@@ -1036,6 +1054,65 @@ public sealed class SetupUiPresentationTests
         Assert.Equal(
             Swd1CheckState.Passed,
             decoded.Agent.Value.LocalTcp18443);
+    }
+
+    [Fact]
+    public void SupportCode_PathFailureAfterServiceCapturePreservesKnownState()
+    {
+        var result = SetupOperationResult.Failure(
+            SetupErrorCodes.PathNotWritable,
+            "private detail",
+            [
+                new SetupStepResult(
+                    "PACKAGE_VALID",
+                    "package",
+                    SetupStepState.Succeeded,
+                    "valid"),
+                new SetupStepResult(
+                    "SERVICE_RUNNING",
+                    "service",
+                    SetupStepState.Information,
+                    "running"),
+                new SetupStepResult(
+                    SetupErrorCodes.PathNotWritable,
+                    "path",
+                    SetupStepState.Failed,
+                    "private detail")
+            ]) with
+        {
+            PrimaryFailureCode = SetupErrorCodes.PathNotWritable
+        };
+        var context = new SetupFieldDiagnosticContext(
+            "0.11.2-poc",
+            DateTimeOffset.UnixEpoch,
+            "10.0.26100.0",
+            "X64",
+            "install",
+            TimeSpan.Zero,
+            result,
+            PendingRecoveryInspection.None);
+
+        var code = SetupFieldDiagnosticFormatter.CreateSupportCode(context);
+
+        Assert.True(Swd1SupportCode.TryDecode(code, out var decoded));
+        Assert.Equal(
+            SetupErrorCodes.PathNotWritable,
+            decoded!.Common.ResultCodeName);
+        Assert.Equal(
+            SetupErrorCodes.PathNotWritable,
+            decoded.Common.PrimaryCodeName);
+        Assert.Equal(
+            Swd1AgentServiceState.Running,
+            decoded.Agent!.Value.ServiceState);
+        Assert.Equal(
+            Swd1CheckState.Passed,
+            decoded.Agent.Value.PackageValidation);
+        Assert.Equal(
+            Swd1CheckState.NotRun,
+            decoded.Agent.Value.LocalTcp18443);
+        Assert.Equal(
+            Swd1CheckState.NotRun,
+            decoded.Agent.Value.Readiness);
     }
 
     [Theory]
