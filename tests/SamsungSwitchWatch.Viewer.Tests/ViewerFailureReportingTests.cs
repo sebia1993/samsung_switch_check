@@ -744,7 +744,10 @@ public sealed class ViewerFailureReportingTests
             new QueueFactory(original, replacement),
             synchronizationContext: null,
             deviceStore: null,
-            monitoringStore: null);
+            monitoringStore: null,
+            settingsSaveCoordinator: new ViewerSettingsSaveCoordinator(settingsStore),
+            writeDiagnostic: null,
+            settingsSaveDelay: static (_, _) => Task.CompletedTask);
         var alerts = 0;
         viewModel.AlertRaised += (_, _) => Interlocked.Increment(ref alerts);
         try
