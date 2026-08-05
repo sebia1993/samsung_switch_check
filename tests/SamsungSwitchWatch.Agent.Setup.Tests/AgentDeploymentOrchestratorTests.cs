@@ -32,6 +32,8 @@ public sealed class AgentDeploymentOrchestratorTests
             File.ReadAllText(fixture.Paths.AgentExecutablePath));
         Assert.True(fixture.Services.State.Exists);
         Assert.True(fixture.Services.State.Running);
+        Assert.False(fixture.Services.LastExistingServiceExpected);
+        Assert.True(fixture.Services.LastUpdateServiceSecurity);
         Assert.DoesNotContain(
             result.Steps,
             step => step.Code == "ROLLBACK_COMPLETED");
@@ -117,6 +119,7 @@ public sealed class AgentDeploymentOrchestratorTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.True(fixture.Services.LastUpdateServiceSecurity);
         Assert.Equal(
             "old-agent",
             File.ReadAllText(fixture.Paths.AgentExecutablePath));
@@ -1532,11 +1535,379 @@ public sealed class AgentDeploymentOrchestratorTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(SetupErrorCodes.PathNotWritable, result.Code);
+        Assert.Contains(result.Steps, step => step.Code == "SERVICE_RUNNING");
         Assert.DoesNotContain(
             fixture.Services.Operations,
             operation => operation is "install" or "start" or "stop" or "restore");
         Assert.DoesNotContain("apply", fixture.Firewall.Operations);
         Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_TransientServiceCaptureFailureRetriesAndContinues()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.Services.CaptureException =
+            new SetupException(
+                SetupErrorCodes.ServiceFailed,
+                "sensitive transient service detail");
+        fixture.Services.CaptureFailuresRemaining = 1;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            3,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.Equal(["capture", "capture"], fixture.Services.Operations.Take(2));
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "SERVICE_NOT_INSTALLED");
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains(
+                "sensitive",
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task DeployAsync_PersistentServiceCaptureFailureIsClassifiedBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.CaptureException =
+            new SetupException(
+                SetupErrorCodes.ServiceFailed,
+                "sensitive persistent service detail");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.ServiceFailed, result.Code);
+        Assert.Equal(
+            2,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.DoesNotContain(
+            fixture.Services.Operations,
+            operation => operation is "install" or "start" or "stop" or "restore");
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains(
+                "sensitive",
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Diagnostics_TransientServiceCaptureFailureRetriesAndKeepsServiceState()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.CaptureException =
+            new IOException("sensitive transient service detail");
+        fixture.Services.CaptureFailuresRemaining = 1;
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            3,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.Equal(["capture", "capture"], fixture.Services.Operations.Take(2));
+        Assert.Contains(result.Steps, step => step.Code == "SERVICE_RUNNING");
+    }
+
+    [Fact]
+    public async Task DeployAsync_CancellationDuringSuccessfulServiceCaptureStopsBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Services.CaptureAction = cancellation.Cancel;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.DoesNotContain(
+            fixture.Services.Operations,
+            operation => operation is "install" or "start" or "stop" or "restore");
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_CancellationDuringFinalFailedCaptureWinsOverServiceFailure()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Services.CaptureException = new SetupException(
+            SetupErrorCodes.ServiceFailed,
+            "sensitive service detail");
+        fixture.Services.CaptureAction = () =>
+        {
+            if (fixture.Services.Operations.Count(operation => operation == "capture") == 2)
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.Equal(
+            2,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.DoesNotContain(
+            fixture.Services.Operations,
+            operation => operation is "install" or "start" or "stop" or "restore");
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_CancellationAfterFirstServiceFailureStopsBeforeRetry()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Services.CaptureException = new SetupException(
+            SetupErrorCodes.ServiceFailed,
+            "sensitive service detail");
+        fixture.Services.CaptureAction = cancellation.Cancel;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            cancellation.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Cancelled, result.Code);
+        Assert.Equal(
+            1,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_ExistingServiceWithoutSecuritySnapshotPreservesDaclAndContinues()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.SetState(fixture.Services.State with
+        {
+            SecurityDescriptor = null
+        });
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(result.Steps, step => step.Code == "SERVICE_RUNNING");
+        var warning = Assert.Single(
+            result.Steps,
+            step => step.Code == "SERVICE_SECURITY_PRESERVED");
+        Assert.Equal(SetupStepState.Warning, warning.State);
+        Assert.True(fixture.Services.LastExistingServiceExpected);
+        Assert.False(fixture.Services.LastUpdateServiceSecurity);
+        Assert.Contains("install", fixture.Services.Operations);
+        Assert.Null(fixture.Services.State.SecurityDescriptor);
+        Assert.Equal(
+            $"\"{fixture.Paths.AgentExecutablePath}\" --service",
+            fixture.Services.State.BinaryPath);
+        Assert.Equal(
+            @"NT SERVICE\SamsungSwitchWatchAgent",
+            fixture.Services.State.AccountName);
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_ExistingServiceDisappearsBeforeUpdatePreservesRecoveryEvidence()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.SetState(fixture.Services.State with
+        {
+            SecurityDescriptor = null
+        });
+        fixture.Services.DisappearBeforeInstall = true;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.RollbackFailed, result.Code);
+        Assert.Equal(SetupErrorCodes.ServiceFailed, result.PrimaryFailureCode);
+        Assert.Contains(
+            SetupErrorCodes.RollbackServiceRestoreFailed,
+            result.RollbackFailureCodes);
+        Assert.True(fixture.Services.LastExistingServiceExpected);
+        Assert.False(fixture.Services.State.Exists);
+        Assert.True(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirstStopFailureWithRunningServiceRunsRollbackStopBarrier()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.StopFailuresRemaining = 1;
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            2,
+            fixture.Services.Operations.Count(operation => operation == "stop"));
+        Assert.Contains("restore", fixture.Services.Operations);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+        Assert.DoesNotContain(
+            SetupErrorCodes.RollbackServiceStopFailed,
+            result.RollbackFailureCodes);
+    }
+
+    [Fact]
+    public async Task DeployAsync_StoppedServiceStillConfirmsQuiescenceBeforeInstallation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.SetState(fixture.Services.State with
+        {
+            Running = false,
+            ProcessId = 0
+        });
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(
+            1,
+            fixture.Services.Operations.Count(operation => operation == "stop"));
+        Assert.True(fixture.Services.State.Running);
+        Assert.Equal(
+            "new-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+    }
+
+    [Fact]
+    public async Task DeployAsync_FirstStopFailureAfterPendingTransitionRunsRollbackStopBarrier()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.StopFailuresRemaining = 1;
+        fixture.Services.StateAfterStopFailure = fixture.Services.State with
+        {
+            Running = false,
+            ProcessId = 4321
+        };
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            2,
+            fixture.Services.Operations.Count(operation => operation == "stop"));
+        Assert.Contains("restore", fixture.Services.Operations);
+        Assert.True(fixture.Services.State.Running);
+        Assert.Equal(
+            "old-agent",
+            File.ReadAllText(fixture.Paths.AgentExecutablePath));
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+        Assert.Contains(
+            result.Steps,
+            step => step.Code == "ROLLBACK_COMPLETED");
+    }
+
+    [Fact]
+    public async Task RecoverAsync_LegacyJournalWithoutSecuritySnapshotRemainsRecoverable()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        var journalStore = WritePendingJournal(
+            fixture,
+            "service-stop-pending",
+            mutationStarted: true,
+            installMovedToBackup: false,
+            stagingActivated: false,
+            formatVersion: DeploymentJournalStore.CurrentFormatVersion);
+        var pending = journalStore.Read();
+        journalStore.Write(pending with
+        {
+            PreviousService = pending.PreviousService with
+            {
+                SecurityDescriptor = null
+            }
+        });
+        Directory.CreateDirectory(pending.StagingDirectory);
+
+        var result = await fixture.CreateOrchestrator(ready: true)
+            .RecoverAsync(CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("restore", fixture.Services.Operations);
+        Assert.False(journalStore.Exists);
+    }
+
+    [Fact]
+    public async Task DeployAsync_NonServiceInvalidOperationRemainsUnexpected()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.Services.CaptureException =
+            new InvalidOperationException("sensitive programming failure");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.Unexpected, result.Code);
+        Assert.Equal(
+            1,
+            fixture.Services.Operations.Count(operation => operation == "capture"));
+        Assert.Equal(
+            SetupFailureCategory.InvalidState,
+            result.DiagnosticMetadata?.Failure?.Category);
     }
 
     [Fact]

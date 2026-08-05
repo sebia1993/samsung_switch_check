@@ -337,10 +337,16 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public ServiceSnapshot State { get; private set; } = Clone(initial);
     public List<string> Operations { get; } = [];
     public ServiceSnapshot? InstalledState { get; private set; }
+    public bool? LastUpdateServiceSecurity { get; private set; }
+    public bool? LastExistingServiceExpected { get; private set; }
+    public bool DisappearBeforeInstall { get; set; }
     public int StopFailuresRemaining { get; set; }
     public int StopFailureOccurrence { get; set; } = 1;
+    public ServiceSnapshot? StateAfterStopFailure { get; set; }
     public int RestoreFailuresRemaining { get; set; }
     public Exception? CaptureException { get; set; }
+    public int CaptureFailuresRemaining { get; set; } = int.MaxValue;
+    public Action? CaptureAction { get; set; }
     public Exception? StartException { get; set; }
     public Action? StartCompleted { get; set; }
     private int StopCallCount { get; set; }
@@ -351,8 +357,14 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
     public ServiceSnapshot Capture(string serviceName)
     {
         Operations.Add("capture");
-        if (CaptureException is not null)
+        CaptureAction?.Invoke();
+        if (CaptureException is not null && CaptureFailuresRemaining > 0)
         {
+            if (CaptureFailuresRemaining != int.MaxValue)
+            {
+                CaptureFailuresRemaining--;
+            }
+
             throw CaptureException;
         }
 
@@ -367,6 +379,11 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
             StopCallCount >= StopFailureOccurrence)
         {
             StopFailuresRemaining--;
+            if (StateAfterStopFailure is not null)
+            {
+                State = Clone(StateAfterStopFailure);
+            }
+
             throw new InvalidOperationException("simulated service stop failure");
         }
 
@@ -377,9 +394,27 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
         string serviceName,
         string displayName,
         string binaryPath,
-        string accountName)
+        string accountName,
+        bool existingServiceExpected,
+        bool updateServiceSecurity)
     {
         Operations.Add("install");
+        LastExistingServiceExpected = existingServiceExpected;
+        LastUpdateServiceSecurity = updateServiceSecurity;
+        if (DisappearBeforeInstall)
+        {
+            State = ServiceSnapshot.Missing;
+        }
+
+        if (existingServiceExpected && !State.Exists)
+        {
+            throw new SetupException(
+                SetupErrorCodes.ServiceFailed,
+                "simulated service lifecycle change");
+        }
+
+        var createdService = !State.Exists;
+        var previousSecurityDescriptor = State.SecurityDescriptor?.ToArray();
         State = new ServiceSnapshot(
             true,
             false,
@@ -399,7 +434,9 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
                     new ServiceFailureActionSnapshot(1, 15000),
                     new ServiceFailureActionSnapshot(1, 60000)
                 ]),
-            [1, 2, 3],
+            updateServiceSecurity || createdService
+                ? [1, 2, 3]
+                : previousSecurityDescriptor,
             4321);
         InstalledState = Clone(State);
     }
@@ -442,6 +479,15 @@ internal sealed class FakeServiceManager(ServiceSnapshot initial) : IServiceMana
         {
             RestoreFailuresRemaining--;
             throw new InvalidOperationException("simulated service restore failure");
+        }
+
+        if (snapshot.Exists &&
+            !State.Exists &&
+            snapshot.SecurityDescriptor is null)
+        {
+            throw new SetupException(
+                SetupErrorCodes.ServiceFailed,
+                "simulated missing service without security snapshot");
         }
 
         State = Clone(snapshot);

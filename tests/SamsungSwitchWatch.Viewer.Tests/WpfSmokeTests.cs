@@ -970,7 +970,7 @@ public sealed class WpfSmokeTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(AgentConnectionProbeResult.Success(
                 Identity() with { ProductVersion = "0.10.0-poc" },
-                "경고 · Agent 0.10.0-poc와 Viewer 0.11.2-poc 버전이 다르지만 API v4가 호환되어 연결합니다."));
+                "경고 · Agent 0.10.0-poc와 Viewer 0.11.3-poc 버전이 다르지만 API v4가 호환되어 연결합니다."));
         }
     }
 

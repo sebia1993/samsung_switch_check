@@ -1083,7 +1083,7 @@ public sealed class SetupUiPresentationTests
             PrimaryFailureCode = SetupErrorCodes.PathNotWritable
         };
         var context = new SetupFieldDiagnosticContext(
-            "0.11.2-poc",
+            "0.11.3-poc",
             DateTimeOffset.UnixEpoch,
             "10.0.26100.0",
             "X64",

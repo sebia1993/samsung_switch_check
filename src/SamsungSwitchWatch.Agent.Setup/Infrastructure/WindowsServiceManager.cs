@@ -12,10 +12,18 @@ public sealed partial class WindowsServiceManager : IServiceManager
     private const uint ScManagerAllAccess = 0xF003F;
     private const uint ServiceAllAccess = 0xF01FF;
     internal const uint ScManagerConnectAccess = 0x00000001;
+    internal const uint ScManagerCreateServiceAccess = 0x00000002;
     internal const uint ServiceCaptureAccess =
         0x00000001 | // SERVICE_QUERY_CONFIG
-        0x00000004 | // SERVICE_QUERY_STATUS
-        0x00020000;  // READ_CONTROL
+        0x00000004;  // SERVICE_QUERY_STATUS
+    internal const uint ServiceSecurityCaptureAccess = 0x00020000; // READ_CONTROL
+    internal const uint ServiceChangeConfigAccess = 0x00000002;
+    internal const uint ServiceQueryConfigAccess = 0x00000001;
+    internal const uint ServiceQueryStatusAccess = 0x00000004;
+    internal const uint ServiceStartAccess = 0x00000010;
+    internal const uint ServiceStopAccess = 0x00000020;
+    internal const uint ServiceDeleteAccess = 0x00010000;
+    internal const uint ServiceWriteDacAccess = 0x00040000;
     private const uint ServiceWin32OwnProcess = 0x00000010;
     private const uint ServiceErrorNormal = 0x00000001;
     private const uint ServiceNoChange = 0xFFFFFFFF;
@@ -32,6 +40,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
     private const uint ServiceSidTypeUnrestricted = 1;
     private const int ErrorServiceDoesNotExist = 1060;
     private const int ErrorServiceNotActive = 1062;
+    private const int ErrorServiceMarkedForDelete = 1072;
     private const uint DaclSecurityInformation = 0x00000004;
     private static readonly TimeSpan ServiceStatePollInterval =
         TimeSpan.FromMilliseconds(200);
@@ -68,7 +77,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
                     QueryDescription(service),
                     QueryServiceSidType(service),
                     QueryRecovery(service),
-                    QueryServiceSecurityDescriptor(service),
+                    TryQueryServiceSecurityDescriptor(scm, serviceName),
                     checked((int)status.ProcessId));
             }
             finally
@@ -116,7 +125,10 @@ public sealed partial class WindowsServiceManager : IServiceManager
 
     public void Stop(string serviceName, TimeSpan timeout)
     {
-        WithService(serviceName, service =>
+        WithService(
+            serviceName,
+            ServiceStopAccess | ServiceQueryStatusAccess,
+            service =>
             WaitForServiceStopAndProcessExit(service, timeout));
     }
 
@@ -124,13 +136,21 @@ public sealed partial class WindowsServiceManager : IServiceManager
         string serviceName,
         string displayName,
         string binaryPath,
-        string accountName)
+        string accountName,
+        bool existingServiceExpected,
+        bool updateServiceSecurity)
     {
         EnsureWindows();
-        var scm = OpenScManager();
+        var createdService = false;
+        var scm = OpenScManager(
+            ScManagerConnectAccess | ScManagerCreateServiceAccess);
         try
         {
-            var service = NativeMethods.OpenService(scm, serviceName, ServiceAllAccess);
+            var desiredAccess = ServiceChangeConfigAccess |
+                (updateServiceSecurity
+                    ? ServiceSecurityCaptureAccess | ServiceWriteDacAccess
+                    : 0u);
+            var service = NativeMethods.OpenService(scm, serviceName, desiredAccess);
             if (service == IntPtr.Zero)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -139,11 +159,20 @@ public sealed partial class WindowsServiceManager : IServiceManager
                     ThrowServiceFailure();
                 }
 
+                if (existingServiceExpected)
+                {
+                    throw new SetupException(
+                        SetupErrorCodes.ServiceFailed,
+                        "설치 중 기존 Agent 서비스가 사라져 안전한 업데이트를 중단했습니다.");
+                }
+
                 service = NativeMethods.CreateService(
                     scm,
                     serviceName,
                     displayName,
-                    ServiceAllAccess,
+                    desiredAccess |
+                    ServiceSecurityCaptureAccess |
+                    ServiceWriteDacAccess,
                     ServiceWin32OwnProcess,
                     2,
                     ServiceErrorNormal,
@@ -157,6 +186,8 @@ public sealed partial class WindowsServiceManager : IServiceManager
                 {
                     ThrowServiceFailure();
                 }
+
+                createdService = true;
             }
             else if (!NativeMethods.ChangeServiceConfig(
                          service,
@@ -179,7 +210,10 @@ public sealed partial class WindowsServiceManager : IServiceManager
             {
                 SetDescription(service, "Windowless Samsung switch Telnet execution Agent");
                 SetServiceSidType(service);
-                ApplyRestrictedServiceDacl(service, serviceName);
+                if (updateServiceSecurity || createdService)
+                {
+                    ApplyRestrictedServiceDacl(service, serviceName);
+                }
             }
             finally
             {
@@ -196,6 +230,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
     {
         WithService(
             serviceName,
+            ServiceChangeConfigAccess,
             service => SetRecovery(service, CreateAutomaticRecoveryPolicy()));
     }
 
@@ -203,6 +238,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
     {
         WithService(
             serviceName,
+            ServiceChangeConfigAccess | ServiceQueryConfigAccess,
             service =>
             {
                 SetRecovery(service, CreateDisabledRecoveryPolicy());
@@ -218,7 +254,10 @@ public sealed partial class WindowsServiceManager : IServiceManager
 
     public void Start(string serviceName, TimeSpan timeout)
     {
-        WithService(serviceName, service =>
+        WithService(
+            serviceName,
+            ServiceStartAccess | ServiceQueryStatusAccess,
+            service =>
         {
             if (QueryStatus(service).CurrentState == ServiceRunning)
             {
@@ -249,21 +288,33 @@ public sealed partial class WindowsServiceManager : IServiceManager
                 Stop(serviceName, TimeSpan.FromSeconds(20));
             }
 
-            WithService(serviceName, service =>
+            WithService(serviceName, ServiceDeleteAccess, service =>
             {
                 if (!NativeMethods.DeleteService(service))
                 {
                     ThrowServiceFailure();
                 }
             });
+            WaitForServiceDeletion(serviceName, TimeSpan.FromSeconds(20));
             return;
         }
 
+        if (!current.Exists && snapshot.SecurityDescriptor is null)
+        {
+            throw new SetupException(
+                SetupErrorCodes.ServiceFailed,
+                "기존 Agent 서비스가 사라졌고 이전 보안 설정을 확보하지 못해 자동 복구를 중단했습니다.");
+        }
+
         EnsureWindows();
-        var scm = OpenScManager();
+        var scm = OpenScManager(
+            ScManagerConnectAccess | ScManagerCreateServiceAccess);
         try
         {
-            var service = NativeMethods.OpenService(scm, serviceName, ServiceAllAccess);
+            var service = NativeMethods.OpenService(
+                scm,
+                serviceName,
+                ServiceChangeConfigAccess);
             if (service == IntPtr.Zero)
             {
                 if (Marshal.GetLastWin32Error() != ErrorServiceDoesNotExist)
@@ -275,7 +326,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
                     scm,
                     serviceName,
                     snapshot.DisplayName,
-                    ServiceAllAccess,
+                    ServiceChangeConfigAccess,
                     ServiceWin32OwnProcess,
                     snapshot.StartType,
                     ServiceErrorNormal,
@@ -330,7 +381,7 @@ public sealed partial class WindowsServiceManager : IServiceManager
 
         if (snapshot.SecurityDescriptor is not null)
         {
-            WithService(serviceName, service =>
+            WithService(serviceName, ServiceWriteDacAccess, service =>
                 ApplyServiceSecurityDescriptor(service, snapshot.SecurityDescriptor));
         }
     }
@@ -346,13 +397,16 @@ public sealed partial class WindowsServiceManager : IServiceManager
         return handle;
     }
 
-    private static void WithService(string serviceName, Action<IntPtr> action)
+    private static void WithService(
+        string serviceName,
+        uint desiredAccess,
+        Action<IntPtr> action)
     {
         EnsureWindows();
-        var scm = OpenScManager();
+        var scm = OpenScManager(ScManagerConnectAccess);
         try
         {
-            var service = NativeMethods.OpenService(scm, serviceName, ServiceAllAccess);
+            var service = NativeMethods.OpenService(scm, serviceName, desiredAccess);
             if (service == IntPtr.Zero)
             {
                 ThrowServiceFailure();
@@ -851,6 +905,92 @@ public sealed partial class WindowsServiceManager : IServiceManager
         }
 
         return descriptor;
+    }
+
+    private static byte[]? TryQueryServiceSecurityDescriptor(
+        IntPtr scm,
+        string serviceName)
+    {
+        var service = NativeMethods.OpenService(
+            scm,
+            serviceName,
+            ServiceSecurityCaptureAccess);
+        if (service == IntPtr.Zero)
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (IsOptionalSecurityDescriptorReadError(error))
+            {
+                // The rollback contract already treats the descriptor as
+                // optional. Preserve all queryable service state instead of
+                // blocking setup solely because an existing DACL cannot be read.
+                return null;
+            }
+
+            ThrowServiceFailure(error);
+        }
+
+        try
+        {
+            return QueryServiceSecurityDescriptor(service);
+        }
+        finally
+        {
+            NativeMethods.CloseServiceHandle(service);
+        }
+    }
+
+    internal static bool IsOptionalSecurityDescriptorReadError(int error) =>
+        error == 5; // ERROR_ACCESS_DENIED
+
+    internal static bool IsServiceDeletionPendingError(int error) =>
+        error == ErrorServiceMarkedForDelete;
+
+    internal static bool IsServiceDeletionCompleteError(int error) =>
+        error == ErrorServiceDoesNotExist;
+
+    private static void WaitForServiceDeletion(
+        string serviceName,
+        TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            var scm = OpenScManager(ScManagerConnectAccess);
+            try
+            {
+                var service = NativeMethods.OpenService(
+                    scm,
+                    serviceName,
+                    ServiceQueryStatusAccess);
+                if (service == IntPtr.Zero)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (IsServiceDeletionCompleteError(error))
+                    {
+                        return;
+                    }
+
+                    if (!IsServiceDeletionPendingError(error))
+                    {
+                        ThrowServiceFailure(error);
+                    }
+                }
+                else
+                {
+                    NativeMethods.CloseServiceHandle(service);
+                }
+            }
+            finally
+            {
+                NativeMethods.CloseServiceHandle(scm);
+            }
+
+            Thread.Sleep(ServiceStatePollInterval);
+        }
+
+        throw new SetupException(
+            SetupErrorCodes.ServiceFailed,
+            "Windows Agent 서비스 삭제 완료를 제한 시간 안에 확인하지 못했습니다.");
     }
 
     private static void ApplyRestrictedServiceDacl(IntPtr service, string serviceName)

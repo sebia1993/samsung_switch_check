@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.11.2 operator manual.
+"""Build the Korean Samsung Switch Watch v0.11.3 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.11.2-poc"
+VERSION = "0.11.3-poc"
 DOCUMENT_DATE = "2026-08-05"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -905,6 +905,16 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
     )
     add_callout(
         doc,
+        "서비스 조회는 한 번만 짧게 재시도",
+        "설치/업데이트는 별도 사전 점검과 배포에서 같은 서비스 정보를 중복 조회하지 않습니다. "
+        "초기 조회가 일시적으로 실패하면 200ms 뒤 한 번만 다시 확인합니다. 계속 실패하면 "
+        "파일·서비스·방화벽 변경 전에 SETUP_SERVICE_FAILED로 중단합니다. 기존 서비스의 보안 "
+        "설명자만 읽을 수 없는 경우에는 조회 가능한 구성과 상태로 설치를 계속하되 기존 DACL은 "
+        "변경하지 않습니다. 설명자를 확보한 경우에만 새 제한 DACL을 적용하고 실패 시 복원합니다.",
+        "info",
+    )
+    add_callout(
+        doc,
         "실패할 때만 진단정보 복사",
         "설치 또는 복구가 실패한 경우에만 '진단정보 복사' 버튼이 나타납니다. 복사 내용에는 "
         "프로그램 버전, UTC 시각, 작업 종류, 최초 실패 코드, ROLLBACK_* 코드, journal 단계와 "
@@ -981,7 +991,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         doc,
         "설치·연결 오류 확인",
         level=2,
-        page_break_before=True,
+        page_break_before=False,
     )
     add_callout(
         doc,
