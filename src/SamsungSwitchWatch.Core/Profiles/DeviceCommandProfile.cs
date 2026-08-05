@@ -2,6 +2,11 @@ using System.Collections.ObjectModel;
 
 namespace SamsungSwitchWatch.Core.Profiles;
 
+/// <summary>
+/// Defines a registered read-only command. <see cref="Timeout"/> is the
+/// maximum inactivity between response reads; the Telnet client enforces a
+/// separate total command safety cap.
+/// </summary>
 public sealed record ReadOnlyCommandDefinition(
     string Id,
     string DisplayName,

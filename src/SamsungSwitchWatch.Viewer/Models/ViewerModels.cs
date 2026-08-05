@@ -75,6 +75,10 @@ public sealed record CollectorCapabilityDto(
             {
                 return $"경고{errorSuffix}";
             }
+            if (string.Equals(State, "Unavailable", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"확인 불가{errorSuffix}";
+            }
             if (string.Equals(State, "Failed", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(State, "AuthBlocked", StringComparison.OrdinalIgnoreCase))
             {
@@ -234,6 +238,7 @@ public sealed class DeviceViewModel : Infrastructure.ObservableObject
         || item.State.Equals("Unknown", StringComparison.OrdinalIgnoreCase)
         || item.State.Equals("Unsupported", StringComparison.OrdinalIgnoreCase)
         || item.State.Equals("Degraded", StringComparison.OrdinalIgnoreCase)
+        || item.State.Equals("Unavailable", StringComparison.OrdinalIgnoreCase)
         || item.State.Equals("Failed", StringComparison.OrdinalIgnoreCase)
         || item.State.Equals("AuthBlocked", StringComparison.OrdinalIgnoreCase));
     public bool HasCapabilityIssue => CapabilityCount == 0 || CapabilityIssueCount > 0;

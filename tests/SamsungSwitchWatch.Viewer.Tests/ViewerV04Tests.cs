@@ -60,6 +60,7 @@ public sealed class ViewerV04Tests
 
     [Theory]
     [InlineData("Degraded", "PROMPT_PARSE_FAILED", "경고 · PROMPT_PARSE_FAILED")]
+    [InlineData("Unavailable", "COMMAND_TIMEOUT", "확인 불가 · COMMAND_TIMEOUT")]
     [InlineData("Failed", "COMMAND_TIMEOUT", "장애 · COMMAND_TIMEOUT")]
     [InlineData("AuthBlocked", "AUTH_FAILED", "장애 · AUTH_FAILED")]
     public void CapabilityStateTextDoesNotReportUnhealthyCollectorAsNormal(

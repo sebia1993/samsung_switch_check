@@ -10,30 +10,46 @@ public sealed class AgentClientException : Exception
     public AgentClientException(
         string errorCode,
         AgentConnectionState suggestedConnectionState,
-        Exception? innerException = null)
+        Exception? innerException = null,
+        AgentErrorDetails? details = null)
         : base(errorCode, innerException)
     {
         ErrorCode = errorCode;
         SuggestedConnectionState = suggestedConnectionState;
+        Details = details;
     }
 
     public string ErrorCode { get; }
     public AgentConnectionState SuggestedConnectionState { get; }
+    public AgentErrorDetails? Details { get; }
 }
+
+public sealed record AgentErrorDetails(
+    string? Stage,
+    long? ElapsedMs,
+    bool? ReceivedOutput,
+    int? PagerCount);
 
 internal static class AgentClientErrors
 {
     public static AgentClientException FromStatus(HttpStatusCode statusCode, string? responseBody = null)
     {
-        var serverCode = ExtractStableServerCode(responseBody);
+        var serverError = ExtractStableServerError(responseBody);
+        var serverCode = serverError.Code;
         if (serverCode == "AGENT_CLIENT_NOT_ALLOWED")
         {
-            return new AgentClientException(serverCode, AgentConnectionState.Stale);
+            return new AgentClientException(
+                serverCode,
+                AgentConnectionState.Stale,
+                details: serverError.Details);
         }
 
         if (IsReadOnlyQueryCode(serverCode))
         {
-            return new AgentClientException(serverCode!, AgentConnectionState.Stale);
+            return new AgentClientException(
+                serverCode!,
+                AgentConnectionState.Stale,
+                details: serverError.Details);
         }
 
         if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
@@ -44,8 +60,9 @@ internal static class AgentClientErrors
         if (statusCode == HttpStatusCode.ServiceUnavailable)
         {
             return new AgentClientException(
-                ExtractStableServerCode(responseBody) ?? "AGENT_NOT_READY",
-                AgentConnectionState.Stale);
+                serverCode ?? "AGENT_NOT_READY",
+                AgentConnectionState.Stale,
+                details: serverError.Details);
         }
 
         if (statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.GatewayTimeout)
@@ -98,21 +115,71 @@ internal static class AgentClientErrors
     }
 
     public static string? ExtractStableServerCode(string? responseBody)
+        => ExtractStableServerError(responseBody).Code;
+
+    internal static (string? Code, AgentErrorDetails? Details) ExtractStableServerError(
+        string? responseBody)
     {
-        if (string.IsNullOrWhiteSpace(responseBody)) return null;
+        if (string.IsNullOrWhiteSpace(responseBody)) return (null, null);
         try
         {
             using var document = JsonDocument.Parse(responseBody);
             if (!document.RootElement.TryGetProperty("error", out var error)
-                || !error.TryGetProperty("code", out var codeElement)) return null;
+                || error.ValueKind != JsonValueKind.Object
+                || !error.TryGetProperty("code", out var codeElement)
+                || codeElement.ValueKind != JsonValueKind.String) return (null, null);
             var code = codeElement.GetString();
-            return IsStableCode(code) ? code : null;
+            if (!IsStableCode(code)) return (null, null);
+            return (code, TryReadDetails(error));
         }
         catch (JsonException)
         {
-            return null;
+            return (null, null);
         }
     }
+
+    private static AgentErrorDetails? TryReadDetails(JsonElement error)
+    {
+        if (!error.TryGetProperty("details", out var details)
+            || details.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var stage = details.TryGetProperty("stage", out var stageElement)
+                    && stageElement.ValueKind == JsonValueKind.String
+            ? stageElement.GetString()
+            : null;
+        stage = IsStableStage(stage) ? stage : null;
+
+        long? elapsedMs = details.TryGetProperty("elapsedMs", out var elapsedElement)
+                          && elapsedElement.ValueKind == JsonValueKind.Number
+                          && elapsedElement.TryGetInt64(out var elapsed)
+                          && elapsed is >= 0 and <= 900_000
+            ? elapsed
+            : null;
+        bool? receivedOutput = details.TryGetProperty("receivedOutput", out var outputElement)
+                               && outputElement.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? outputElement.GetBoolean()
+            : null;
+        int? pagerCount = details.TryGetProperty("pagerCount", out var pagerElement)
+                          && pagerElement.ValueKind == JsonValueKind.Number
+                          && pagerElement.TryGetInt32(out var pages)
+                          && pages is >= 0 and <= 64
+            ? pages
+            : null;
+
+        return stage is null && elapsedMs is null && receivedOutput is null && pagerCount is null
+            ? null
+            : new AgentErrorDetails(stage, elapsedMs, receivedOutput, pagerCount);
+    }
+
+    private static bool IsStableStage(string? stage) => stage is
+        "command-write" or
+        "command-idle" or
+        "command-hard-limit" or
+        "pager-limit" or
+        "telnet-session";
 
     private static AgentClientException FromSocket(SocketException socket, Exception source) => socket.SocketErrorCode switch
     {
@@ -170,6 +237,34 @@ internal static class AgentClientErrors
 
 internal static class ViewerConnectionMessages
 {
+    public static string ForCollectorFailure(
+        string collectorName,
+        AgentClientException exception)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(collectorName);
+        ArgumentNullException.ThrowIfNull(exception);
+
+        if (exception.ErrorCode is "COMMAND_TIMEOUT" or "QUERY_TIMEOUT")
+        {
+            var seconds = exception.Details?.ElapsedMs is { } elapsedMs
+                ? Math.Max(1, (int)Math.Ceiling(elapsedMs / 1000d))
+                : (int?)null;
+            var timing = seconds is { } value ? $" ({value}초)" : string.Empty;
+            var reason = exception.Details?.Stage switch
+            {
+                "command-idle" => $"새 응답이 없어 수집하지 못했습니다{timing}.",
+                "command-hard-limit" => $"전체 실행 제한을 넘어 수집을 중단했습니다{timing}.",
+                "pager-limit" => "반복되는 페이지 출력을 안전 제한에서 중단했습니다.",
+                "command-write" => "장비에 조회 명령을 보내지 못했습니다.",
+                "telnet-session" => $"Telnet 세션 제한을 넘어 수집을 중단했습니다{timing}.",
+                _ => "장비 응답 시간이 초과되어 수집하지 못했습니다."
+            };
+            return $"{collectorName} 확인 불가 · {reason} 다음 주기에 다시 확인합니다.";
+        }
+
+        return $"{collectorName} 확인 불가 · {ForCode(exception.ErrorCode)}";
+    }
+
     public static string ForProbeFailure(
         AgentConnectionProbeStage stage,
         string? errorCode)
@@ -222,7 +317,7 @@ internal static class ViewerConnectionMessages
         "QUERY_COMMAND_BLOCKED" => "안전 정책에 따라 이 명령은 실행할 수 없습니다. 허용된 show 조회 명령만 입력해 주세요.",
         "DEVICE_NOT_FOUND" or "VIEWER_DEVICE_NOT_FOUND" => "Viewer에 저장된 장비 정보를 찾지 못했습니다. 장비 관리에서 다시 확인해 주세요.",
         "VIEWER_DEVICE_INVALID" => "장비 IP, 모델 또는 Telnet 포트가 올바르지 않습니다.",
-        "VIEWER_CONNECTION_TEST_REQUIRED" => "접속 시험에 성공한 뒤 주기 감시를 켜 주세요.",
+        "VIEWER_CONNECTION_TEST_REQUIRED" => "로그인 확인에 성공한 뒤 주기 감시를 켜 주세요.",
         "DEVICE_BUSY" => "선택한 장비가 다른 점검을 수행 중입니다. 잠시 후 다시 시도해 주세요.",
         "AGENT_BUSY" => "Agent가 다른 장비 요청을 처리 중입니다. 잠시 후 다시 시도해 주세요.",
         "TARGET_NOT_ALLOWED" => "장비 주소가 RFC1918 사설 IPv4가 아니거나 Telnet/TCP 23 대상이 아닙니다.",

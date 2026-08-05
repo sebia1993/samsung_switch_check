@@ -510,7 +510,7 @@
                                                    AutomationProperties.LiveSetting="Polite" />
                                         <TextBlock Grid.Column="1" Margin="10,0,8,0" Text="{Binding ReadOnlyQueryResultMeta}"
                                                    FontSize="12" Foreground="{StaticResource MutedTextBrush}"
-                                                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                                   TextWrapping="WrapWithOverflow" ToolTip="{Binding ReadOnlyQueryResultMeta}" />
                                         <Button Grid.Column="2" Padding="10,5" Margin="0,0,6,0"
                                                 Style="{StaticResource SecondaryButton}" Content="복_사"
                                                 Click="CopyReadOnlyQueryOutput_Click"
@@ -566,8 +566,8 @@
                                 </Grid.RowDefinitions>
                                 <Border Background="#EFF6FF" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                                     <StackPanel>
-                                        <TextBlock Text="장비·계정·감시 이력은 Viewer가 관리하고 Agent는 Telnet 접속만 중계합니다."
-                                                   Foreground="#1E40AF" />
+                                        <TextBlock Text="장비·계정·감시 이력은 Viewer가 관리합니다. 로그인 확인은 계정과 프롬프트만 확인하며 실제 포트·로그 명령은 아래 수집 진단에서 확인합니다."
+                                                   Foreground="#1E40AF" TextWrapping="Wrap" />
                                         <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="#1E40AF">
                                             <Run Text="{Binding CollectorVersion, Mode=OneWay}" /><Run Text=" · " />
                                             <Run Text="{Binding ApiVersionText, Mode=OneWay}" /><Run Text=" · " />

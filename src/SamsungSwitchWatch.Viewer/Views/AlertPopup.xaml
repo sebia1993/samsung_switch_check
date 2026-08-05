@@ -1,7 +1,7 @@
 <Window x:Class="SamsungSwitchWatch.Viewer.Views.AlertPopup"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="360" Height="148" WindowStyle="None" ResizeMode="NoResize"
+        Width="420" Height="164" WindowStyle="None" ResizeMode="NoResize"
         ShowInTaskbar="False" ShowActivated="False" Topmost="True"
         Background="Transparent" AllowsTransparency="True"
         AutomationProperties.Name="스위치 변경 알림"
@@ -23,7 +23,7 @@
                     </Border>
                 </Grid>
                 <TextBlock Margin="0,4,0,0" Text="{Binding DeviceName}" FontWeight="SemiBold"/>
-                <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12" Foreground="#64748B" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                <TextBlock Margin="0,3,0,0" Text="{Binding AlertDetail}" FontSize="12" Foreground="#64748B" TextWrapping="Wrap"/>
                 <Button Margin="0,8,0,0" HorizontalAlignment="Left" Padding="8,3" Content="대시보드에서 보기" Click="OpenDashboard_Click" FontSize="12"/>
             </StackPanel>
             <Button Grid.Column="3" Width="24" Height="24" Content="×" Click="Close_Click" VerticalAlignment="Top"/>

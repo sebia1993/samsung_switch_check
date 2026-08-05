@@ -151,6 +151,144 @@ public sealed class TelnetClientTests
     }
 
     [Fact]
+    public async Task ExecuteRegisteredAsync_ResetsIdleWindowBeforeSlowPagerContinuation()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\npage 1\r\n--More--"),
+            Bytes("page 2\r\nACCESS-SW-01#"))
+        {
+            ReadDelays =
+            [
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(100),
+                TimeSpan.FromMilliseconds(30)
+            ],
+            WriteDelays =
+            [
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(100)
+            ]
+        };
+        var client = CreateClient(
+            transport,
+            commandHardTimeout: TimeSpan.FromMilliseconds(600));
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            SingleCommandProfile(TimeSpan.FromMilliseconds(150)),
+            [CommandIds.System]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("page 1", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("page 2", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Single(transport.Writes, bytes => bytes.SequenceEqual(new byte[] { 0x20 }));
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_HandlesSplitAnsiBackspaceAndSuffixPagingMarkers()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show port status\r\n1 Enabled Up\r\n\u001b[7m--Mo"),
+            Bytes("x\bre-- (Q to quit)\u001b[0m"),
+            Bytes("\r\n2 Enabled Down\r\n---- More ---- 50%"),
+            Bytes("\r\n24 Enabled Up\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.InterfaceStatus]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("1 Enabled Up", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("2 Enabled Down", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("24 Enabled Up", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("More", output.NormalizedOutput, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, transport.Writes.Count(bytes => bytes.SequenceEqual(new byte[] { 0x20 })));
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_StopsAfterMaximumPagingAdvances()
+    {
+        var pageReads = Enumerable.Range(1, 33)
+            .Select(index => Bytes($"page {index}\r\n--More--"))
+            .ToArray();
+        var transport = new ScriptedTransport(
+            [Bytes("Login:"), Bytes("Password:"), Bytes("ACCESS-SW-01#"), .. pageReads]);
+        var client = CreateClient(transport, maximumPagingAdvances: 32);
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.InterfaceStatus]));
+
+        Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
+        Assert.Equal("pager-limit", exception.Error.Stage);
+        Assert.Equal(32, exception.Error.CommandTelemetry?.PagerCount);
+        Assert.True(exception.Error.CommandTelemetry?.ReceivedOutput);
+        Assert.Equal(32, transport.Writes.Count(bytes => bytes.SequenceEqual(new byte[] { 0x20 })));
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_NegotiatesNawsAndContinuesWhenServerRejectsIt()
+    {
+        var transport = new ScriptedTransport(
+            [255, 253, 31, .. Bytes("Login:")],
+            [255, 254, 31, .. Bytes("Password:")],
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nUptime: 1 day\r\nACCESS-SW-01#"));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]);
+
+        Assert.Single(result.Outputs);
+        Assert.Contains(transport.Writes, bytes => bytes.SequenceEqual(
+            new byte[] { 255, 251, 31, 255, 250, 31, 0, 160, 0, 200, 255, 240 }));
+        Assert.Contains(transport.Writes, bytes => bytes.SequenceEqual(new byte[] { 255, 252, 31 }));
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_NormalizesCapturedPromptWithoutLooseningExactMatch()
+    {
+        var decoratedPrompt = "\u001b[32mACCESS-SWX\b-01#\u001b[0m";
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes(decoratedPrompt),
+            Bytes("show system\r\nAudit summary #\r\nUptime: 1 day\r\n" + decoratedPrompt));
+        var client = CreateClient(transport);
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            Ies4224GpProfile.Create(),
+            [CommandIds.System]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("Audit summary #", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("Uptime: 1 day", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain("ACCESS-SW-01#", output.NormalizedOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecuteRegisteredAsync_DoesNotReturnPartialOutputWhenPromptIsMissingAfterPaging()
     {
         var transport = new ScriptedTransport(
@@ -247,7 +385,122 @@ public sealed class TelnetClientTests
             [CommandIds.System]));
 
         Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
-        Assert.Equal("command", exception.Error.Stage);
+        Assert.Equal("command-idle", exception.Error.Stage);
+        Assert.False(exception.Error.CommandTelemetry?.ReceivedOutput);
+        Assert.Equal(0, exception.Error.CommandTelemetry?.PagerCount);
+        Assert.True(exception.Error.CommandTelemetry?.ElapsedMs > 0);
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_AllowsActiveOutputPastIdleTimeout()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nline 1\r\n"),
+            Bytes("line 2\r\n"),
+            Bytes("line 3\r\nACCESS-SW-01#"))
+        {
+            ReadDelays =
+            [
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(35),
+                TimeSpan.FromMilliseconds(35),
+                TimeSpan.FromMilliseconds(35)
+            ]
+        };
+        var profile = SingleCommandProfile(TimeSpan.FromMilliseconds(60));
+        var client = CreateClient(
+            transport,
+            commandHardTimeout: TimeSpan.FromMilliseconds(250));
+
+        var result = await client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            profile,
+            [CommandIds.System]);
+
+        var output = Assert.Single(result.Outputs);
+        Assert.Contains("line 1", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.Contains("line 3", output.NormalizedOutput, StringComparison.Ordinal);
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_StopsActiveOutputAtHardLimit()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\nline 1\r\n"),
+            Bytes("line 2\r\n"),
+            Bytes("line 3\r\n"),
+            Bytes("line 4\r\n"))
+        {
+            ReadDelays =
+            [
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                TimeSpan.FromMilliseconds(40),
+                TimeSpan.FromMilliseconds(40),
+                TimeSpan.FromMilliseconds(40),
+                TimeSpan.FromMilliseconds(40)
+            ]
+        };
+        var profile = SingleCommandProfile(TimeSpan.FromMilliseconds(70));
+        var client = CreateClient(
+            transport,
+            commandHardTimeout: TimeSpan.FromMilliseconds(130));
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            profile,
+            [CommandIds.System]));
+
+        Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
+        Assert.Equal("command-hard-limit", exception.Error.Stage);
+        Assert.True(exception.Error.CommandTelemetry?.ReceivedOutput);
+        Assert.Equal(0, exception.Error.CommandTelemetry?.PagerCount);
+        Assert.True(exception.Error.CommandTelemetry?.ElapsedMs >= 100);
+        Assert.True(transport.WasClosed);
+    }
+
+    [Fact]
+    public async Task ExecuteRegisteredAsync_PreservesSanitizedTelemetryAtSessionLimit()
+    {
+        var transport = new ScriptedTransport(
+            Bytes("Login:"),
+            Bytes("Password:"),
+            Bytes("ACCESS-SW-01#"),
+            Bytes("show system\r\npartial response\r\n"))
+        {
+            WaitWhenExhausted = true
+        };
+        var client = CreateResilientClient(
+            new FixedTransportFactory(transport),
+            TimeSpan.FromMilliseconds(150),
+            retryCount: 0,
+            commandHardTimeout: TimeSpan.FromMilliseconds(500));
+
+        var exception = await Assert.ThrowsAsync<SwitchWatchException>(() => client.ExecuteRegisteredAsync(
+            new TelnetEndpoint("192.0.2.10"),
+            new TelnetCredentials("monitor", "synthetic-password"),
+            SingleCommandProfile(TimeSpan.FromMilliseconds(500)),
+            [CommandIds.System]));
+
+        Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
+        Assert.Equal("telnet-session", exception.Error.Stage);
+        Assert.True(exception.Error.CommandTelemetry?.ReceivedOutput);
+        Assert.Equal(0, exception.Error.CommandTelemetry?.PagerCount);
+        Assert.True(exception.Error.CommandTelemetry?.ElapsedMs > 0);
+        Assert.True(transport.WasClosed);
     }
 
     [Fact]
@@ -300,6 +553,9 @@ public sealed class TelnetClientTests
 
         Assert.Equal(ErrorCodes.CommandTimeout, exception.Error.Code);
         Assert.Equal("command-write", exception.Error.Stage);
+        Assert.False(exception.Error.CommandTelemetry?.ReceivedOutput);
+        Assert.Equal(0, exception.Error.CommandTelemetry?.PagerCount);
+        Assert.True(exception.Error.CommandTelemetry?.ElapsedMs > 0);
         Assert.True(transport.WasClosed);
     }
 
@@ -581,7 +837,11 @@ public sealed class TelnetClientTests
             Bytes("show system\r\nUptime: 0 days, 01:00:00\r\nACCESS-SW-01#"));
         var factory = new SequenceTransportFactory(first, second);
         var profile = TwoCommandProfile(TimeSpan.FromSeconds(1));
-        var client = CreateResilientClient(factory, TimeSpan.FromSeconds(5), retryCount: 1);
+        var client = CreateResilientClient(
+            factory,
+            TimeSpan.FromSeconds(5),
+            retryCount: 1,
+            commandHardTimeout: TimeSpan.FromSeconds(1));
 
         var result = await client.ExecuteRegisteredAsync(
             new TelnetEndpoint("192.0.2.10"),
@@ -612,7 +872,8 @@ public sealed class TelnetClientTests
         var client = CreateResilientClient(
             new SequenceTransportFactory(first, second),
             TimeSpan.FromSeconds(5),
-            retryCount: 1);
+            retryCount: 1,
+            commandHardTimeout: TimeSpan.FromSeconds(1));
 
         var exception = await Assert.ThrowsAsync<TelnetExecutionException>(() => client.ExecuteRegisteredAsync(
             new TelnetEndpoint("192.0.2.10"),
@@ -697,7 +958,11 @@ public sealed class TelnetClientTests
             Bytes("ACCESS-SW-01#"),
             Bytes("show system\r\nUptime: 0 days, 01:00:00\r\nACCESS-SW-01#"));
         var factory = new SequenceTransportFactory(first, second);
-        var client = CreateResilientClient(factory, TimeSpan.FromMilliseconds(160), retryCount: 0);
+        var client = CreateResilientClient(
+            factory,
+            TimeSpan.FromMilliseconds(160),
+            retryCount: 0,
+            commandHardTimeout: TimeSpan.FromMilliseconds(100));
 
         var result = await client.ExecuteRegisteredAsync(
             new TelnetEndpoint("192.0.2.10"),
@@ -770,7 +1035,9 @@ public sealed class TelnetClientTests
         TimeSpan? login = null,
         int maximumNegotiationBytes = 16 * 1024,
         TimeSpan? write = null,
-        int maximumWireBytes = 2 * 1024 * 1024)
+        int maximumWireBytes = 2 * 1024 * 1024,
+        TimeSpan? commandHardTimeout = null,
+        int maximumPagingAdvances = 32)
     {
         var timeouts = new TelnetTimeouts(
             connect ?? TimeSpan.FromSeconds(1),
@@ -785,6 +1052,8 @@ public sealed class TelnetClientTests
             new FixedTransportFactory(transport),
             new TelnetClientOptions(timeouts, 2 * 1024 * 1024, 512, maximumNegotiationBytes, maximumWireBytes)
             {
+                CommandHardTimeout = commandHardTimeout ?? ReadOnlyQueryPolicy.CommandHardTimeout,
+                MaximumPagingAdvances = maximumPagingAdvances,
                 SessionCloseRetryCount = 0
             });
     }
@@ -792,7 +1061,8 @@ public sealed class TelnetClientTests
     private static TelnetClient CreateResilientClient(
         IByteTransportFactory factory,
         TimeSpan maximumSession,
-        int retryCount)
+        int retryCount,
+        TimeSpan? commandHardTimeout = null)
     {
         var timeouts = new TelnetTimeouts(
             TimeSpan.FromMilliseconds(10),
@@ -805,6 +1075,7 @@ public sealed class TelnetClientTests
         };
         return new TelnetClient(factory, new TelnetClientOptions(timeouts, ReadBufferBytes: 512)
         {
+            CommandHardTimeout = commandHardTimeout ?? TimeSpan.FromSeconds(30),
             SessionSafetyMargin = TimeSpan.FromMilliseconds(10),
             SessionCloseRetryCount = retryCount,
             SessionCloseRetryDelay = TimeSpan.FromMilliseconds(1)
@@ -819,6 +1090,15 @@ public sealed class TelnetClientTests
             new ReadOnlyCommandDefinition(CommandIds.Version, "Version", "show version", commandTimeout, 60),
             new ReadOnlyCommandDefinition(CommandIds.System, "System", "show system", commandTimeout, 60)
         ]);
+    }
+
+    private static DeviceCommandProfile SingleCommandProfile(TimeSpan commandIdleTimeout)
+    {
+        var baseProfile = Ies4224GpProfile.Create();
+        return new DeviceCommandProfile(
+            baseProfile.Model,
+            baseProfile.Telnet,
+            [new ReadOnlyCommandDefinition(CommandIds.System, "System", "show system", commandIdleTimeout, 60)]);
     }
 
     private static byte[][] InteractiveReads(IEnumerable<string> commands) =>
@@ -870,6 +1150,10 @@ public sealed class TelnetClientTests
 
         public int? WaitOnWriteNumber { get; init; }
 
+        public IReadOnlyList<TimeSpan> ReadDelays { get; init; } = [];
+
+        public IReadOnlyList<TimeSpan> WriteDelays { get; init; } = [];
+
         public bool ConnectWasCalled { get; private set; }
 
         public bool IsConnected { get; private set; }
@@ -879,6 +1163,8 @@ public sealed class TelnetClientTests
         public List<byte[]> Writes { get; } = [];
 
         private int WriteCount { get; set; }
+
+        private int ReadCount { get; set; }
 
         public async ValueTask ConnectAsync(string host, int port, CancellationToken cancellationToken)
         {
@@ -907,6 +1193,12 @@ public sealed class TelnetClientTests
 
                 _current = _reads.Dequeue();
                 _offset = 0;
+                var readDelay = ReadCount < ReadDelays.Count ? ReadDelays[ReadCount] : TimeSpan.Zero;
+                ReadCount++;
+                if (readDelay > TimeSpan.Zero)
+                {
+                    await Task.Delay(readDelay, cancellationToken);
+                }
             }
 
             var count = Math.Min(buffer.Length, _current.Length - _offset);
@@ -919,6 +1211,14 @@ public sealed class TelnetClientTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             WriteCount++;
+            var writeDelay = WriteCount <= WriteDelays.Count
+                ? WriteDelays[WriteCount - 1]
+                : TimeSpan.Zero;
+            if (writeDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(writeDelay, cancellationToken);
+            }
+
             if (WriteCount == WaitOnWriteNumber)
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);

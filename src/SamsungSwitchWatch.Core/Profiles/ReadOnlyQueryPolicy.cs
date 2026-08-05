@@ -9,7 +9,12 @@ public static class ReadOnlyQueryPolicy
 {
     public const int MaximumCommandLength = 128;
     public const int MaximumOutputBytes = 64 * 1024;
-    public static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan CommandIdleTimeout = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan CommandHardTimeout = TimeSpan.FromSeconds(90);
+
+    // Preserve the existing public member for compatible callers. It now
+    // represents the command inactivity timeout rather than an absolute cap.
+    public static readonly TimeSpan CommandTimeout = CommandIdleTimeout;
 
     public static ReadOnlyQueryValidation Validate(string? command, int maximumLength = MaximumCommandLength)
     {

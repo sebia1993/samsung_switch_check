@@ -443,6 +443,113 @@ public sealed class ViewerMonitoringIntegrationTests
         }
     }
 
+    [Theory]
+    [InlineData(true, "interface_status", "log_ram", "포트 상태 확인 불가")]
+    [InlineData(false, "log_ram", "interface_status", "시스템 로그 확인 불가")]
+    public async Task AutomaticMonitoring_CommandTimeoutIsIsolatedAndOtherCollectorSucceeds(
+        bool failPortStatus,
+        string failedCollectorId,
+        string successfulCollectorId,
+        string expectedGuidance)
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var monitoringStore = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
+            var client = new PartialCollectorFailureClient(failPortStatus);
+            var viewModel = CreateViewModel(folder, devices, client, monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                {
+                    var capabilities = Assert.Single(viewModel.Devices).Capabilities;
+                    return capabilities.Any(item =>
+                               item.CommandId == failedCollectorId
+                               && item.State == "Unavailable"
+                               && item.ErrorCode == "COMMAND_TIMEOUT")
+                           && capabilities.Any(item =>
+                               item.CommandId == successfulCollectorId
+                               && item.State == "Ready");
+                });
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal("Degraded", device.CollectionState);
+                Assert.Equal("COMMAND_TIMEOUT", device.CollectionErrorCode);
+                Assert.Null(monitoringStore.GetActiveFailureCode(device.Id));
+                Assert.Contains(device.Metrics, metric =>
+                    metric.Label == "현재 수집"
+                    && metric.Value == "일부 결과 확인 불가"
+                    && metric.Health == DeviceHealth.Warning);
+                Assert.Contains(expectedGuidance, viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains("30초", viewModel.OperationMessage, StringComparison.Ordinal);
+                Assert.Contains("다음 주기", viewModel.OperationMessage, StringComparison.Ordinal);
+
+                var requests = client.ExecuteRequests.ToArray();
+                Assert.Equal(2, requests.Length);
+                Assert.All(requests, request => Assert.Single(request.Commands));
+                Assert.Equal(1, requests.Count(request =>
+                    request.Commands[0].Equals("show port status", StringComparison.OrdinalIgnoreCase)));
+                Assert.Equal(1, requests.Count(request =>
+                    request.Commands[0].Contains("sylog", StringComparison.OrdinalIgnoreCase)));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
+    [Fact]
+    public async Task AutomaticMonitoring_BothCollectorsTimeoutRemainUnavailableWithoutDeviceDownOrRetry()
+    {
+        var folder = TemporaryFolder();
+        try
+        {
+            var devices = CreateVerifiedDevices(folder, 1);
+            var monitoringStore = new ViewerMonitoringStore(Path.Combine(folder, "monitor.json"));
+            monitoringStore.RecordFailure(Assert.Single(devices.Load()), "COMMAND_TIMEOUT");
+            var client = new PartialCollectorFailureClient(null);
+            var viewModel = CreateViewModel(folder, devices, client, monitoringStore);
+            try
+            {
+                await viewModel.InitializeAsync();
+                await WaitUntilAsync(() =>
+                    Assert.Single(viewModel.Devices).Capabilities.Count(item =>
+                        item.State == "Unavailable"
+                        && item.ErrorCode == "COMMAND_TIMEOUT") == 2);
+
+                var device = Assert.Single(viewModel.Devices);
+                Assert.Equal(DeviceHealth.Warning, device.Health);
+                Assert.Equal("Degraded", device.CollectionState);
+                Assert.Equal("COMMAND_TIMEOUT", device.CollectionErrorCode);
+                Assert.NotEqual(DeviceHealth.Normal, device.Health);
+                Assert.NotEqual(DeviceHealth.Disconnected, device.Health);
+                Assert.Null(monitoringStore.GetActiveFailureCode(device.Id));
+                Assert.Contains(device.Metrics, metric =>
+                    metric.Label == "현재 수집"
+                    && metric.Value == "일부 결과 확인 불가"
+                    && metric.Health == DeviceHealth.Warning);
+                Assert.Equal(2, client.ExecuteRequests.Count);
+                Assert.All(client.ExecuteRequests, request => Assert.Single(request.Commands));
+            }
+            finally
+            {
+                await viewModel.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(folder, true);
+        }
+    }
+
     [Fact]
     public async Task AgentSwitch_DuringCapabilityFallback_KeepsNewSessionAwaitingFreshResult()
     {
@@ -480,7 +587,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 Assert.Equal(1, replacementClient.ExecuteCount);
                 Assert.All(
                     replacementClient.ExecuteRequests,
-                    request => Assert.Equal(2, request.Commands.Count));
+                    request => Assert.Single(request.Commands));
 
                 replacementClient.ReleaseMonitor.TrySetResult();
                 await replacementCycle.WaitAsync(TimeSpan.FromSeconds(5));
@@ -529,7 +636,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 client.ReleaseMonitor.TrySetResult();
                 await WaitUntilAsync(() =>
                     !viewModel.IsReadOnlyQueryRunning
-                    && client.ExecuteCount == 2);
+                    && client.ExecuteCount == 3);
 
                 Assert.Equal(1, client.MaxConcurrent);
                 Assert.Equal("manual-output", viewModel.ReadOnlyQueryOutput);
@@ -645,7 +752,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 var current = Assert.Single(viewModel.Devices);
                 Assert.Equal(DeviceHealth.Normal, current.Health);
                 Assert.True(current.LastCheckedAt > lastSuccessfulCollection);
-                Assert.Equal(monitorCount + 1, client.MonitorCount);
+                Assert.Equal(monitorCount + 2, client.MonitorCount);
                 Assert.Equal(0, viewModel.LoadingCount);
             }
             finally
@@ -807,7 +914,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 client.ReleaseMonitor.TrySetResult();
                 await connectionTest.WaitAsync(TimeSpan.FromSeconds(5));
 
-                Assert.Equal(2, client.ExecuteCount);
+                Assert.Equal(3, client.ExecuteCount);
                 Assert.Equal(1, client.MaxConcurrent);
             }
             finally
@@ -897,6 +1004,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 Assert.DoesNotContain(
                     persisted.LoadEvents(),
                     item => item.DeviceId == existing.Id);
+                Assert.Equal(1, client.ExecuteCount);
                 Assert.Equal(DeviceHealth.Empty, Assert.Single(viewModel.Devices).Health);
             }
             finally
@@ -1147,9 +1255,10 @@ public sealed class ViewerMonitoringIntegrationTests
                     devices.GetSecrets(existing.Id).Password);
 
                 var requests = client.ExecuteRequests.ToArray();
-                Assert.Equal(2, requests.Length);
+                Assert.Equal(3, requests.Length);
                 Assert.Equal("password", requests[0].Password);
                 Assert.Equal("replacement-password", requests[1].Password);
+                Assert.Equal("replacement-password", requests[2].Password);
 
                 var persisted = new ViewerMonitoringStore(
                     Path.Combine(folder, "monitor.json"));
@@ -1245,7 +1354,10 @@ public sealed class ViewerMonitoringIntegrationTests
                 Assert.Equal(2, client.MaxConcurrent);
 
                 client.ReleaseAll.TrySetResult();
-                await WaitUntilAsync(() => client.ExecuteCount == 3 && client.Active == 0);
+                // Each monitored device now performs two sequential, single-command
+                // requests (port status and system log). Device concurrency remains
+                // capped at two while collector failures stay isolated.
+                await WaitUntilAsync(() => client.ExecuteCount == 6 && client.Active == 0);
 
                 Assert.Equal(2, client.MaxConcurrent);
             }
@@ -2130,6 +2242,35 @@ public sealed class ViewerMonitoringIntegrationTests
         }
     }
 
+    private sealed class PartialCollectorFailureClient(bool? failPortStatus) : StatelessClientBase
+    {
+        public ConcurrentQueue<TelnetExecuteRequestDto> ExecuteRequests { get; } = new();
+
+        public override Task<TelnetExecutionResultDto> ExecuteTelnetAsync(
+            TelnetExecuteRequestDto request,
+            CancellationToken cancellationToken)
+        {
+            ExecuteRequests.Enqueue(request);
+            var command = Assert.Single(request.Commands);
+            var isPortStatus = command.Equals(
+                "show port status",
+                StringComparison.OrdinalIgnoreCase);
+            if (failPortStatus is null || isPortStatus == failPortStatus.Value)
+            {
+                throw new AgentClientException(
+                    "COMMAND_TIMEOUT",
+                    AgentConnectionState.Stale,
+                    details: new AgentErrorDetails(
+                        "command-idle",
+                        30_000,
+                        true,
+                        isPortStatus ? 0 : 1));
+            }
+
+            return Task.FromResult(Result(request.RequestId, NormalOutputs(request)));
+        }
+    }
+
     private sealed class AgentSwitchRaceClient : StatelessClientBase
     {
         private int _executeCount;
@@ -2432,7 +2573,7 @@ public sealed class ViewerMonitoringIntegrationTests
                 completedUtc,
                 1,
                 outputs);
-            if (monitorCount == 1)
+            if (monitorCount == 2)
             {
                 FirstMonitorCompleted.TrySetResult();
             }
@@ -2453,7 +2594,7 @@ public sealed class ViewerMonitoringIntegrationTests
             CancellationToken cancellationToken)
         {
             var monitorCount = Interlocked.Increment(ref _monitorCount);
-            if (monitorCount == 2)
+            if (monitorCount == 3)
             {
                 throw new AgentClientException(
                     "DEVICE_BUSY",
@@ -2461,7 +2602,7 @@ public sealed class ViewerMonitoringIntegrationTests
             }
 
             var result = Result(request.RequestId, NormalOutputs(request));
-            if (monitorCount == 1)
+            if (monitorCount == 2)
             {
                 FirstMonitorCompleted.TrySetResult();
             }

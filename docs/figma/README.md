@@ -81,7 +81,8 @@ not `localhost` or `127/8`, and separately reports these three scopes:
 
 1. Agent service, TCP/18443, HTTPS, API, and version are reachable.
 2. Switch access has not yet been tested and remains under
-   `장비 관리 → 접속 시험`.
+   구현 화면에서는 `장비 관리 → 로그인 확인`으로 명확히 표시합니다. Figma 노드의 기존
+   `접속 시험` 문구는 다음 디자인 동기화 때 같은 의미로 갱신해야 합니다.
 3. A same-PC success does not prove the route or firewall from the actual
    remote Viewer PC.
 

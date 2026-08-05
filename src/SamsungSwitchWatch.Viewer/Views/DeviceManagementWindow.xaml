@@ -61,11 +61,11 @@
                                         <TextBlock Margin="0,4,0,0" FontSize="12">
                                             <TextBlock.Style>
                                                 <Style TargetType="TextBlock">
-                                                    <Setter Property="Text" Value="접속 미확인 · 감시 꺼짐"/>
+                                                    <Setter Property="Text" Value="로그인 미확인 · 감시 꺼짐"/>
                                                     <Setter Property="Foreground" Value="#B45309"/>
                                                     <Style.Triggers>
                                                         <DataTrigger Binding="{Binding ConnectionVerified}" Value="True">
-                                                            <Setter Property="Text" Value="접속 확인됨"/>
+                                                            <Setter Property="Text" Value="로그인 확인됨"/>
                                                             <Setter Property="Foreground" Value="#15803D"/>
                                                         </DataTrigger>
                                                         <MultiDataTrigger>
@@ -73,7 +73,7 @@
                                                                 <Condition Binding="{Binding ConnectionVerified}" Value="True"/>
                                                                 <Condition Binding="{Binding MonitoringEnabled}" Value="True"/>
                                                             </MultiDataTrigger.Conditions>
-                                                            <Setter Property="Text" Value="접속 확인됨 · 감시 켜짐"/>
+                                                            <Setter Property="Text" Value="로그인 확인됨 · 감시 켜짐"/>
                                                         </MultiDataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
@@ -156,16 +156,16 @@
                                   FontWeight="SemiBold"
                                   AutomationProperties.Name="Viewer 로컬 주기 감시"/>
                         <TextBlock Margin="0,5,0,0" FontSize="11" Foreground="{StaticResource MutedTextBrush}"
-                                   Text="접속 시험 성공 후 사용할 수 있습니다. Viewer 종료 시 감시가 중단됩니다. · Telnet TCP/23 고정"/>
+                                   Text="로그인 확인 성공 후 사용할 수 있습니다. Viewer 종료 시 감시가 중단됩니다. · Telnet TCP/23 고정"/>
 
                         <Border Margin="0,18,0,0" Padding="12" Background="#EFF6FF" BorderBrush="#BFDBFE"
                                 BorderThickness="1" CornerRadius="4">
                             <StackPanel>
                                 <TextBlock FontWeight="SemiBold"
-                                           Text="권장 순서: 1. 접속 시험 → 2. 저장 → 3. 주기 감시 켜기"/>
+                                           Text="권장 순서: 1. 로그인 확인 → 2. 저장 → 3. 주기 감시 켜기"/>
                                 <TextBlock x:Name="ResultText" Margin="0,5,0,0" TextWrapping="Wrap"
                                            AutomationProperties.LiveSetting="Polite"
-                                           Text="접속 시험에 실패해도 장비는 저장되지만 주기 감시는 시작되지 않습니다."/>
+                                           Text="로그인 확인에 실패해도 장비는 저장되지만 주기 감시는 시작되지 않습니다."/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -182,7 +182,7 @@
                     Click="DeleteDevice_Click" HorizontalAlignment="Left"/>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <Button x:Name="TestButton" MinWidth="112" Style="{StaticResource SecondaryButton}"
-                        Content="접속 _시험" Click="TestConnection_Click"/>
+                         Content="로그인 _확인" Click="TestConnection_Click"/>
                 <Button x:Name="SaveButton" MinWidth="112" Margin="8,0,0,0" Style="{StaticResource PrimaryButton}"
                         Content="_저장" Click="SaveDevice_Click" IsDefault="True"/>
                 <Button MinWidth="86" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"

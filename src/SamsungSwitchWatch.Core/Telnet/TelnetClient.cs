@@ -41,6 +41,9 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         if (timeouts.Connect <= TimeSpan.Zero || timeouts.LoginPrompt <= TimeSpan.Zero ||
             timeouts.Authentication <= TimeSpan.Zero || timeouts.Logout <= TimeSpan.Zero ||
             timeouts.Write <= TimeSpan.Zero || timeouts.Session <= TimeSpan.Zero ||
+            _options.CommandHardTimeout <= TimeSpan.Zero ||
+            _options.MaximumPagingAdvances is < 1 or > 128 ||
+            _options.TerminalWidth == 0 || _options.TerminalHeight == 0 ||
             _options.SessionSafetyMargin <= TimeSpan.Zero ||
             _options.SessionCloseRetryDelay <= TimeSpan.Zero ||
             _options.SessionCloseRetryCount is < 0 or > 1)
@@ -161,7 +164,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 $"command-{index + 1}",
                 $"Command {index + 1}",
                 validation.NormalizedCommand!,
-                ReadOnlyQueryPolicy.CommandTimeout,
+                ReadOnlyQueryPolicy.CommandIdleTimeout,
                 1);
         }
 
@@ -261,9 +264,10 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         CancellationToken cancellationToken)
     {
         await using var transport = _transportFactory.Create();
-        var negotiator = new TelnetNegotiator();
+        var negotiator = new TelnetNegotiator(_options.TerminalWidth, _options.TerminalHeight);
         var authenticated = false;
         var outputs = new List<CommandOutput>(commands.Count);
+        CommandTelemetryState? currentCommandTelemetry = null;
         using var sessionCancellation = CreateStageCancellation(cancellationToken, sessionBudget);
         var sessionToken = sessionCancellation.Token;
 
@@ -290,6 +294,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         "command-write",
                         sessionToken)
                     .ConfigureAwait(false);
+                currentCommandTelemetry = new CommandTelemetryState(_timeProvider.GetTimestamp());
                 var raw = await ReadUntilAsync(
                         transport,
                         negotiator,
@@ -300,7 +305,9 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         command.Timeout,
                         ErrorCodes.CommandTimeout,
                         "command",
-                        sessionToken)
+                        sessionToken,
+                        _options.CommandHardTimeout,
+                        currentCommandTelemetry)
                     .ConfigureAwait(false);
 
                 outputs.Add(new CommandOutput(
@@ -313,6 +320,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         devicePromptPattern,
                         promptProfile.PagingMarkers),
                     _timeProvider.GetUtcNow()));
+                currentCommandTelemetry = null;
             }
 
             return outputs;
@@ -341,7 +349,8 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 "telnet-session",
                 "The Telnet session exceeded its total time limit.",
                 true,
-                exception), outputs.ToArray());
+                exception,
+                SnapshotTelemetry(currentCommandTelemetry)), outputs.ToArray());
         }
         catch (Exception exception) when (exception is IOException or SocketException or InvalidOperationException)
         {
@@ -372,9 +381,10 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         CancellationToken cancellationToken)
     {
         await using var transport = _transportFactory.Create();
-        var negotiator = new TelnetNegotiator();
+        var negotiator = new TelnetNegotiator(_options.TerminalWidth, _options.TerminalHeight);
         var authenticated = false;
         var outputs = new List<CommandOutput>(commands.Count);
+        CommandTelemetryState? currentCommandTelemetry = null;
         using var sessionCancellation = CreateStageCancellation(cancellationToken, sessionBudget);
         var sessionToken = sessionCancellation.Token;
 
@@ -411,6 +421,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         "command-write",
                         sessionToken)
                     .ConfigureAwait(false);
+                currentCommandTelemetry = new CommandTelemetryState(_timeProvider.GetTimestamp());
                 var response = await ReadUntilAsync(
                         transport,
                         negotiator,
@@ -421,7 +432,9 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         command.Timeout,
                         ErrorCodes.CommandTimeout,
                         "command",
-                        sessionToken)
+                        sessionToken,
+                        _options.CommandHardTimeout,
+                        currentCommandTelemetry)
                     .ConfigureAwait(false);
 
                 outputs.Add(new CommandOutput(
@@ -434,6 +447,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         prompt.ExactPattern,
                         promptProfile.PagingMarkers),
                     _timeProvider.GetUtcNow()));
+                currentCommandTelemetry = null;
             }
 
             return new InteractiveSessionAttempt(
@@ -465,7 +479,8 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 "telnet-session",
                 "The Telnet session exceeded its total time limit.",
                 true,
-                exception), outputs.ToArray());
+                exception,
+                SnapshotTelemetry(currentCommandTelemetry)), outputs.ToArray());
         }
         catch (Exception exception) when (exception is IOException or SocketException or InvalidOperationException)
         {
@@ -495,7 +510,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         var currentBudget = SessionOverhead();
         foreach (var command in commands)
         {
-            var nextBudget = currentBudget + command.Timeout;
+            var nextBudget = currentBudget + CommandBudget();
             if (current.Count > 0 && nextBudget > _options.Timeouts.Session)
             {
                 batches.Add(current.ToArray());
@@ -503,7 +518,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 currentBudget = SessionOverhead();
             }
             current.Add(command);
-            currentBudget += command.Timeout;
+            currentBudget += CommandBudget();
         }
         if (current.Count > 0)
         {
@@ -514,9 +529,11 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
 
     private TimeSpan CalculateSessionBudget(IReadOnlyList<ReadOnlyCommandDefinition> commands)
     {
-        var requested = SessionOverhead() + TimeSpan.FromTicks(commands.Sum(static command => command.Timeout.Ticks));
+        var requested = SessionOverhead() + TimeSpan.FromTicks(commands.Count * CommandBudget().Ticks);
         return requested <= _options.Timeouts.Session ? requested : _options.Timeouts.Session;
     }
+
+    private TimeSpan CommandBudget() => _options.CommandHardTimeout;
 
     private TimeSpan SessionOverhead() =>
         _options.Timeouts.Connect +
@@ -714,7 +731,9 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         TimeSpan timeout,
         string timeoutCode,
         string stage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? hardTimeout = null,
+        CommandTelemetryState? commandTelemetry = null)
     {
         var terminals = terminalPatterns.Select(CreateRegex).ToArray();
         var failures = failurePatterns.Select(CreateRegex).ToArray();
@@ -722,14 +741,55 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         var visibleOutput = new StringBuilder();
         var receivedTextBytes = 0;
         var receivedWireBytes = 0;
+        var pagerCount = 0;
         var buffer = new byte[_options.ReadBufferBytes];
-        using var stageCancellation = CreateStageCancellation(cancellationToken, timeout);
+        using var absoluteCancellation = hardTimeout is null
+            ? CreateStageCancellation(cancellationToken, timeout)
+            : null;
+        using var hardCancellation = hardTimeout is not null
+            ? CreateStageCancellation(cancellationToken, hardTimeout.Value)
+            : null;
 
         try
         {
             while (true)
             {
-                var read = await transport.ReadAsync(buffer, stageCancellation.Token).ConfigureAwait(false);
+                using var idleCancellation = hardCancellation is not null
+                    ? CreateStageCancellation(hardCancellation.Token, timeout)
+                    : null;
+                var readToken = idleCancellation?.Token ?? absoluteCancellation!.Token;
+                int read;
+                try
+                {
+                    read = await transport.ReadAsync(buffer, readToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    if (hardCancellation?.IsCancellationRequested == true)
+                    {
+                        throw Failure(
+                            timeoutCode,
+                            "command-hard-limit",
+                            "The command exceeded its total time limit.",
+                            true,
+                            exception,
+                            SnapshotTelemetry(commandTelemetry));
+                    }
+
+                    if (idleCancellation?.IsCancellationRequested == true)
+                    {
+                        throw Failure(
+                            timeoutCode,
+                            "command-idle",
+                            "The command produced no new response before the inactivity limit.",
+                            true,
+                            exception,
+                            SnapshotTelemetry(commandTelemetry));
+                    }
+
+                    throw;
+                }
+
                 if (read == 0)
                 {
                     throw Failure(
@@ -738,6 +798,12 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         "The Telnet stream ended before the expected prompt.",
                         true);
                 }
+
+                // A successful read is activity. Do not reuse the nearly expired
+                // inactivity token while processing Telnet negotiation or a pager
+                // continuation; the next loop iteration creates a fresh idle window.
+                // Command processing remains bounded by the absolute hard limit.
+                var postReadToken = hardCancellation?.Token ?? absoluteCancellation!.Token;
 
                 receivedWireBytes += read;
                 if (receivedWireBytes > _options.MaximumWireBytes)
@@ -751,7 +817,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 var frame = negotiator.Process(buffer.AsSpan(0, read), _options.MaximumNegotiationBytesWithoutText);
                 if (frame.Responses.Length > 0)
                 {
-                    await transport.WriteAsync(frame.Responses, stageCancellation.Token).ConfigureAwait(false);
+                    await transport.WriteAsync(frame.Responses, postReadToken).ConfigureAwait(false);
                 }
 
                 receivedTextBytes += frame.Text.Length;
@@ -765,18 +831,40 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
 
                 if (frame.Text.Length > 0)
                 {
+                    if (commandTelemetry is not null)
+                    {
+                        commandTelemetry.ReceivedOutput = true;
+                    }
+
                     var text = WireEncoding.GetString(frame.Text);
                     rawOutput.Append(text);
                     visibleOutput.Append(text);
                 }
 
-                await RemovePagingMarkersAsync(
+                var pagingResult = await RemovePagingMarkersAsync(
                         transport,
                         visibleOutput,
                         pagingMarkers,
                         pagingContinueByte,
-                        stageCancellation.Token)
+                        pagerCount,
+                        _options.MaximumPagingAdvances,
+                        postReadToken)
                     .ConfigureAwait(false);
+                pagerCount = pagingResult.PagerCount;
+                if (commandTelemetry is not null)
+                {
+                    commandTelemetry.PagerCount = pagerCount;
+                }
+
+                if (pagingResult.LimitExceeded)
+                {
+                    throw Failure(
+                        timeoutCode,
+                        "pager-limit",
+                        "The switch requested too many paging advances.",
+                        false,
+                        telemetry: SnapshotTelemetry(commandTelemetry));
+                }
 
                 var visibleText = OutputNormalizer.CleanControlCharacters(GetDetectionTail(visibleOutput));
                 for (var index = 0; index < failures.Length; index++)
@@ -803,6 +891,18 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                         terminal.MatchedText);
                 }
             }
+        }
+        catch (OperationCanceledException exception) when (
+            !cancellationToken.IsCancellationRequested &&
+            hardCancellation?.IsCancellationRequested == true)
+        {
+            throw Failure(
+                timeoutCode,
+                "command-hard-limit",
+                "The command exceeded its total time limit.",
+                true,
+                exception,
+                SnapshotTelemetry(commandTelemetry));
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
@@ -837,6 +937,7 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         string stage,
         CancellationToken cancellationToken)
     {
+        var startedTimestamp = _timeProvider.GetTimestamp();
         var bytes = WireEncoding.GetBytes(value + "\r\n");
         using var writeCancellation = CreateStageCancellation(cancellationToken, _options.Timeouts.Write);
         try
@@ -845,26 +946,33 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw Failure(timeoutCode, stage, $"The {stage} stage timed out.", true, exception);
+            var telemetry = string.Equals(stage, "command-write", StringComparison.Ordinal)
+                ? new CommandFailureTelemetry(
+                    ElapsedMilliseconds(startedTimestamp),
+                    ReceivedOutput: false,
+                    PagerCount: 0)
+                : null;
+            throw Failure(timeoutCode, stage, $"The {stage} stage timed out.", true, exception, telemetry);
         }
     }
 
-    private async Task RemovePagingMarkersAsync(
+    private async Task<PagingRemovalResult> RemovePagingMarkersAsync(
         IByteTransport transport,
         StringBuilder visibleOutput,
         IReadOnlyList<string> pagingMarkers,
         byte pagingContinueByte,
+        int currentPagerCount,
+        int maximumPagingAdvances,
         CancellationToken cancellationToken)
     {
         if (pagingMarkers.Count == 0 || visibleOutput.Length == 0)
         {
-            return;
+            return new PagingRemovalResult(currentPagerCount, false);
         }
 
         while (true)
         {
-            var longestMarker = pagingMarkers.Max(static marker => marker.Length);
-            var start = Math.Max(0, visibleOutput.Length - _options.DetectionWindowCharacters - longestMarker - 4);
+            var start = Math.Max(0, visibleOutput.Length - _options.DetectionWindowCharacters - 256);
             var tail = visibleOutput.ToString(start, visibleOutput.Length - start);
             var markerMatch = FindTerminalPagingMarker(
                 tail,
@@ -872,11 +980,17 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 start == 0 || visibleOutput[start - 1] is '\r' or '\n');
             if (markerMatch is null)
             {
-                return;
+                return new PagingRemovalResult(currentPagerCount, false);
+            }
+
+            if (currentPagerCount >= maximumPagingAdvances)
+            {
+                return new PagingRemovalResult(currentPagerCount, true);
             }
 
             visibleOutput.Remove(start + markerMatch.Index, markerMatch.Length);
             await transport.WriteAsync(new byte[] { pagingContinueByte }, cancellationToken).ConfigureAwait(false);
+            currentPagerCount++;
         }
     }
 
@@ -917,7 +1031,8 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         IReadOnlyList<string> pagingMarkers,
         bool startIsLineBoundary)
     {
-        PagingMarkerMatch? selected = null;
+        var normalized = OutputNormalizer.CleanControlCharacters(text);
+        Match? selected = null;
         foreach (var marker in pagingMarkers)
         {
             if (string.IsNullOrWhiteSpace(marker))
@@ -925,9 +1040,10 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
                 continue;
             }
 
-            var pattern = $@"(?:^|(?<=\r)|(?<=\n))[ \t]*{Regex.Escape(marker)}[ \t]*(?:\r\n|\r|\n)?\z";
+            const string suffix = @"(?:[ \t]+(?:\((?:q|quit)[ \t]+to[ \t]+quit\)|\[(?:q|quit)[ \t]+to[ \t]+quit\]|\(q\)[ \t]*uit|(?:q|quit)[ \t]+to[ \t]+quit|[0-9]{1,3}%))?";
+            var pattern = $@"(?:^|(?<=\r)|(?<=\n))[ \t]*{Regex.Escape(marker)}{suffix}[ \t]*(?:\r\n|\r|\n)?\z";
             var match = Regex.Match(
-                text,
+                normalized,
                 pattern,
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
                 TimeSpan.FromSeconds(1));
@@ -938,21 +1054,36 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
 
             if (selected is null || match.Index < selected.Index)
             {
-                var removableLength = match.Length;
-                if (match.Value.EndsWith("\r\n", StringComparison.Ordinal))
-                {
-                    removableLength -= 2;
-                }
-                else if (match.Value.EndsWith('\r') || match.Value.EndsWith('\n'))
-                {
-                    removableLength--;
-                }
-
-                selected = new PagingMarkerMatch(match.Index, removableLength);
+                selected = match;
             }
         }
 
-        return selected;
+        if (selected is null)
+        {
+            return null;
+        }
+
+        // The normalized match is guaranteed to be the terminal physical
+        // line. Remove the corresponding raw line content (including ANSI and
+        // destructive backspace bytes) while preserving its line ending.
+        var rawContentEnd = text.Length;
+        while (rawContentEnd > 0 && text[rawContentEnd - 1] is '\r' or '\n')
+        {
+            rawContentEnd--;
+        }
+
+        var rawLineStart = rawContentEnd;
+        while (rawLineStart > 0 && text[rawLineStart - 1] is not '\r' and not '\n')
+        {
+            rawLineStart--;
+        }
+
+        if (rawLineStart == 0 && !startIsLineBoundary)
+        {
+            return null;
+        }
+
+        return new PagingMarkerMatch(rawLineStart, rawContentEnd - rawLineStart);
     }
 
     private static AuthenticatedPrompt CreateAuthenticatedPrompt(string? matchedText)
@@ -1018,8 +1149,28 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
         string stage,
         string message,
         bool retryable = false,
-        Exception? exception = null) =>
-        new(new DiagnosticError(code, stage, message, retryable), exception);
+        Exception? exception = null,
+        CommandFailureTelemetry? telemetry = null) =>
+        new(new DiagnosticError(code, stage, message, retryable)
+        {
+            CommandTelemetry = telemetry
+        }, exception);
+
+    private CommandFailureTelemetry? SnapshotTelemetry(CommandTelemetryState? state) =>
+        state is null
+            ? null
+            : new CommandFailureTelemetry(
+                ElapsedMilliseconds(state.StartedTimestamp),
+                state.ReceivedOutput,
+                state.PagerCount);
+
+    private long ElapsedMilliseconds(long startedTimestamp)
+    {
+        var elapsed = _timeProvider.GetElapsedTime(startedTimestamp).TotalMilliseconds;
+        return elapsed >= long.MaxValue
+            ? long.MaxValue
+            : Math.Max(0, (long)Math.Ceiling(elapsed));
+    }
 
     private sealed record ReadMatch(
         string Text,
@@ -1031,6 +1182,17 @@ public sealed class TelnetClient : ITelnetClient, IAdHocTelnetClient
     private sealed record TerminalPatternMatch(int PatternIndex, string MatchedText);
 
     private sealed record PagingMarkerMatch(int Index, int Length);
+
+    private sealed record PagingRemovalResult(int PagerCount, bool LimitExceeded);
+
+    private sealed class CommandTelemetryState(long startedTimestamp)
+    {
+        public long StartedTimestamp { get; } = startedTimestamp;
+
+        public bool ReceivedOutput { get; set; }
+
+        public int PagerCount { get; set; }
+    }
 
     private sealed record AuthenticatedPrompt(string ExactPattern, char Terminator);
 

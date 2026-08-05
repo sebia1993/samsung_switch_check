@@ -200,6 +200,8 @@ public sealed class WpfSmokeTests
                 Assert.False(devices.MonitoringCheckBox.IsEnabled);
                 Assert.Equal("Viewer 로컬 주기 감시",
                     AutomationProperties.GetName(devices.MonitoringCheckBox));
+                Assert.Equal("로그인 _확인", devices.TestButton.Content);
+                Assert.Contains("로그인 확인", devices.ResultText.Text, StringComparison.Ordinal);
                 devices.Close();
                 VerifyDeviceManagementFailuresStayInsideWindow(folder);
                 var mini = new MiniWindow(viewModel, true);
@@ -968,7 +970,7 @@ public sealed class WpfSmokeTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(AgentConnectionProbeResult.Success(
                 Identity() with { ProductVersion = "0.10.0-poc" },
-                "경고 · Agent 0.10.0-poc와 Viewer 0.11.0-poc 버전이 다르지만 API v4가 호환되어 연결합니다."));
+                "경고 · Agent 0.10.0-poc와 Viewer 0.11.1-poc 버전이 다르지만 API v4가 호환되어 연결합니다."));
         }
     }
 
