@@ -65,7 +65,8 @@ function Assert-OnlyActiveVersion {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
         [Parameter(Mandatory = $true)][string]$ExpectedVersion,
-        [Parameter(Mandatory = $true)][string]$Name
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$AllowedHistoricalVersions = @()
     )
     $versions = @(
         [regex]::Matches(
@@ -76,7 +77,8 @@ function Assert-OnlyActiveVersion {
     if ($versions.Count -eq 0) {
         throw "$Name does not contain an active POC release version."
     }
-    $unexpected = @($versions | Where-Object { $_ -ne $ExpectedVersion } | Sort-Object -Unique)
+    $allowed = @($ExpectedVersion) + @($AllowedHistoricalVersions)
+    $unexpected = @($versions | Where-Object { $_ -notin $allowed } | Sort-Object -Unique)
     if ($unexpected.Count -gt 0) {
         throw "$Name contains a stale active release version: $($unexpected -join ', ')"
     }
@@ -409,6 +411,10 @@ Assert-Pattern $buildScript 'SamsungSwitchWatch\.Agent\.Setup\\SamsungSwitchWatc
     'Release build must publish the native Agent Setup project.'
 Assert-Pattern $buildScript "Write-PackageManifest.+SamsungSwitchWatch\.Agent\.Setup\.exe" `
     'Agent package manifest must name Agent Setup as the public entrypoint.'
+Assert-Pattern $buildScript 'SamsungSwitchWatch\.Viewer\.Setup\\SamsungSwitchWatch\.Viewer\.Setup\.csproj' `
+    'Release build must publish the native Viewer Setup project.'
+Assert-Pattern $buildScript "Write-PackageManifest.+SamsungSwitchWatch\.Viewer\.Setup\.exe" `
+    'Viewer package manifest must name Viewer Setup as the public entrypoint.'
 if ($buildScript -match '\$(?:agent|viewer)Scripts\s*=' -or
     $buildScript -match 'Copy-Item.+scripts\\') {
     throw 'Public release build must not copy PowerShell or CMD deployment scripts.'
@@ -417,6 +423,13 @@ Assert-Pattern $packageContract '\$releaseNotesName' 'Package contract must requ
 Assert-Pattern $packageContract '\$rootManifest\.sourceCommit\s+-ne\s+\$ExpectedSourceCommit' 'Package contract must compare the manifest to the expected workflow commit.'
 Assert-Pattern $packageContract "SamsungSwitchWatch\.Agent\.Setup\.exe" `
     'Package contract must require the native Agent Setup entrypoint.'
+Assert-Pattern $packageContract "SamsungSwitchWatch\.Viewer\.Setup\.exe" `
+    'Package contract must require the native Viewer Setup entrypoint.'
+Assert-Pattern $packageContract "Exe\s*=\s*'SamsungSwitchWatch\.Viewer\.Setup\.exe'" `
+    'Viewer package identity must use Viewer Setup as its public executable.'
+Assert-Pattern $packageContract `
+    "AdditionalExecutables\s*=\s*@\('SamsungSwitchWatch\.Viewer\.exe'\)" `
+    'Viewer runtime must remain a version-checked additional executable.'
 Assert-Pattern $packageContract "\.Extension\s+-in\s+@\('\.ps1',\s*'\.cmd',\s*'\.bat'\)" `
     'Package contract must reject every public PowerShell, CMD and BAT file.'
 Assert-Pattern $executableSmoke `
@@ -427,8 +440,14 @@ Assert-Pattern $executableSmoke `
     'Executable smoke must use the versioned Viewer ZIP.'
 Assert-Pattern $executableSmoke "-Argument '--install-smoke-check'" `
     'Executable smoke must run the Viewer package self-check.'
-Assert-Pattern $executableSmoke "-Argument '--package-smoke-check'" `
-    'Executable smoke must run the Agent Setup package self-check.'
+Assert-Pattern $executableSmoke `
+    'SamsungSwitchWatch\.Viewer\.Setup\.exe' `
+    'Executable smoke must run the native Viewer Setup package self-check.'
+Assert-Pattern $executableSmoke `
+    'SamsungSwitchWatch\.Agent\.Setup\.exe' `
+    'Executable smoke must run the native Agent Setup package self-check.'
+Assert-PatternCount $executableSmoke ([regex]::Escape("-Argument '--package-smoke-check'")) 2 `
+    'Executable smoke must run both native Setup package self-checks.'
 Assert-Pattern $executableSmoke "-ArgumentList '--service'" `
     'Executable smoke must run the packaged service-only Agent runtime.'
 Assert-Pattern $executableSmoke "Agent__MockMode\s*=\s*'true'" `
@@ -462,9 +481,9 @@ Assert-OnlyActiveVersion $workflow $workflowVersion 'Release workflow'
 Assert-OnlyActiveVersion $windowsCi $workflowVersion 'Windows CI workflow'
 Assert-OnlyActiveVersion $buildScript $workflowVersion 'Release build script'
 Assert-OnlyActiveVersion $agents $workflowVersion 'Repository instructions'
-Assert-OnlyActiveVersion $install $workflowVersion 'Installation guide'
+Assert-OnlyActiveVersion $install $workflowVersion 'Installation guide' @('0.11.3-poc')
 Assert-OnlyActiveVersion $releaseProcess $workflowVersion 'Release process'
-Assert-OnlyActiveVersion $manualBuilder $workflowVersion 'User manual builder'
+Assert-OnlyActiveVersion $manualBuilder $workflowVersion 'User manual builder' @('0.11.3-poc')
 
 Assert-Pattern $buildScript "\[string\]\`$Version\s*=\s*'$escapedVersion'" `
     'Release build default must match the release workflow version.'

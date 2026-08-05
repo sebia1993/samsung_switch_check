@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.11.3 operator manual.
+"""Build the Korean Samsung Switch Watch v0.11.4 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,7 +20,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.11.3-poc"
+VERSION = "0.11.4-poc"
 DOCUMENT_DATE = "2026-08-05"
 FONT = "맑은 고딕"
 MONO = "Consolas"
@@ -701,18 +701,12 @@ def build_manual(output_path: Path, images_dir: Path):
         [
             "원격 PC에서 Agent ZIP을 풀고 SamsungSwitchWatch.Agent.Setup.exe를 실행한 뒤 UAC를 승인합니다.",
             "Agent Setup에는 Viewer IP나 관리망 CIDR을 입력하지 않습니다. 설치 내용을 확인하고 '설치 / 업데이트'를 누릅니다.",
-            "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
+            "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.Setup.exe로 사용자 전용 설치를 진행합니다.",
             "Viewer의 Agent 연결에서 Agent PC 주소만 입력하고 '연결 확인 및 저장'을 누릅니다.",
-            "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
+            "장비 관리에서 장비명, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다. 모델은 장비 응답에서 자동 판별합니다.",
             "로그인 확인이 성공하면 저장하고, 수집 진단에서 포트·로그 명령을 확인한 뒤 필요할 때 주기 감시를 켭니다.",
-            "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
+            "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다. Viewer를 종료하면 주기 감시도 함께 중단됩니다.",
         ],
-    )
-    add_callout(
-        doc,
-        "중요",
-        "Viewer가 종료되면 주기 감시도 중단됩니다. Agent만 실행 중이라고 감시가 계속되는 구조가 아닙니다.",
-        "warning",
     )
     add_heading(doc, "운영 구조 이해", 1, heading_num_id)
     add_body(
@@ -754,7 +748,7 @@ Viewer PC                 Agent PC                    Samsung Switch
             "Agent는 Windows 서비스로 실행되어 RDP 종료나 사용자 로그오프 뒤에도 계속 대기합니다.",
             "Agent는 장비 목록, Telnet 계정, 수동 명령 원문, 스위치 출력 원문을 보관하지 않습니다.",
             "일반 사용자가 볼 수 있는 Agent 창이나 트레이 아이콘은 없습니다.",
-            "Viewer는 압축 해제한 폴더에서 포터블로 실행하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
+            "Viewer는 현재 사용자 LocalAppData의 고정 경로에 설치하며, 현재 Windows 사용자 범위에서만 계정을 복호화합니다.",
         ],
         bullet_num_id,
     )
@@ -1009,51 +1003,69 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         f"서비스를 수동 등록하지 말고 {VERSION} Agent Setup을 사용하세요.",
         "danger",
     )
-    add_heading(doc, "Viewer 실행", 2, heading_num_id)
+    add_heading(doc, "Viewer 설치와 실행", 2, heading_num_id)
     add_callout(
         doc,
-        "0.9 설치형 Viewer에서 전환",
-        "이전 Viewer가 실행 중이면 새 Viewer는 같은 사용자 데이터를 동시에 쓰지 않도록 "
-        "실행을 차단하고 전환 순서를 표시합니다. 기존 트레이 아이콘에서 '프로그램 종료'를 "
-        "선택한 뒤 Win+R에서 shell:startup을 열어 'Samsung Switch Watch' 바로 가기를 "
-        "삭제합니다. 이어 shell:programs에서도 같은 이름의 이전 시작 메뉴 바로 가기를 "
-        "삭제하고 새 Viewer를 다시 실행하세요. 기존 Agent 연결과 장비 정보는 유지됩니다. "
-        f"창이 바로 보이지 않으면 알림 영역에서 대시보드를 열고 실행 경로가 새 {VERSION} "
-        "폴더인지 확인하세요. API v4가 호환되면 Agent와 Viewer의 세부 버전이 달라도 경고만 "
-        "표시하고 연결됩니다.",
+        "처음 전환할 때",
+        "0.11.4 이후 Viewer가 실행 중이면 Setup이 저장·정리 종료를 요청하고 실제 종료를 "
+        "확인한 뒤 진행합니다. 0.11.3 포터블 Viewer는 새 요청을 이해하지 못하므로 첫 전환 때 "
+        "Setup이 수동 종료를 안내할 수 있습니다. Setup은 프로세스를 강제로 종료하지 않습니다. "
+        "기존 Agent 연결과 장비 정보는 그대로 유지됩니다. API v4가 "
+        "호환되면 Agent와 Viewer의 세부 버전이 달라도 경고만 표시하고 연결됩니다.",
         "warning",
     )
     add_steps(
         doc,
         [
-            "Viewer 릴리스 ZIP을 운영자 PC에서 계속 사용할 로컬 폴더에 압축 해제합니다.",
-            "SamsungSwitchWatch.Viewer.exe를 더블클릭합니다.",
-            "Viewer는 일반 사용자 권한으로 실행하며 설치, UAC와 Windows 로그인 자동 시작을 수행하지 않습니다.",
+            "Viewer 릴리스 ZIP을 운영자 PC의 로컬 임시 폴더에 완전히 압축 해제합니다.",
+            "SamsungSwitchWatch.Viewer.Setup.exe를 실행하고 '설치 / 업데이트'를 누릅니다.",
+            "UAC 없이 사용자 전용 고정 경로에 설치하고 Viewer를 자동 실행해 정상 실행 유지를 확인합니다.",
+            "설치가 성공하면 ZIP을 압축 해제한 임시 폴더는 삭제해도 됩니다. Windows 로그인 자동 시작은 등록하지 않습니다.",
         ],
     )
     add_callout(
         doc,
         "프로그램과 사용자 데이터 분리",
-        "Viewer는 압축 해제한 폴더에서 실행합니다. 장비 목록, DPAPI 자격 증명, 감시 이력과 화면 설정은 "
-        "%LOCALAPPDATA%\\SamsungSwitchWatch에 보존됩니다. Viewer 폴더를 교체해도 자료는 유지되지만 "
+        "Viewer 프로그램은 %LOCALAPPDATA%\\Programs\\SamsungSwitchWatch\\Viewer에 설치합니다. "
+        "장비 목록, DPAPI 자격 증명, 감시 이력과 화면 설정은 별도 데이터 경로인 "
+        "%LOCALAPPDATA%\\SamsungSwitchWatch에 보존됩니다. Viewer를 업데이트해도 자료는 유지되지만 "
         "문제 재현과 지원을 단순하게 하려면 Agent와 같은 Release 사용을 권장합니다. API v4가 "
         "호환되면 세부 버전이 달라도 연결은 유지되고 경고만 표시됩니다.",
         "info",
     )
     add_callout(
         doc,
-        "Viewer가 실행되지 않는 경우",
+        "Viewer Setup 또는 Viewer가 실행되지 않는 경우",
         f"{VERSION}는 코드 서명되지 않아 SmartScreen이나 사내 EDR이 차단할 수 있습니다. ZIP을 완전히 "
-        "압축 해제하고 Viewer EXE와 제공된 DLL이 같은 폴더에 있는지 확인하세요. EDR·AppLocker·WDAC가 "
+        "압축 해제하고 Setup, Viewer EXE와 제공된 DLL이 같은 폴더에 있는지 확인하세요. EDR·AppLocker·WDAC가 "
         "차단하면 우회하지 말고 공식 ZIP의 버전·해시와 차단 기록을 보안 담당자에게 전달하세요.",
         "danger",
     )
     add_callout(
         doc,
-        "포터블 운영",
-        "공개 Viewer 패키지에는 설치 스크립트와 자동 시작 기능이 없습니다. 필요하면 사용자가 "
-        "직접 바로 가기를 만들고, 감시가 필요할 때 Viewer를 실행해 두세요.",
+        "사용자 전용 설치",
+        "Viewer Setup은 PowerShell, 인터넷, UAC와 관리자 권한 없이 고정 경로에 프로그램만 "
+        "교체합니다. 바탕 화면과 시작 메뉴 바로 가기는 갱신하지만 자동 시작은 등록하지 않습니다. "
+        "설치 완료 전 실패하면 기존 설치는 복구하고 최초 설치는 미설치 상태로 정리하며 임의의 "
+        "압축 해제 폴더는 삭제하지 않습니다.",
         "info",
+    )
+    add_callout(
+        doc,
+        "이전 설치 복구가 필요한 경우",
+        "Setup이 미완료 journal을 찾으면 설치/업데이트를 잠급니다. '이전 상태 복구'를 눌러 "
+        "복구 완료를 확인한 다음 설치/업데이트를 별도로 다시 누르세요. 복구 성공이 설치를 "
+        "자동으로 시작하지는 않습니다. 장비·연결·DPAPI·감시 데이터는 보존되고 Setup 전용 "
+        "journal과 증거 파일만 정리됩니다.",
+        "warning",
+    )
+    add_image(
+        doc,
+        images_dir / "00-viewer-setup.png",
+        width=4.8,
+        title="Viewer Setup 화면",
+        alt_text="인터넷과 관리자 권한 없이 현재 사용자 전용 경로에 설치하고 사용자 데이터를 보존하는 Viewer Setup 화면",
+        caption="그림 3. 사용자 전용 Viewer 설치 및 업데이트 화면",
     )
     add_heading(doc, "Viewer에서 Agent 연결", 2, heading_num_id)
     add_image(
@@ -1062,7 +1074,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=3.5,
         title="Agent 연결 창",
         alt_text="Agent PC 주소 하나와 자동 HTTPS 연결 단계, 연결 확인 및 저장 버튼을 보여 주는 연결 설정 창",
-        caption="그림 3. Agent 주소만 입력하는 연결 설정",
+        caption="그림 4. Agent 주소만 입력하는 연결 설정",
     )
     add_unnumbered_heading(
         doc,
@@ -1076,7 +1088,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=3.5,
         title="Agent 연결 실패와 지원 코드",
         alt_text="TCP 18443 연결 거부 단계와 선택 가능한 SWD1 지원 코드를 함께 표시하는 Viewer Agent 연결 실패 창",
-        caption="그림 4. Viewer Agent 연결 실패와 짧은 SWD1 지원 코드",
+        caption="그림 5. Viewer Agent 연결 실패와 짧은 SWD1 지원 코드",
     )
     add_bullets(
         doc,
@@ -1139,7 +1151,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=5.5,
         title="장비 관리 창",
         alt_text="장비명, 모델, IPv4, 계정 ID, 로그인 비밀번호, enable 비밀번호와 감시 설정을 입력하는 창",
-        caption="그림 5. Viewer가 보관하는 장비 및 계정 입력 화면",
+        caption="그림 6. Viewer가 보관하는 장비 및 계정 입력 화면",
     )
     add_unnumbered_heading(
         doc,
@@ -1181,7 +1193,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=4.35,
         title="장비 명령 실행 화면",
         alt_text="show port status를 입력하고 데모 스위치의 익명화된 결과를 확인하는 장비 명령 탭",
-        caption="그림 6. 한 줄 show 명령 실행과 메모리 내 결과 확인",
+        caption="그림 7. 한 줄 show 명령 실행과 메모리 내 결과 확인",
     )
     add_table(
         doc,
@@ -1281,7 +1293,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=5.2,
         title="Viewer 대시보드",
         alt_text="장비 목록, 선택 장비 상태, 최근 이벤트와 Viewer 감시 상태를 보여 주는 대시보드",
-        caption="그림 7. Viewer 중심 대시보드 전체 화면",
+        caption="그림 8. Viewer 중심 대시보드 전체 화면",
     )
     add_table(
         doc,
@@ -1319,7 +1331,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=3.25,
         title="항상 위 미니 창",
         alt_text="정상, 경고, 장애 수와 최근 문제를 보여 주는 작은 항상 위 창",
-        caption="그림 8. 반복 운영용 미니 창",
+        caption="그림 9. 반복 운영용 미니 창",
     )
     add_image(
         doc,
@@ -1327,7 +1339,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         width=3.45,
         title="장애 알림 팝업",
         alt_text="데모 업링크 포트 Down 장애와 발생 시각을 보여 주는 알림 팝업",
-        caption="그림 9. 새 장애 알림 팝업",
+        caption="그림 10. 새 장애 알림 팝업",
     )
     add_bullets(
         doc,
@@ -1345,7 +1357,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         doc,
         ["데이터", "위치", "보호/수명"],
         [
-            ("Viewer 프로그램", "사용자가 압축 해제한\n로컬 폴더", "포터블, 일반 사용자 권한으로 실행"),
+            ("Viewer 프로그램", "%LOCALAPPDATA%\\Programs\\\nSamsungSwitchWatch\\Viewer", "사용자 전용, 일반 사용자 권한으로 실행"),
             ("장비명·모델·IPv4", "Viewer 사용자 프로필", "현재 Windows 사용자 범위"),
             ("ID·로그인 PW·enable PW", "Viewer 사용자 프로필", "DPAPI CurrentUser 암호화"),
             ("주기 감시 기준 해시·이벤트", "Viewer 사용자 프로필", "원문 없이 로컬 저장"),
@@ -1417,6 +1429,13 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             ("ROLLBACK_JOURNAL_WRITE_FAILED / ROLLBACK_EVIDENCE_CLEANUP_FAILED", "journal 또는 복구 증거 정리 단계 실패. 아래 대상별 안전 코드를 확인하고 남은 기록·폴더는 보존"),
             ("ROLLBACK_STAGING_CLEANUP_FAILED / ROLLBACK_BACKUP_CLEANUP_FAILED", "현재 작업의 staging 또는 backup 자료 정리 실패. 수동 삭제 없이 익명 진단 전달"),
             ("ROLLBACK_FAILED_DIRECTORY_CLEANUP_FAILED / ROLLBACK_JOURNAL_CLEANUP_FAILED", "현재 작업의 failed 자료 또는 journal 정리·삭제 확인 실패. 설치는 잠긴 상태로 유지"),
+            ("VIEWER_SETUP_PACKAGE_INVALID", "Viewer ZIP 전체를 새 로컬 폴더에 다시 압축 해제하고 공식 Release 해시 확인"),
+            ("VIEWER_SETUP_VIEWER_RUNNING", "트레이에서 기존 Viewer를 완전히 종료한 뒤 설치/업데이트 재시도"),
+            ("VIEWER_SETUP_RECOVERY_REQUIRED", "Viewer 설치는 잠긴 상태. 이전 상태 복구 완료 확인 뒤 설치/업데이트를 별도로 실행"),
+            ("VIEWER_SETUP_ALREADY_RUNNING / VIEWER_SETUP_CANCELLED", "다른 Setup 작업 종료 또는 취소 뒤 복구 필요 표시를 먼저 확인"),
+            ("VIEWER_SETUP_PATH_INVALID / VIEWER_SETUP_PATH_NOT_WRITABLE / VIEWER_SETUP_INSTALL_WRITE_FAILED", "공식 ZIP 위치, LocalAppData 쓰기 권한과 EDR 차단 기록 확인"),
+            ("VIEWER_SETUP_SMOKE_FAILED / VIEWER_SETUP_LAUNCH_FAILED", "새 Viewer 자체점검 또는 실행 유지 실패. 이전 설치 복구 결과와 EDR 차단 확인"),
+            ("VIEWER_SETUP_ROLLBACK_FAILED", "반복 설치와 폴더 수동 삭제를 중지하고 남은 Setup journal·증거를 Windows 관리자에게 전달"),
             ("TARGET_NOT_ALLOWED", "장비 IPv4가 10/8, 172.16/12 또는 192.168/16인지 확인"),
             ("TCP_TIMEOUT", "Agent PC에서 장비 TCP/23 경로, ACL, 장비 Telnet 상태 확인"),
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
@@ -1527,7 +1546,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         [
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
             "Agent PC에서 SamsungSwitchWatch.Agent.Setup.exe를 실행합니다. 입력 없이 설치/업데이트를 진행합니다.",
-            "Viewer PC에서 새 Viewer 패키지의 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
+            "Viewer PC에서 새 Viewer 패키지의 SamsungSwitchWatch.Viewer.Setup.exe로 설치/업데이트를 실행합니다.",
             "Agent 연결, 장비 목록, 로그인 확인, 수집 진단, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
     )

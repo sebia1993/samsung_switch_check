@@ -661,9 +661,10 @@ Assert-DeploymentTest -Condition (-not ($viewerLauncher -match '(?im)^\s*powersh
 Assert-DeploymentTest -Condition (-not $viewerLauncher.Contains('-Verb RunAs')) `
     -Message 'Per-user Viewer launcher must not request administrator elevation.'
 Assert-DeploymentTest -Condition (
+    $build.Contains("'SamsungSwitchWatch.Viewer.Setup.exe'") -and
     $build.Contains("'SamsungSwitchWatch.Viewer.exe'") -and
     -not $build.Contains("'Install-or-Update-Viewer.cmd'")
-) -Message 'Public Viewer package must be portable and exclude the legacy CMD launcher.'
+) -Message 'Public Viewer package must use the native Setup EXE, include the Viewer runtime, and exclude the legacy CMD launcher.'
 Assert-DeploymentTest -Condition $build.Contains("'docs\SamsungSwitchWatch_User_Manual_KO.pdf'") `
     -Message 'Both release packages must include the final PDF user manual.'
 Assert-DeploymentTest -Condition (-not $build.Contains('SamsungSwitchWatch_User_Manual_KO.docx')) `

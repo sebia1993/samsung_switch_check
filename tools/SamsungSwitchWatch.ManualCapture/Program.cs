@@ -14,17 +14,21 @@ using SamsungSwitchWatch.Viewer.Services;
 using SamsungSwitchWatch.Viewer.ViewModels;
 using SamsungSwitchWatch.Viewer.Views;
 using AgentSetupWindow = SamsungSwitchWatch.Agent.Setup.MainWindow;
+using ViewerSetupDeployment = SamsungSwitchWatch.Viewer.Setup.Deployment;
+using ViewerSetupInfrastructure = SamsungSwitchWatch.Viewer.Setup.Infrastructure;
+using ViewerSetupWindow = SamsungSwitchWatch.Viewer.Setup.MainWindow;
 
 namespace SamsungSwitchWatch.ManualCapture;
 
 internal static class Program
 {
-    private const string ManualProductVersion = "0.11.3-poc";
+    private const string ManualProductVersion = "0.11.4-poc";
 
     private static readonly string[] ExpectedScreenshotNames =
     [
         "00-agent-setup.png",
         "00-agent-setup-recovery-failed.png",
+        "00-viewer-setup.png",
         "01-dashboard.png",
         "02-agent-connection.png",
         "02-agent-connection-failed.png",
@@ -253,6 +257,46 @@ internal static class Program
                         Thread.Sleep(20);
                     }
                 }
+            }
+
+            var viewerSetupFileSystem =
+                new ViewerSetupInfrastructure.PhysicalViewerSetupFileSystem();
+            var viewerSetupPaths = new ViewerSetupDeployment.ViewerSetupPaths(
+                Path.Combine(scratchDirectory, "ViewerPackage"),
+                Path.Combine(scratchDirectory, "ViewerInstall"),
+                Path.Combine(scratchDirectory, "ViewerData"),
+                Path.Combine(scratchDirectory, "ViewerOperations"),
+                Path.Combine(scratchDirectory, "Desktop", "Samsung Switch Watch.lnk"),
+                Path.Combine(scratchDirectory, "StartMenu", "Samsung Switch Watch.lnk"),
+                Path.Combine(scratchDirectory, "Startup", "Samsung Switch Watch.lnk"));
+            var viewerSetupOrchestrator =
+                new ViewerSetupDeployment.ViewerDeploymentOrchestrator(
+                    new ViewerSetupDeployment.ViewerPackageValidator(
+                        viewerSetupFileSystem),
+                    viewerSetupFileSystem,
+                    new ViewerSetupInfrastructure.WindowsViewerProcessManager(),
+                    new ViewerSetupInfrastructure.ViewerShutdownCoordinator(),
+                    new ViewerSetupInfrastructure.WindowsViewerShortcutManager(
+                        viewerSetupFileSystem),
+                    new ViewerSetupInfrastructure.WindowsPerUserDeploymentLock(),
+                    viewerSetupPaths);
+            using (var viewerSetupLifetime = new WindowLifetime(
+                       new ViewerSetupWindow(viewerSetupOrchestrator)
+                       {
+                           Width = 700,
+                           Height = 560,
+                           ShowInTaskbar = false,
+                           WindowStartupLocation = WindowStartupLocation.Manual,
+                           Left = 72,
+                           Top = 72
+                       }))
+            {
+                ShowAndLayout(viewerSetupLifetime.Window);
+                RefreshLayout(viewerSetupLifetime.Window);
+                Capture(
+                    viewerSetupLifetime.Window,
+                    Path.Combine(outputDirectory, "00-viewer-setup.png"),
+                    "인터넷과 관리자 권한 없이 현재 사용자 전용 경로에 설치하는 Viewer Setup의 실제 초기 화면");
             }
 
             using var dashboardLifetime = new WindowLifetime(

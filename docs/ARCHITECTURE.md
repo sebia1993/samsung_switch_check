@@ -141,16 +141,22 @@ Crockford Base32로 표시합니다. 코드는 읽기 전용으로 선택할 수
 
 ### Viewer PC
 
-Viewer ZIP은 설치 프로그램이 없는 포터블 배포물입니다.
+Viewer ZIP은 일반 사용자 권한의 네이티브 Setup을 포함합니다.
 
-1. Viewer ZIP을 항상 사용할 로컬 폴더에 완전히 압축 해제합니다.
-2. `SamsungSwitchWatch.Viewer.exe`를 실행합니다.
-3. Agent PC의 IPv4 또는 사내 DNS 이름을 입력하고 연결을 확인합니다. 같은 PC에서는
+1. Viewer ZIP을 로컬 임시 폴더에 완전히 압축 해제합니다.
+2. `SamsungSwitchWatch.Viewer.Setup.exe`를 실행합니다. 0.11.4 이후 Viewer는 Setup 요청으로
+   안전 종료하며, 프로토콜을 지원하지 않거나 종료에 실패한 경우만 수동 종료를 안내합니다.
+3. Setup이 패키지 해시, staging, backup, smoke와 실행 유지를 확인한 뒤
+   `%LOCALAPPDATA%\Programs\SamsungSwitchWatch\Viewer`에 현재 버전을 설치합니다.
+4. Setup이 설치된 `SamsungSwitchWatch.Viewer.exe`를 자동 실행합니다. Agent PC의 IPv4 또는
+   사내 DNS 이름을 입력합니다. 같은 PC에서는
    `localhost` 또는 `127.0.0.1`을 입력합니다.
 
-Viewer에는 UAC, PowerShell, CMD, 자동 시작 등록과 `Program Files` 설치 단계가 없습니다. 공개
-ZIP에는 PowerShell·CMD 설치 스크립트를 넣지 않으며, 저장소의 유지보수용 스크립트는 source-only
-자료입니다.
+Viewer Setup에는 UAC, PowerShell, CMD, 인터넷과 `Program Files` 설치 단계가 없습니다. 바탕
+화면과 시작 메뉴 바로 가기는 현재 사용자 범위로 갱신하지만 자동 시작은 등록하지 않습니다.
+`%LOCALAPPDATA%\SamsungSwitchWatch`의 설정·장비·DPAPI 자격 증명·감시 데이터는 프로그램 교체와
+분리하여 보존합니다. 공개 ZIP에는 PowerShell·CMD 설치 스크립트를 넣지 않으며, 저장소의
+유지보수용 스크립트는 source-only 자료입니다.
 
 ## 3. 사용자 입력부터 결과까지
 

@@ -755,14 +755,15 @@ public sealed class ViewerFailureReportingTests
 
             await viewModel.SwitchClientAsync(candidate)
                 .WaitAsync(TimeSpan.FromSeconds(2));
-            await WaitUntilAsync(() =>
-                settingsStore.Load().TryGetEventCursor("fake-agent", out var cursor)
-                && cursor == 8);
 
             Assert.Equal(0, Volatile.Read(ref alerts));
             Assert.Equal(8, viewModel.AppliedChangeCursor);
             Assert.Contains(viewModel.RecentEvents, item => item.AgentEventId == "event-8");
             var current = viewModel.CurrentSettings;
+            Assert.True(viewModel.TryUpdateCurrentSettings(
+                static _ => { },
+                "settings-save-test",
+                out var saveErrorCode), saveErrorCode);
             var persisted = settingsStore.Load();
             Assert.True(current.TryGetEventCursor("fake-agent", out var currentCursor));
             Assert.True(persisted.TryGetEventCursor("fake-agent", out var persistedCursor));

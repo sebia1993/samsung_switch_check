@@ -17,7 +17,7 @@ dotnet restore SamsungSwitchWatch.sln --locked-mode
 dotnet build SamsungSwitchWatch.sln -c Release --no-restore
 dotnet test SamsungSwitchWatch.sln -c Release --no-build
 .\scripts\validate.ps1 -Configuration Release
-.\scripts\build-release.ps1 -Version 0.11.3-poc
+.\scripts\build-release.ps1 -Version 0.11.4-poc
 ```
 
 Use the .NET 10 SDK. Release packages target `win-x64`, are self-contained, single-file, and untrimmed.
@@ -69,8 +69,12 @@ Regenerate the manual from `tools/build-user-manual.py` before a release wheneve
 - Do not commit generated `bin`, `obj`, `artifacts`, `release`, database, certificate or secret files.
 - `SamsungSwitchWatch.Agent.Setup.exe` is the only public Agent installation entrypoint. All
   PowerShell/CMD deployment scripts stay source-only for development and legacy recovery.
-- The Viewer release is portable: extract the ZIP and run `SamsungSwitchWatch.Viewer.exe`.
-  Do not add public install scripts, auto-start registration or an administrator requirement.
+- `SamsungSwitchWatch.Viewer.Setup.exe` is the only public Viewer installation entrypoint. It
+  installs per-user without UAC under `%LOCALAPPDATA%\Programs\SamsungSwitchWatch\Viewer`, preserves
+  `%LOCALAPPDATA%\SamsungSwitchWatch`, and never registers Viewer auto-start.
+- Viewer Setup must validate and stage the package before replacing the current version, restore the
+  previous managed installation on pre-commit failure, and never delete an arbitrary extraction or
+  download directory. PowerShell/CMD Viewer deployment scripts stay source-only for legacy recovery.
 - Preserve compatible Agent ProgramData configuration across transactional updates. Legacy trust
   and CIDR fields may be read for schema compatibility but must not control v0.11 runtime access.
 - Copy packages into protected staging and rehash them before swapping. If service quiescence,

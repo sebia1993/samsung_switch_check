@@ -71,6 +71,7 @@ public partial class App : Application
             return;
         }
         _singleInstance.ActivationRequested += (_, _) => Dispatcher.BeginInvoke(ShowDashboard);
+        _singleInstance.ShutdownRequested += (_, _) => Dispatcher.BeginInvoke(ExitApplication);
 
         _settingsStore = new ViewerSettingsStore();
         _settingsSaveCoordinator = new ViewerSettingsSaveCoordinator(
