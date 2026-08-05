@@ -11,6 +11,21 @@ public sealed class WindowsServiceManagerTests
     private const uint ServiceRunning = 0x00000004;
 
     [Fact]
+    public void CaptureAccess_UsesReadOnlyScmAndServiceRights()
+    {
+        Assert.Equal(0x00000001u, WindowsServiceManager.ScManagerConnectAccess);
+        Assert.Equal(0x00020005u, WindowsServiceManager.ServiceCaptureAccess);
+        const uint mutationRights =
+            0x00000002 | // SERVICE_CHANGE_CONFIG
+            0x00000010 | // SERVICE_START
+            0x00000020 | // SERVICE_STOP
+            0x00010000 | // DELETE
+            0x00040000 | // WRITE_DAC
+            0x00080000;  // WRITE_OWNER
+        Assert.Equal(0u, WindowsServiceManager.ServiceCaptureAccess & mutationRights);
+    }
+
+    [Fact]
     public void CreateDisabledRecoveryPolicy_RemovesActionsAndNonCrashRestart()
     {
         var policy = WindowsServiceManager.CreateDisabledRecoveryPolicy();

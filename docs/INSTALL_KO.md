@@ -2,23 +2,23 @@
 
 ## 1. 준비
 
-공식 GitHub `v0.11.1-poc` Release의 Assets에서 다음 두 파일만 받습니다.
+공식 GitHub `v0.11.2-poc` Release의 Assets에서 다음 두 파일만 받습니다.
 
-- `SamsungSwitchWatch-Agent-0.11.1-poc-win-x64.zip`
-- `SamsungSwitchWatch-Viewer-0.11.1-poc-win-x64.zip`
+- `SamsungSwitchWatch-Agent-0.11.2-poc-win-x64.zip`
+- `SamsungSwitchWatch-Viewer-0.11.2-poc-win-x64.zip`
 
 GitHub가 자동 표시하는 Source code ZIP과 tar.gz는 실행 패키지가 아닙니다. 두 ZIP은 Windows
 x64용 self-contained 빌드이므로 Python, PowerShell 모듈 또는 .NET을 온라인으로 설치하지
 않습니다. API v4가 호환되면 버전이 달라도 경고 후 연결하지만, 기능 차이와 운영 혼동을 줄이기
 위해 Agent와 Viewer는 같은 Release 조합을 권장합니다.
 
-`0.11.1-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
+`0.11.2-poc`는 코드 서명되지 않은 시험판입니다. SmartScreen, EDR, AppLocker 또는 WDAC가
 경고하거나 차단할 수 있으며, 보안 정책을 우회하지 말고 공식 Release와 파일 해시를 확인한
 뒤 사내 보안 담당자의 승인 절차를 따르십시오.
 
 Agent 설치·업데이트 실패 뒤 미완료 작업이 감지되면 Setup은 상태를 읽기 전용으로 확인하고
 `설치/업데이트`를 비활성화합니다. 구형 Setup을 실행하거나 설치를 반복하지 말고, 같은
-`0.11.1-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
+`0.11.2-poc` Agent ZIP의 Setup에서 별도의 `이전 상태 복구`를 사용하십시오. 복구 성공 뒤에는
 운영자가 `설치/업데이트`를 한 번 눌러 내부 사전 점검부터 새 작업을 별도로 시작해야 합니다.
 복구가 자동으로 설치를 이어서 실행하지는 않습니다.
 
@@ -168,7 +168,7 @@ Setup은 시작할 때 미완료 설치·업데이트 작업 기록을 변경하
 - 서비스 설치 뒤 준비 상태 확인이 실패하면 설치를 되돌리지 않고
   `AGENT_LOCAL_CONNECTION_UNCONFIRMED` 경고를 표시합니다. 파일·서비스 구성 실패와 구분하여
   반복 설치와 불필요한 rollback을 방지합니다.
-- `0.11.1-poc` Agent는 서비스 시작마다 새 RSA 인증서를 생성합니다. Windows Schannel용 임시
+- `0.11.2-poc` Agent는 서비스 시작마다 새 RSA 인증서를 생성합니다. Windows Schannel용 임시
   사용자 키 컨테이너는 프로세스 수명 동안만 사용하고 Agent 종료 시 제거합니다. 영구 Agent
   신원 파일, 인증서 지문과 페어링 토큰은 사용하지 않습니다.
 - rollback 프로그램 폴더 이동은 일시적 파일 잠금에 한해 최대 5회 제한적으로 다시
@@ -200,6 +200,13 @@ PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예
 생성되며 계정·주소·경로·명령·출력 원문을 포함하지 않습니다. CRC는 입력 오타 확인용일 뿐
 인증·페어링·암호화 기능이 아니므로 코드로 접속을 승인하거나 신원을 확인하지 마십시오.
 
+`SETUP_PATH_NOT_WRITABLE`이 표시되면 패키지나 로컬 HTTPS가 아니라 기존 Agent 제품 폴더의
+권한 또는 파일 상태를 확인하지 못한 것입니다. 잠시 후 한 번만 다시 시도하고 반복되면 화면의
+지원 코드만 전달하십시오. `SETUP_PATH_UNTRUSTED` 또는 `SETUP_PATH_INVALID`는 반복 설치하지
+마십시오. 어떤 경우에도 제품 폴더나 ACL을 수동으로 삭제·변경하지 마십시오. `0.11.2-poc`는
+검사 중 잠시 사라진 하위 파일을 한 번만 다시 확인합니다. 다시 확인해도 실제로 사라진 비루트
+항목은 건너뛰며, 그 밖의 계속되는 접근·I/O 오류는 위 코드로 분류합니다.
+
 복구 대기 또는 실패 상태에서는 `%ProgramFiles%\SamsungSwitchWatch` 아래의
 `Agent.__staging_*`, `Agent.__backup_*`, `Agent.__failed_*` 폴더와
 `%ProgramData%\SamsungSwitchWatch-Operations`의 작업 기록을 수동으로 삭제·이동·이름
@@ -209,7 +216,7 @@ PC·사용자명, 계정, 인증서 정보, 절대 경로, 방화벽 원문, 예
 
 복구 완료 메시지가 나타났다면 같은 실패 화면에서 설치를 자동으로 다시 시작하지 않습니다.
 Setup을 닫지 않아도 되지만, 상태가 `복구 필요 없음`으로 바뀌고 설치 버튼이 다시 활성화됐는지
-확인한 뒤 `0.11.1-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. Setup이 내부
+확인한 뒤 `0.11.2-poc` 패키지의 `설치/업데이트`를 한 번만 다시 실행하십시오. Setup이 내부
 사전 점검부터 새 설치를 수행합니다. 같은 readiness 분류가 반복되면 재설치를 계속 반복하지
 말고 SWD1 코드 또는 `진단정보 복사` 결과를 전달하십시오.
 

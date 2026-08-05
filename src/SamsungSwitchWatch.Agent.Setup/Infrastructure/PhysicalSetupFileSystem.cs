@@ -116,7 +116,8 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
             return current.Exists;
         }
         catch (Exception exception) when (
-            exception is ArgumentException or NotSupportedException or PathTooLongException)
+            exception is UnauthorizedAccessException or System.Security.SecurityException ||
+            exception is IOException and not PathTooLongException)
         {
             return false;
         }
@@ -432,8 +433,9 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
             allowedOwners.Add(CreateServiceSid(SetupConstants.ServiceName));
         }
 
+        var rootPath = Path.GetFullPath(path);
         var pending = new Queue<string>();
-        pending.Enqueue(Path.GetFullPath(path));
+        pending.Enqueue(rootPath);
         var checkedEntries = 0;
         while (pending.Count > 0)
         {
@@ -445,40 +447,125 @@ public sealed class PhysicalSetupFileSystem : ISetupFileSystem
                     "Agent 제품 폴더 항목이 안전 점검 한도를 초과했습니다.");
             }
 
-            var attributes = File.GetAttributes(current);
-            if (IsReparsePoint(attributes))
+            var children = InspectExistingPath(
+                rootPath,
+                current,
+                allowedOwners,
+                validateChildren);
+            if (children is null)
             {
-                throw new SetupException(
-                    SetupErrorCodes.PathUntrusted,
-                    "Agent 제품 폴더 내부에 재분석 지점 또는 연결 파일이 있어 사용할 수 없습니다.");
+                continue;
             }
 
-            FileSystemSecurity security = Directory.Exists(current)
-                ? new DirectoryInfo(current).GetAccessControl(
-                    AccessControlSections.Owner | AccessControlSections.Access)
-                : new FileInfo(current).GetAccessControl(
-                    AccessControlSections.Owner | AccessControlSections.Access);
-            var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier ??
-                        throw new SetupException(
-                            SetupErrorCodes.PathUntrusted,
-                            "Agent 제품 폴더 소유자를 확인하지 못했습니다.");
-            if (!IsAllowedOwner(owner, allowedOwners) ||
-                HasUntrustedWriteAccess(security, allowedOwners))
+            foreach (var child in children)
             {
-                throw new SetupException(
-                    SetupErrorCodes.PathUntrusted,
-                    "Agent 제품 폴더 소유권 또는 쓰기 권한이 안전 계약과 일치하지 않습니다.");
-            }
-
-            if (validateChildren && Directory.Exists(current))
-            {
-                foreach (var child in Directory.EnumerateFileSystemEntries(current))
-                {
-                    pending.Enqueue(child);
-                }
+                pending.Enqueue(child);
             }
         }
     }
+
+    private static IReadOnlyList<string>? InspectExistingPath(
+        string rootPath,
+        string current,
+        IReadOnlyCollection<SecurityIdentifier> allowedOwners,
+        bool validateChildren)
+    {
+        try
+        {
+            return RetryTransientIoOnce(() =>
+            {
+                var attributes = File.GetAttributes(current);
+                if (IsReparsePoint(attributes))
+                {
+                    throw new SetupException(
+                        SetupErrorCodes.PathUntrusted,
+                        "Agent 제품 폴더 내부에 재분석 지점 또는 연결 파일이 있어 사용할 수 없습니다.");
+                }
+
+                var isDirectory = (attributes & FileAttributes.Directory) != 0;
+                FileSystemSecurity security = isDirectory
+                    ? new DirectoryInfo(current).GetAccessControl(
+                        AccessControlSections.Owner | AccessControlSections.Access)
+                    : new FileInfo(current).GetAccessControl(
+                        AccessControlSections.Owner | AccessControlSections.Access);
+                var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier ??
+                            throw new SetupException(
+                                SetupErrorCodes.PathUntrusted,
+                                "Agent 제품 폴더 소유자를 확인하지 못했습니다.");
+                if (!IsAllowedOwner(owner, allowedOwners) ||
+                    HasUntrustedWriteAccess(security, allowedOwners))
+                {
+                    throw new SetupException(
+                        SetupErrorCodes.PathUntrusted,
+                        "Agent 제품 폴더 소유권 또는 쓰기 권한이 안전 계약과 일치하지 않습니다.");
+                }
+
+                return validateChildren && isDirectory
+                    ? Directory.EnumerateFileSystemEntries(current).ToArray()
+                    : [];
+            });
+        }
+        catch (Exception exception) when (
+            IsVanishedNonRootEntry(rootPath, current, exception))
+        {
+            EnsureInspectionRootAvailable(rootPath, exception);
+            return null;
+        }
+    }
+
+    internal static void EnsureInspectionRootAvailable(
+        string rootPath,
+        Exception? innerException = null)
+    {
+        if (!Directory.Exists(rootPath))
+        {
+            throw new SetupException(
+                SetupErrorCodes.PathNotWritable,
+                "Agent 제품 폴더의 상태를 계속 확인할 수 없습니다.",
+                innerException);
+        }
+
+        var attributes = File.GetAttributes(rootPath);
+        if ((attributes & FileAttributes.Directory) == 0)
+        {
+            throw new SetupException(
+                SetupErrorCodes.PathNotWritable,
+                "Agent 제품 폴더의 상태를 계속 확인할 수 없습니다.",
+                innerException);
+        }
+
+        if (IsReparsePoint(attributes))
+        {
+            throw new SetupException(
+                SetupErrorCodes.PathUntrusted,
+                "Agent 제품 폴더가 연결 또는 재분석 지점으로 바뀌어 사용할 수 없습니다.",
+                innerException);
+        }
+    }
+
+    internal static T RetryTransientIoOnce<T>(Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        try
+        {
+            return action();
+        }
+        catch (IOException)
+        {
+            // A running Agent or endpoint-security product can briefly replace
+            // a product file while preflight is inspecting it. Retry once only.
+            return action();
+        }
+    }
+
+    internal static bool IsVanishedNonRootEntry(
+        string rootPath,
+        string current,
+        Exception exception) =>
+        exception is FileNotFoundException or DirectoryNotFoundException &&
+        !SamePath(rootPath, current) &&
+        !File.Exists(current) &&
+        !Directory.Exists(current);
 
     internal static SecurityIdentifier CreateServiceSid(string serviceName)
     {

@@ -6,7 +6,7 @@
 ## 1. 반입 파일과 버전
 
 - [ ] 동일 GitHub Release에서 Agent ZIP과 Viewer ZIP을 받음
-- [ ] Agent와 Viewer 파일명이 같은 `0.11.1-poc` 버전을 표시함
+- [ ] Agent와 Viewer 파일명이 같은 `0.11.2-poc` 버전을 표시함
 - [ ] 두 ZIP의 SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교함
 - [ ] Agent ZIP에 `SamsungSwitchWatch.Agent.Setup.exe`와 Agent 런타임 파일이 있음
 - [ ] Viewer ZIP에 `SamsungSwitchWatch.Viewer.exe`와 Viewer 런타임 파일이 있음

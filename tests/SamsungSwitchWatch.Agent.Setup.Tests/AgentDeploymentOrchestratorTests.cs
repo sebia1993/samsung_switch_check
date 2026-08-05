@@ -1430,6 +1430,116 @@ public sealed class AgentDeploymentOrchestratorTests
     }
 
     [Fact]
+    public async Task Diagnostics_PathAccessFailureIsClassifiedAndKeepsServiceState()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.PathValidationException =
+            new UnauthorizedAccessException("sensitive path detail");
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.PathNotWritable, result.Code);
+        Assert.Contains(result.Steps, step => step.Code == "SERVICE_RUNNING");
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains("sensitive", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(
+            fixture.Services.Operations,
+            operation => operation is "install" or "start" or "stop" or "restore");
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task Diagnostics_PathIoFailureIsClassifiedWithoutMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.FileSystem.PathValidationException =
+            new IOException("sensitive io detail");
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.PathNotWritable, result.Code);
+        Assert.Contains(result.Steps, step => step.Code == "SERVICE_NOT_INSTALLED");
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains("sensitive", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain("install", fixture.Services.Operations);
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+    }
+
+    [Fact]
+    public async Task Diagnostics_PathFormatFailureIsClassified()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateFreshFixture(folder);
+        fixture.FileSystem.PathValidationException =
+            new ArgumentException("sensitive path format");
+        var diagnostics = new SetupDiagnosticsService(
+            new AgentPackageValidator(fixture.FileSystem),
+            fixture.FileSystem,
+            fixture.Services,
+            fixture.Firewall,
+            new FakeHealthProbe(true),
+            new FakeAdministratorChecker(),
+            fixture.Paths);
+
+        var result = await diagnostics.RunAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.PathInvalid, result.Code);
+        Assert.DoesNotContain(
+            result.Steps,
+            step => step.Message.Contains("sensitive", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task DeployAsync_PathAccessFailureIsClassifiedBeforeMutation()
+    {
+        using var folder = new TemporaryFolder();
+        var fixture = CreateUpgradeFixture(folder);
+        fixture.FileSystem.PathValidationException =
+            new UnauthorizedAccessException("sensitive deployment detail");
+
+        var result = await fixture.CreateOrchestrator(ready: true).DeployAsync(
+            SetupConstants.CreateAutomaticRequest(),
+            CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(SetupErrorCodes.PathNotWritable, result.Code);
+        Assert.DoesNotContain(
+            fixture.Services.Operations,
+            operation => operation is "install" or "start" or "stop" or "restore");
+        Assert.DoesNotContain("apply", fixture.Firewall.Operations);
+        Assert.False(new DeploymentJournalStore(fixture.FileSystem, fixture.Paths).Exists);
+    }
+
+    [Fact]
     public async Task Diagnostics_UnexpectedHealthFailurePreservesSafeStageAndCategory()
     {
         using var folder = new TemporaryFolder();

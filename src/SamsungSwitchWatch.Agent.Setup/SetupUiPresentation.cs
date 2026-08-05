@@ -59,10 +59,27 @@ internal static class SetupInstallCompletionPolicy
 
         if (!result.Succeeded)
         {
+            var guidance = result.Code switch
+            {
+                SetupErrorCodes.PathInvalid =>
+                    "Agent 설치 경로 형식을 확인하지 못했습니다. HTTPS나 방화벽 문제가 아닙니다. " +
+                    "설치를 반복하지 말고 지원 코드만 전달하세요.",
+                SetupErrorCodes.PathUntrusted =>
+                    "기존 Agent 제품 폴더의 소유권 또는 연결 상태가 안전 기준과 다릅니다. " +
+                    "폴더를 수동으로 변경하지 말고 지원 코드만 전달하세요.",
+                SetupErrorCodes.PathNotWritable =>
+                    "기존 Agent 제품 폴더의 권한 또는 파일 상태를 확인하지 못했습니다. " +
+                    "HTTPS나 방화벽 문제가 아닙니다. 잠시 후 한 번만 다시 시도하고, 반복되면 지원 코드만 전달하세요.",
+                SetupErrorCodes.ServiceFailed =>
+                    "Windows 서비스 정보를 확인하거나 변경하지 못했습니다. " +
+                    "설치를 반복하지 말고 지원 코드만 전달하세요.",
+                _ =>
+                    "설치에 실패했습니다. 아래 실패 단계와 지원 코드를 확인하세요."
+            };
             return new SetupInstallCompletionState(
                 SetupInstallCompletionSeverity.Error,
                 $"설치 실패 · {result.Code}",
-                "설치에 실패했습니다. 아래 실패 단계와 지원 코드를 확인하세요.");
+                guidance);
         }
 
         var warnings = result.Steps
@@ -691,6 +708,8 @@ internal static class SetupFieldDiagnosticFormatter
             "FIREWALL_OVERLAP_PROTECTED",
             "FIREWALL_GATE_READY",
             "SERVICE_FOUND",
+            "SERVICE_RUNNING",
+            "SERVICE_STOPPED",
             "SERVICE_NOT_INSTALLED",
             "FIREWALL_EXACT",
             "FIREWALL_UPDATE_REQUIRED",
@@ -1103,6 +1122,16 @@ internal static class SetupFieldDiagnosticFormatter
         if (HasStage(stages, "SERVICE_CONFIGURED"))
         {
             return "CONFIGURED";
+        }
+
+        if (HasStage(stages, "SERVICE_RUNNING"))
+        {
+            return "RUNNING";
+        }
+
+        if (HasStage(stages, "SERVICE_STOPPED"))
+        {
+            return "STOPPED";
         }
 
         if (HasStage(stages, "SERVICE_NOT_INSTALLED"))

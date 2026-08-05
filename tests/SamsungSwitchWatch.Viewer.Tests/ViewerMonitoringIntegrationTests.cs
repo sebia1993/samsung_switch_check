@@ -521,9 +521,16 @@ public sealed class ViewerMonitoringIntegrationTests
             {
                 await viewModel.InitializeAsync();
                 await WaitUntilAsync(() =>
-                    Assert.Single(viewModel.Devices).Capabilities.Count(item =>
-                        item.State == "Unavailable"
-                        && item.ErrorCode == "COMMAND_TIMEOUT") == 2);
+                {
+                    var current = Assert.Single(viewModel.Devices);
+                    return current.Capabilities.Count(item =>
+                               item.State == "Unavailable"
+                               && item.ErrorCode == "COMMAND_TIMEOUT") == 2
+                           && current.Health == DeviceHealth.Warning
+                           && current.CollectionState == "Degraded"
+                           && current.CollectionErrorCode == "COMMAND_TIMEOUT"
+                           && monitoringStore.GetActiveFailureCode(current.Id) is null;
+                });
 
                 var device = Assert.Single(viewModel.Devices);
                 Assert.Equal(DeviceHealth.Warning, device.Health);

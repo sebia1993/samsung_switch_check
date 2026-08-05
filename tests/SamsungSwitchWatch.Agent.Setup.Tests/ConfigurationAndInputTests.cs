@@ -252,4 +252,70 @@ public sealed class ConfigurationAndInputTests
     {
         Assert.False(Ipv4Input.IsCanonicalPrivateCidr(input));
     }
+
+    [Theory]
+    [InlineData("unauthorized", SetupErrorCodes.PathNotWritable)]
+    [InlineData("security", SetupErrorCodes.PathNotWritable)]
+    [InlineData("io", SetupErrorCodes.PathNotWritable)]
+    [InlineData("argument", SetupErrorCodes.PathInvalid)]
+    [InlineData("unsupported", SetupErrorCodes.PathInvalid)]
+    [InlineData("too-long", SetupErrorCodes.PathInvalid)]
+    public void DeploymentPathValidation_MapsExpectedEnvironmentFailures(
+        string failure,
+        string expectedCode)
+    {
+        var fileSystem = new TestFileSystem
+        {
+            PathValidationException = failure switch
+            {
+                "unauthorized" => new UnauthorizedAccessException("private"),
+                "security" => new System.Security.SecurityException("private"),
+                "io" => new IOException("private"),
+                "argument" => new ArgumentException("private"),
+                "unsupported" => new NotSupportedException("private"),
+                "too-long" => new PathTooLongException("private"),
+                _ => throw new ArgumentOutOfRangeException(nameof(failure))
+            }
+        };
+        var paths = new DeploymentPaths("package", "install", "data", "operations");
+
+        var exception = Assert.Throws<SetupException>(() =>
+            SetupDiagnosticsService.ValidateDeploymentPathsForInstall(
+                fileSystem,
+                paths,
+                ServiceSnapshot.Missing,
+                []));
+
+        Assert.Equal(expectedCode, exception.Code);
+        Assert.DoesNotContain("private", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("argument")]
+    [InlineData("unsupported")]
+    [InlineData("too-long")]
+    public void DeploymentParentProbe_PreservesInvalidPathClassification(string failure)
+    {
+        var fileSystem = new TestFileSystem
+        {
+            CanCreateException = failure switch
+            {
+                "argument" => new ArgumentException("private"),
+                "unsupported" => new NotSupportedException("private"),
+                "too-long" => new PathTooLongException("private"),
+                _ => throw new ArgumentOutOfRangeException(nameof(failure))
+            }
+        };
+        var paths = new DeploymentPaths("package", "install", "data", "operations");
+
+        var exception = Assert.Throws<SetupException>(() =>
+            SetupDiagnosticsService.ValidateDeploymentPathsForInstall(
+                fileSystem,
+                paths,
+                ServiceSnapshot.Missing,
+                []));
+
+        Assert.Equal(SetupErrorCodes.PathInvalid, exception.Code);
+        Assert.DoesNotContain("private", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }
