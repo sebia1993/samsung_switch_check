@@ -4,6 +4,17 @@ namespace SamsungSwitchWatch.Core.Tests;
 
 public sealed class ReadOnlyQueryPolicyTests
 {
+    [Fact]
+    public void CommandTimeoutDefaults_UseThirtySecondIdleAndNinetySecondHardCap()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(30), ReadOnlyQueryPolicy.CommandIdleTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), ReadOnlyQueryPolicy.CommandHardTimeout);
+        Assert.Equal(ReadOnlyQueryPolicy.CommandIdleTimeout, ReadOnlyQueryPolicy.CommandTimeout);
+        Assert.All(
+            Ies4224GpProfile.Create().Commands,
+            command => Assert.Equal(ReadOnlyQueryPolicy.CommandIdleTimeout, command.Timeout));
+    }
+
     [Theory]
     [InlineData("show port status")]
     [InlineData("show interfaces status")]

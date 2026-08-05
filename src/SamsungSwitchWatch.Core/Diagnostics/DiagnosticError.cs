@@ -4,7 +4,20 @@ public sealed record DiagnosticError(
     string Code,
     string Stage,
     string Message,
-    bool IsRetryable = false);
+    bool IsRetryable = false)
+{
+    /// <summary>
+    /// Gets bounded, sanitized command-progress information when a Telnet
+    /// command fails. Endpoint, credential, command and output values are
+    /// deliberately excluded.
+    /// </summary>
+    public CommandFailureTelemetry? CommandTelemetry { get; init; }
+}
+
+public sealed record CommandFailureTelemetry(
+    long ElapsedMs,
+    bool ReceivedOutput,
+    int PagerCount);
 
 public class SwitchWatchException : Exception
 {

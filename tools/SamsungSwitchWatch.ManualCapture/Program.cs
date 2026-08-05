@@ -19,7 +19,7 @@ namespace SamsungSwitchWatch.ManualCapture;
 
 internal static class Program
 {
-    private const string ManualProductVersion = "0.11.0-poc";
+    private const string ManualProductVersion = "0.11.1-poc";
 
     private static readonly string[] ExpectedScreenshotNames =
     [
@@ -418,7 +418,7 @@ internal static class Program
             using (var miniLifetime = new WindowLifetime(
                        new MiniWindow(viewModel, true)
                        {
-                           Width = 360,
+                           Width = 420,
                            Height = 220,
                            ShowInTaskbar = false,
                            WindowStartupLocation = WindowStartupLocation.Manual,

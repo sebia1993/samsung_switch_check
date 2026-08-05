@@ -1,4 +1,5 @@
 using SamsungSwitchWatch.Core.Diagnostics;
+using SamsungSwitchWatch.Core.Profiles;
 
 namespace SamsungSwitchWatch.Core.Telnet;
 
@@ -69,6 +70,14 @@ public sealed record TelnetClientOptions(
     int MaximumWireBytes = 2 * 1024 * 1024,
     int DetectionWindowCharacters = 16 * 1024)
 {
+    public TimeSpan CommandHardTimeout { get; init; } = ReadOnlyQueryPolicy.CommandHardTimeout;
+
+    public int MaximumPagingAdvances { get; init; } = 32;
+
+    public ushort TerminalWidth { get; init; } = 160;
+
+    public ushort TerminalHeight { get; init; } = 200;
+
     public TimeSpan SessionSafetyMargin { get; init; } = TimeSpan.FromSeconds(15);
 
     public int SessionCloseRetryCount { get; init; } = 1;

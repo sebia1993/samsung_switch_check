@@ -108,7 +108,7 @@ public partial class DeviceManagementWindow : Window
         MonitoringCheckBox.IsChecked = false;
         MonitoringCheckBox.IsEnabled = false;
         PasswordHintText.Text = "새 장비는 로그인 PW가 필요합니다.";
-        ResultText.Text = "장비 IP와 계정을 입력한 뒤 접속 시험 또는 저장을 선택하세요.";
+        ResultText.Text = "장비 IP와 계정을 입력한 뒤 로그인 확인 또는 저장을 선택하세요.";
         DeleteButton.IsEnabled = false;
         DisplayNameTextBox.Focus();
     }
@@ -165,10 +165,10 @@ public partial class DeviceManagementWindow : Window
             ? "저장된 계정을 읽을 수 없습니다. 로그인 ID와 PW를 다시 입력해 주세요."
             : "변경하지 않으면 저장된 로그인 PW를 유지합니다.";
         ResultText.Text = credentialCorrupt
-            ? "저장된 계정 보호 데이터가 손상되었거나 다른 Windows 사용자에게서 복사되었습니다. 계정을 다시 입력하고 접속 시험해 주세요."
+            ? "저장된 계정 보호 데이터가 손상되었거나 다른 Windows 사용자에게서 복사되었습니다. 계정을 다시 입력하고 로그인 확인해 주세요."
             : profile.ConnectionVerified
-            ? $"마지막 접속 시험 성공 · {profile.LastConnectionTestUtc?.LocalDateTime:yyyy-MM-dd HH:mm:ss}"
-            : $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}";
+            ? $"마지막 로그인 확인 성공 · {profile.LastConnectionTestUtc?.LocalDateTime:yyyy-MM-dd HH:mm:ss}"
+            : $"로그인 미확인 · {profile.LastConnectionTestCode ?? "확인 필요"}";
         DeleteButton.IsEnabled = true;
     }
 
@@ -196,7 +196,7 @@ public partial class DeviceManagementWindow : Window
             return;
         }
 
-        SetBusy(true, "접속 시험 중…");
+        SetBusy(true, "로그인 확인 중…");
         try
         {
             var result = await _dashboard.TestManagedDeviceAsync(draft);
@@ -209,14 +209,14 @@ public partial class DeviceManagementWindow : Window
                 _lastTestCode = "CONNECTION_TEST_FAILED";
                 _lastTestUtc = DateTimeOffset.UtcNow;
                 MonitoringCheckBox.IsChecked = false;
-                ShowResult("접속 시험이 실패했습니다. 장비는 저장할 수 있지만 감시는 꺼집니다.", false);
+                ShowResult("로그인 확인이 실패했습니다. 장비는 저장할 수 있지만 감시는 꺼집니다.", false);
                 return;
             }
             _successfulTestSignature = BuildConnectionSignature(draft);
             _failedTestSignature = null;
             _lastTestCode = "OK";
             _lastTestUtc = DateTimeOffset.UtcNow;
-            ShowResult($"접속 성공 · 권한 {result.Privilege} · {result.DurationMs:N0}ms", true);
+            ShowResult($"로그인 확인 성공 · 권한 {result.Privilege} · {result.DurationMs:N0}ms", true);
         }
         catch (Exception exception)
         {
@@ -243,7 +243,7 @@ public partial class DeviceManagementWindow : Window
                     "device-management-load",
                     code);
             }
-            ShowResult($"접속 실패 · {ViewerConnectionMessages.ForCode(code)} ({code})", false);
+            ShowResult($"로그인 확인 실패 · {ViewerConnectionMessages.ForCode(code)} ({code})", false);
         }
         finally
         {
@@ -344,7 +344,7 @@ public partial class DeviceManagementWindow : Window
             ShowResult(
                 saved.ConnectionVerified
                     ? "장비를 저장했습니다."
-                    : "장비를 저장했습니다. 접속 시험 전까지 주기 감시는 꺼집니다.",
+                    : "장비를 저장했습니다. 로그인 확인 전까지 주기 감시는 꺼집니다.",
                 true);
         }
         catch (Exception exception)

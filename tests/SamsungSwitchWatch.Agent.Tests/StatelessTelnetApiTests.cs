@@ -224,6 +224,136 @@ public sealed class StatelessTelnetApiTests
         Assert.DoesNotContain("192.168.20.10", body, StringComparison.Ordinal);
         Assert.DoesNotContain("login-secret", body, StringComparison.Ordinal);
         Assert.DoesNotContain("show system", body, StringComparison.Ordinal);
+        using var payload = JsonDocument.Parse(body);
+        var error = payload.RootElement.GetProperty("error");
+        Assert.Equal(2, error.EnumerateObject().Count());
+        Assert.False(error.TryGetProperty("details", out _));
+    }
+
+    [Theory]
+    [InlineData("command-write")]
+    [InlineData("command-idle")]
+    [InlineData("command-hard-limit")]
+    [InlineData("pager-limit")]
+    [InlineData("telnet-session")]
+    public async Task Execute_CommandTimeoutReturnsOnlyAllowlistedSanitizedStage(
+        string stage)
+    {
+        const string sensitiveMessage =
+            "192.168.20.10 login-secret show system C:\\private\\capture.txt";
+        await using var host = await TestAgentHost.StartAsync(
+            new FailingExecutor(new SwitchWatchException(
+                new DiagnosticError(
+                    ErrorCodes.CommandTimeout,
+                    stage,
+                    sensitiveMessage))));
+
+        using var response = await PostExecuteAsync(host, ValidExecute("show system"));
+        var body = await response.Content.ReadAsStringAsync();
+        using var payload = JsonDocument.Parse(body);
+        var error = payload.RootElement.GetProperty("error");
+        var details = error.GetProperty("details");
+
+        Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
+        Assert.Equal("COMMAND_TIMEOUT", error.GetProperty("code").GetString());
+        Assert.Equal("Switch command timed out.", error.GetProperty("message").GetString());
+        Assert.Equal(stage, details.GetProperty("stage").GetString());
+        Assert.Equal(["stage"], details.EnumerateObject().Select(value => value.Name));
+        var legacy = JsonSerializer.Deserialize<LegacyErrorEnvelope>(
+            body,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.NotNull(legacy);
+        Assert.Equal("COMMAND_TIMEOUT", legacy.Error.Code);
+        Assert.Equal("Switch command timed out.", legacy.Error.Message);
+        Assert.DoesNotContain("192.168.20.10", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("login-secret", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("show system", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("capture.txt", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Execute_CommandTimeoutOmitsDetailsForUntrustedStage()
+    {
+        var diagnostic = new DiagnosticError(
+            ErrorCodes.CommandTimeout,
+            "command-idle/192.168.20.10/show system",
+            "login-secret")
+        {
+            CommandTelemetry = new CommandFailureTelemetry(30_000, true, 2)
+        };
+        await using var host = await TestAgentHost.StartAsync(
+            new FailingExecutor(new SwitchWatchException(diagnostic)));
+
+        using var response = await PostExecuteAsync(host, ValidExecute("show system"));
+        var body = await response.Content.ReadAsStringAsync();
+        using var payload = JsonDocument.Parse(body);
+        var error = payload.RootElement.GetProperty("error");
+
+        Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
+        Assert.Equal("COMMAND_TIMEOUT", error.GetProperty("code").GetString());
+        Assert.Equal("Switch command timed out.", error.GetProperty("message").GetString());
+        Assert.Equal(2, error.EnumerateObject().Count());
+        Assert.False(error.TryGetProperty("details", out _));
+        Assert.DoesNotContain("192.168.20.10", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("login-secret", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("show system", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Execute_CommandTimeoutReturnsBoundedProgressTelemetry()
+    {
+        var diagnostic = new DiagnosticError(
+            ErrorCodes.CommandTimeout,
+            "command-idle",
+            "192.168.20.10 login-secret show system")
+        {
+            CommandTelemetry = new CommandFailureTelemetry(30_000, true, 2)
+        };
+        await using var host = await TestAgentHost.StartAsync(
+            new FailingExecutor(new SwitchWatchException(diagnostic)));
+
+        using var response = await PostExecuteAsync(host, ValidExecute("show system"));
+        var body = await response.Content.ReadAsStringAsync();
+        using var payload = JsonDocument.Parse(body);
+        var error = payload.RootElement.GetProperty("error");
+        var details = error.GetProperty("details");
+
+        Assert.Equal(HttpStatusCode.GatewayTimeout, response.StatusCode);
+        Assert.Equal("COMMAND_TIMEOUT", error.GetProperty("code").GetString());
+        Assert.Equal("Switch command timed out.", error.GetProperty("message").GetString());
+        Assert.Equal("command-idle", details.GetProperty("stage").GetString());
+        Assert.Equal(30_000, details.GetProperty("elapsedMs").GetInt64());
+        Assert.True(details.GetProperty("receivedOutput").GetBoolean());
+        Assert.Equal(2, details.GetProperty("pagerCount").GetInt32());
+        Assert.Equal(
+            ["stage", "elapsedMs", "receivedOutput", "pagerCount"],
+            details.EnumerateObject().Select(value => value.Name));
+        Assert.DoesNotContain("192.168.20.10", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("login-secret", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("show system", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Execute_CommandTimeoutOmitsInvalidNumericTelemetry()
+    {
+        var diagnostic = new DiagnosticError(
+            ErrorCodes.CommandTimeout,
+            "pager-limit",
+            "safe")
+        {
+            CommandTelemetry = new CommandFailureTelemetry(-1, false, -1)
+        };
+        await using var host = await TestAgentHost.StartAsync(
+            new FailingExecutor(new SwitchWatchException(diagnostic)));
+
+        using var response = await PostExecuteAsync(host, ValidExecute("show system"));
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var details = payload.RootElement.GetProperty("error").GetProperty("details");
+
+        Assert.Equal("pager-limit", details.GetProperty("stage").GetString());
+        Assert.False(details.GetProperty("receivedOutput").GetBoolean());
+        Assert.False(details.TryGetProperty("elapsedMs", out _));
+        Assert.False(details.TryGetProperty("pagerCount", out _));
     }
 
     [Fact]
@@ -309,4 +439,8 @@ public sealed class StatelessTelnetApiTests
             CancellationToken cancellationToken = default) =>
             Task.FromException<TelnetApiResult>(exception);
     }
+
+    private sealed record LegacyErrorEnvelope(LegacyError Error);
+
+    private sealed record LegacyError(string Code, string Message);
 }

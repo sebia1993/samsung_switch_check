@@ -151,9 +151,23 @@ public sealed class ErrorHandlingMiddleware(
         catch (AgentOperationException exception)
         {
             context.Response.StatusCode = exception.StatusCode;
+            if (exception.Details is null)
+            {
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = new { code = exception.Code, message = exception.SafeMessage }
+                }, cancellationToken: context.RequestAborted);
+                return;
+            }
+
             await context.Response.WriteAsJsonAsync(new
             {
-                error = new { code = exception.Code, message = exception.SafeMessage }
+                error = new
+                {
+                    code = exception.Code,
+                    message = exception.SafeMessage,
+                    details = exception.Details
+                }
             }, cancellationToken: context.RequestAborted);
         }
         catch (BadHttpRequestException)

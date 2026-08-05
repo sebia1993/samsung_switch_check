@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace SamsungSwitchWatch.Agent.Domain;
 
 /// <summary>
@@ -31,9 +33,29 @@ public static class AgentErrorCodes
 public sealed class AgentOperationException(
     string code,
     string safeMessage,
-    int statusCode = 400) : Exception(safeMessage)
+    int statusCode = 400,
+    AgentErrorDetails? details = null) : Exception(safeMessage)
 {
     public string Code { get; } = code;
     public string SafeMessage { get; } = safeMessage;
     public int StatusCode { get; } = statusCode;
+    public AgentErrorDetails? Details { get; } = details;
+}
+
+/// <summary>
+/// Optional, sanitized command-timeout diagnostics. This contract deliberately
+/// excludes endpoint, credential, command, output, path and exception values.
+/// </summary>
+public sealed class AgentErrorDetails
+{
+    public required string Stage { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? ElapsedMs { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ReceivedOutput { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PagerCount { get; init; }
 }

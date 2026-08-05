@@ -532,6 +532,36 @@ public static class TelnetFailureMapper
             _ =>
                 (AgentErrorCodes.PromptParseFailed, 502, "Switch response could not be processed.")
         };
-        return new AgentOperationException(code, message, status);
+        var details = exception.Error.Code == ErrorCodes.CommandTimeout
+            ? CreateCommandTimeoutDetails(exception.Error)
+            : null;
+        return new AgentOperationException(code, message, status, details);
+    }
+
+    private static AgentErrorDetails? CreateCommandTimeoutDetails(DiagnosticError error)
+    {
+        var safeStage = error.Stage switch
+        {
+            "command-write" => "command-write",
+            "command-idle" => "command-idle",
+            "command-hard-limit" => "command-hard-limit",
+            "pager-limit" => "pager-limit",
+            "telnet-session" => "telnet-session",
+            _ => null
+        };
+
+        return safeStage is null
+            ? null
+            : new AgentErrorDetails
+            {
+                Stage = safeStage,
+                ElapsedMs = error.CommandTelemetry is { ElapsedMs: >= 0 } telemetry
+                    ? telemetry.ElapsedMs
+                    : null,
+                ReceivedOutput = error.CommandTelemetry?.ReceivedOutput,
+                PagerCount = error.CommandTelemetry is { PagerCount: >= 0 } pagerTelemetry
+                    ? pagerTelemetry.PagerCount
+                    : null
+            };
     }
 }

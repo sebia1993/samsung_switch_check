@@ -759,6 +759,55 @@ public sealed class ViewerConnectionTests
 
         Assert.Equal("QUERY_COMMAND_BLOCKED", error.ErrorCode);
         Assert.Equal(AgentConnectionState.Stale, error.SuggestedConnectionState);
+        Assert.Null(error.Details);
+    }
+
+    [Fact]
+    public void QueryHttpError_ParsesSanitizedOptionalTimeoutDetails()
+    {
+        var error = AgentClientErrors.FromStatus(
+            HttpStatusCode.RequestTimeout,
+            """
+            {
+              "error": {
+                "code": "COMMAND_TIMEOUT",
+                "message": "raw output and credentials must not be retained",
+                "details": {
+                  "stage": "command-idle",
+                  "elapsedMs": 30123,
+                  "receivedOutput": true,
+                  "pagerCount": 2,
+                  "command": "show secret"
+                }
+              }
+            }
+            """);
+
+        Assert.Equal("COMMAND_TIMEOUT", error.ErrorCode);
+        var details = Assert.IsType<AgentErrorDetails>(error.Details);
+        Assert.Equal("command-idle", details.Stage);
+        Assert.Equal(30123, details.ElapsedMs);
+        Assert.True(details.ReceivedOutput);
+        Assert.Equal(2, details.PagerCount);
+        Assert.DoesNotContain("show secret", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("credentials", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CollectorTimeoutMessage_UsesDetailsButDoesNotExposeCommandOrSecrets()
+    {
+        var error = new AgentClientException(
+            "COMMAND_TIMEOUT",
+            AgentConnectionState.Stale,
+            details: new AgentErrorDetails("command-idle", 30_000, true, 1));
+
+        var message = ViewerConnectionMessages.ForCollectorFailure("포트 상태", error);
+
+        Assert.Contains("포트 상태 확인 불가", message, StringComparison.Ordinal);
+        Assert.Contains("30초", message, StringComparison.Ordinal);
+        Assert.Contains("다음 주기", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("show", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("password", message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]

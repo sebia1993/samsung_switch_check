@@ -959,7 +959,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
         AgentConnectionState.Connected or AgentConnectionState.Demo when HasMonitoringStoreFailure =>
             MonitoringStoreWarning() ?? "자동 감시 저장소를 사용할 수 없습니다.",
         AgentConnectionState.Connected or AgentConnectionState.Demo when MonitoredCount == 0 =>
-            "장비 관리에서 접속 시험 후 주기 감시를 켜세요.",
+            "장비 관리에서 로그인 확인 후 주기 감시를 켜세요.",
         AgentConnectionState.Connected or AgentConnectionState.Demo when LoadingCount > 0 =>
             "첫 수집을 기다리거나 다른 장비 작업이 끝난 뒤 다시 확인합니다.",
         AgentConnectionState.Connected or AgentConnectionState.Demo =>
@@ -2005,7 +2005,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 var bytes = Encoding.UTF8.GetByteCount(result.Output);
                 var reconnect = result.ReconnectCount > 0 ? $" · 재연결 {result.ReconnectCount}회" : string.Empty;
                 ReadOnlyQueryResultMeta =
-                    $"{device.Name} · {result.Command} · {result.ElapsedMs:N0}ms · {bytes:N0}바이트 · 세션 {result.SessionCount}회{reconnect}";
+                    $"세션 {result.SessionCount}회{reconnect} · {device.Name} · {result.Command} · {result.ElapsedMs:N0}ms · {bytes:N0}바이트";
             }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
@@ -2440,7 +2440,6 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 commandProfile.GetRequiredCommand(CommandIds.LogRam)
             };
             var selections = new Dictionary<string, string>(StringComparer.Ordinal);
-            var commands = new List<string>(2);
             foreach (var definition in definitions)
             {
                 var capability = knownCapabilities.FirstOrDefault(item =>
@@ -2449,10 +2448,9 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
                 var selected = SelectMonitoringCommand(definition, capability);
                 selections[definition.Id] = selected;
-                commands.Add(selected);
             }
 
-            if (commands.Count == 0)
+            if (selections.Count == 0)
             {
                 var testRequest = new TelnetTargetDto(
                     Guid.NewGuid().ToString("N"),
@@ -2487,23 +2485,76 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
-            var request = new TelnetExecuteRequestDto(
-                Guid.NewGuid().ToString("N"),
-                profile.Host,
-                23,
-                profile.Model,
-                secrets.Username,
-                secrets.Password,
-                secrets.EnablePassword,
-                "monitor",
-                commands);
-            var result = await client.ExecuteTelnetAsync(request, cancellationToken).ConfigureAwait(false);
-            if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
-            if (!result.Success)
+            var anyCommandCompleted = false;
+            DateTimeOffset? latestCompletedUtc = null;
+            foreach (var definition in definitions)
             {
-                throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
+                if (!selections.TryGetValue(definition.Id, out var selected)) continue;
+                if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
+                try
+                {
+                    var request = new TelnetExecuteRequestDto(
+                        Guid.NewGuid().ToString("N"),
+                        profile.Host,
+                        23,
+                        profile.Model,
+                        secrets.Username,
+                        secrets.Password,
+                        secrets.EnablePassword,
+                        "monitor",
+                        [selected]);
+                    var result = await client.ExecuteTelnetAsync(request, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
+                    if (!result.Success)
+                    {
+                        throw new AgentClientException("AGENT_RESPONSE_INVALID", AgentConnectionState.Stale);
+                    }
+
+                    anyCommandCompleted = true;
+                    latestCompletedUtc = latestCompletedUtc is null || result.CompletedUtc > latestCompletedUtc
+                        ? result.CompletedUtc
+                        : latestCompletedUtc;
+                    await ProbeAndRecordMonitoredOutputAsync(
+                        workItem,
+                        secrets,
+                        client,
+                        definition,
+                        knownCapabilities.FirstOrDefault(item =>
+                            item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
+                        result.Commands.FirstOrDefault(item =>
+                            item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (AgentClientException exception) when (
+                    IsCollectorScopedFailure(exception.ErrorCode))
+                {
+                    if (!ReferenceEquals(client, _client) || !IsCurrentMonitoringWorkItem(workItem)) return;
+                    await RecordCollectorUnavailableAsync(
+                        workItem,
+                        definition,
+                        selected,
+                        knownCapabilities.FirstOrDefault(item =>
+                            item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
+                        exception).ConfigureAwait(false);
+                }
             }
-            var outputs = result.Commands.ToList();
+
+            if (!anyCommandCompleted)
+            {
+                if (!TryPersistMonitoringState(
+                        workItem,
+                        current => _monitoringStore!.RecordSuccess(current),
+                        out var reclassifiedRecoveries))
+                {
+                    return;
+                }
+                await ApplyMonitoringResultToUiAsync(
+                    workItem,
+                    reclassifiedRecoveries,
+                    updatePresentation: true).ConfigureAwait(false);
+                return;
+            }
             if (!TryPersistMonitoringState(
                     workItem,
                     current => _monitoringStore!.RecordSuccess(current),
@@ -2515,22 +2566,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                 workItem,
                 recoveries,
                 updatePresentation: false).ConfigureAwait(false);
-
-            foreach (var definition in definitions)
-            {
-                if (!selections.TryGetValue(definition.Id, out var selected)) continue;
-                await ProbeAndRecordMonitoredOutputAsync(
-                    workItem,
-                    secrets,
-                    client,
-                    definition,
-                    knownCapabilities.FirstOrDefault(item =>
-                        item.CommandId.Equals(definition.Id, StringComparison.Ordinal)),
-                     outputs.FirstOrDefault(item =>
-                         item.Command.Equals(selected, StringComparison.OrdinalIgnoreCase)),
-                     cancellationToken).ConfigureAwait(false);
-            }
-            if (!TrySetAutomaticCollectionCurrent(workItem, result.CompletedUtc))
+            if (!TrySetAutomaticCollectionCurrent(workItem, latestCompletedUtc!.Value))
             {
                 return;
             }
@@ -2665,6 +2701,44 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             if (entered) operationGate.Release();
             _monitorConcurrency.Release();
         }
+    }
+
+    private async Task RecordCollectorUnavailableAsync(
+        MonitoringWorkItem workItem,
+        ReadOnlyCommandDefinition definition,
+        string selectedCommand,
+        CollectorCapabilityDto? previousCapability,
+        AgentClientException exception)
+    {
+        if (!TryPersistMonitoringState(
+                workItem,
+                current =>
+                {
+                    _monitoringStore!.RecordCapability(
+                        current.Id,
+                        new CollectorCapabilityDto(
+                            definition.Id,
+                            true,
+                            "Unavailable",
+                            exception.ErrorCode,
+                            definition.Command,
+                            selectedCommand,
+                            definition.CandidateCommands,
+                            previousCapability?.LastSuccessfulCli));
+                    return true;
+                },
+                out _))
+        {
+            return;
+        }
+
+        await RunOnUiForDeviceRevisionAsync(workItem.Token, () =>
+        {
+            UpdateManagedDevicePresentation(workItem.Profile.Id);
+            OperationMessage = ViewerConnectionMessages.ForCollectorFailure(
+                definition.DisplayName,
+                exception);
+        }).ConfigureAwait(false);
     }
 
     private async Task ProbeAndRecordMonitoredOutputAsync(
@@ -2924,11 +2998,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             : monitoringStoreUnavailable
                 ? $"주기 감시 시작 안 됨 · {monitoringStoreError}"
             : credentialBlocked
-            ? "인증 실패 · 접속 시험 후 감시 재개"
+            ? "인증 실패 · 로그인 확인 후 감시 재개"
             : credentialCorrupt
                 ? "저장 계정 사용 불가 · ID/PW 재입력 필요"
             : !profile.ConnectionVerified
-                ? $"접속 미확인 · {profile.LastConnectionTestCode ?? "시험 필요"}"
+                ? $"로그인 미확인 · {profile.LastConnectionTestCode ?? "확인 필요"}"
                 : activeInterfaceIssues > 0
                     ? $"포트 상태 변경 확인 필요 · {activeInterfaceIssues}개"
                 : effectiveMonitoringEnabled && capabilityWarning
@@ -2993,7 +3067,7 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
             [
                 new("장비 IP", profile.Host),
                 new("Telnet", "TCP/23"),
-                new("접속 시험", profile.ConnectionVerified ? "성공" : "미확인", profile.ConnectionVerified ? DeviceHealth.Normal : DeviceHealth.Warning),
+                new("로그인 확인", profile.ConnectionVerified ? "성공" : "미확인", profile.ConnectionVerified ? DeviceHealth.Normal : DeviceHealth.Warning),
                 new(
                     "주기 감시",
                     effectiveMonitoringEnabled && !deviceStoreUnavailable ? "켜짐" : "꺼짐",
@@ -3009,6 +3083,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         ? "확인 불가"
                         : !effectiveMonitoringEnabled
                             ? "감시 꺼짐"
+                            : capabilityWarning
+                                ? "일부 결과 확인 불가"
                             : freshness?.State switch
                             {
                                 AutomaticCollectionFreshnessState.Current => "최신 결과 반영",
@@ -3019,6 +3095,8 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
                         ? DeviceHealth.Warning
                         : !effectiveMonitoringEnabled
                             ? DeviceHealth.Empty
+                            : capabilityWarning
+                                ? DeviceHealth.Warning
                             : collectionPending
                                 ? DeviceHealth.Loading
                                 : DeviceHealth.Normal),
@@ -3443,6 +3521,11 @@ public sealed class DashboardViewModel : ObservableObject, IAsyncDisposable
 
     private static bool IsTransientBusy(string code) =>
         code is "AGENT_BUSY" or "DEVICE_BUSY" or "QUERY_RATE_LIMITED";
+
+    private static bool IsCollectorScopedFailure(string code) => code is
+        "COMMAND_TIMEOUT" or
+        "QUERY_TIMEOUT" or
+        "OUTPUT_LIMIT_EXCEEDED";
 
     private static bool IsAgentChannelFailure(string code) =>
         (code.StartsWith("AGENT_", StringComparison.Ordinal)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Korean Samsung Switch Watch v0.11.0 operator manual.
+"""Build the Korean Samsung Switch Watch v0.11.1 operator manual.
 
 The manual is intentionally generated from sanitized, deterministic WPF
 screenshots. It never needs a company switch, a real IP address, or a secret.
@@ -20,8 +20,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-VERSION = "0.11.0-poc"
-DOCUMENT_DATE = "2026-08-04"
+VERSION = "0.11.1-poc"
+DOCUMENT_DATE = "2026-08-05"
 FONT = "맑은 고딕"
 MONO = "Consolas"
 
@@ -546,6 +546,9 @@ def add_table(
         set_cell_shading(cell, LIGHT_BLUE)
         paragraph = cell.paragraphs[0]
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Keep a table heading with at least the first data row instead of
+        # leaving an isolated header at the bottom of a page.
+        paragraph.paragraph_format.keep_with_next = True
         set_paragraph_spacing(paragraph, after=0, line=1.1)
         run = paragraph.add_run(header)
         set_run_font(run, size=header_size, color=NAVY, bold=True)
@@ -687,7 +690,7 @@ def build_manual(output_path: Path, images_dir: Path):
         ["구성요소", "하는 일", "저장하는 것"],
         [
             ("Agent", "Viewer 요청을 받아 Telnet/23 접속 후 명령 실행", "장비/계정/명령 결과를 저장하지 않음"),
-            ("Viewer", "장비 등록, 접속 시험, show 명령, 주기 감시, 화면 표시", "DPAPI 보호 계정, 기준 해시, 이벤트"),
+            ("Viewer", "장비 등록, 로그인 확인, show 명령, 주기 감시, 화면 표시", "DPAPI 보호 계정, 기준 해시, 이벤트"),
             ("스위치", "IES4224GP · IES4028XP · IES4226XP", "기존 장비 설정과 로그"),
         ],
         [1600, 3900, 3860],
@@ -701,7 +704,7 @@ def build_manual(output_path: Path, images_dir: Path):
             "Viewer PC에서 Viewer ZIP을 풀고 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
             "Viewer의 Agent 연결에서 Agent PC 주소만 입력하고 '연결 확인 및 저장'을 누릅니다.",
             "장비 관리에서 장비명, 모델, IPv4, ID, 로그인 PW, 선택 사항인 enable PW를 입력합니다.",
-            "접속 시험이 성공하면 저장하고, 필요할 때 주기 감시를 켭니다.",
+            "로그인 확인이 성공하면 저장하고, 수집 진단에서 포트·로그 명령을 확인한 뒤 필요할 때 주기 감시를 켭니다.",
             "대시보드의 장비 명령 탭에서 한 줄 show 명령을 실행하고 결과를 확인합니다.",
         ],
     )
@@ -717,6 +720,16 @@ def build_manual(output_path: Path, images_dir: Path):
         "Viewer가 요청할 때마다 Agent는 새 Telnet 세션을 열고 로그인, 필요 시 enable, "
         "명령 실행, 로그아웃 순서로 처리합니다. 한 번의 요청이 끝나면 세션을 닫으므로 "
         "장비의 exec-timeout이 5분이어도 유휴 세션을 계속 붙잡지 않습니다.",
+    )
+    add_callout(
+        doc,
+        "명령 시간 제한",
+        "포트 상태와 시스템 로그는 순차적인 개별 세션으로 수집합니다. 명령 시간 초과·출력 한도는 "
+        "실패한 항목만 확인 불가로 표시하고 다른 항목을 계속 확인합니다. 명령은 30초 동안 새 응답이 "
+        "없으면 중단하고, 출력이 계속되어도 전체 90초를 넘기지 않습니다. 같은 실패 명령은 현재 "
+        "주기에서 즉시 재시도하지 않습니다. 인증·enable·TCP·세션 종료는 반복 로그인을 막기 위해 "
+        "해당 장비 주기를 중단합니다. 이번 POC의 자동 감시 검증·지원 범위는 등록 장비 10대 이하입니다.",
+        "info",
     )
     add_code_block(
         doc,
@@ -1072,7 +1085,8 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         "Agent와 Viewer를 같은 PC에 설치했다면 Agent PC 주소에 localhost 또는 해당 PC의 사설 "
         "IPv4를 입력하고 일반 연결 확인을 실행합니다. 성공은 Agent 서비스, TCP/18443, HTTPS와 "
         "Agent API만 뜻합니다. 스위치 자격 증명과 명령은 사용하지 않으며, 장비는 저장 후 "
-        "'장비 관리 → 접속 시험'에서 별도로 확인합니다. 실제 원격 배치 전에는 원격 Viewer PC에서 "
+        "'장비 관리 → 로그인 확인'에서 계정과 프롬프트를 확인하고 수집 진단에서 실제 명령을 "
+        "확인합니다. 실제 원격 배치 전에는 원격 Viewer PC에서 "
         "Agent PC 주소로 연결 확인을 다시 실행하세요.",
         "info",
     )
@@ -1080,7 +1094,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         doc,
         "연결 진단과 지원 정보",
         level=2,
-        page_break_before=True,
+        page_break_before=False,
     )
     add_callout(
         doc,
@@ -1133,15 +1147,16 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             ("계정 ID", "예", "Telnet 로그인 계정"),
             ("로그인 PW", "예", "현재 Windows 사용자 DPAPI로 보호"),
             ("enable PW", "아니요", "로그인 후 프롬프트가 >인 장비에서만 사용"),
-            ("주기 감시", "아니요", "기본값 꺼짐, 접속 시험 성공 후 켤 수 있음"),
+            ("주기 감시", "아니요", "기본값 꺼짐, 로그인 확인 성공 후 켤 수 있음"),
         ],
         [1900, 900, 6560],
     )
     add_callout(
         doc,
-        "접속 시험 실패",
-        "실패한 장비도 저장할 수 있지만 '접속 미확인'으로 표시되고 주기 감시는 강제로 꺼집니다. "
-        "주소가 사설 대역인지, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 시험하세요.",
+        "로그인 확인 실패",
+        "실패한 장비도 저장할 수 있지만 '로그인 미확인'으로 표시되고 주기 감시는 강제로 꺼집니다. "
+        "주소가 사설 대역인지, ID/PW와 enable 필요 여부를 바로잡은 뒤 다시 확인하세요. 성공해도 "
+        "조회 명령까지 검증된 것은 아니므로 수집 진단을 이어서 실행합니다.",
         "warning",
     )
     add_heading(doc, "장비 show 명령 실행", 1, heading_num_id)
@@ -1278,6 +1293,9 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             "이벤트 확인은 복구가 아니며, CSV/JSON 내보내기는 이벤트만 익명화하고 수동 명령 출력은 제외합니다.",
         ],
         bullet_num_id,
+        font_size=10.5,
+        space_after=4,
+        line=1.18,
     )
     add_heading(doc, "미니 창과 장애 알림", 1, heading_num_id)
     add_body(
@@ -1392,7 +1410,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             ("AUTH_FAILED", "감시를 즉시 차단함. ID/PW와 login local 적용 여부 확인"),
             ("ENABLE_FAILED", "enable 필요 여부와 enable PW, 로그인 직후 프롬프트 확인"),
             ("QUERY_COMMAND_BLOCKED", "한 줄 show 형식, 줄바꿈/구분자 포함 여부 확인"),
-            ("COMMAND_TIMEOUT", "출력 페이징, 장비 부하, 프롬프트 복귀와 세션 시간 확인"),
+            ("COMMAND_TIMEOUT", "30초 무응답 또는 90초 전체 제한. 실패한 수집 항목과 안전한 단계 확인"),
             ("TELNET_SESSION_CLOSED", "재연결 1회 뒤에도 종료됨. 완료된 결과와 남은 명령을 확인"),
             ("PROMPT_PARSE_FAILED", "로그인 후 > 또는 # 프롬프트 형식을 확인"),
             ("OUTPUT_LIMIT_EXCEEDED", "세션 처리 안전 한도 초과. 더 좁은 show 명령 사용"),
@@ -1444,7 +1462,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         "원격 TCP/18443을 확인합니다. 실패하면 코드만 Windows 관리자에게 전달하세요.",
         "warning",
     )
-    add_heading(doc, "현장 진단", 2, heading_num_id)
+    add_heading(doc, "현장 진단", 2, heading_num_id, page_break_before=True)
     add_body(
         doc,
         "Agent PC에서는 Windows 서비스에서 Agent 상태를 확인하고 필요하면 Agent Setup을 다시 실행합니다. Viewer에서는 Agent 연결 "
@@ -1497,7 +1515,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
             "새 Agent/Viewer ZIP을 승인된 경로로 전달하고 각각 임시 폴더에 압축 해제합니다.",
             "Agent PC에서 SamsungSwitchWatch.Agent.Setup.exe를 실행합니다. 입력 없이 설치/업데이트를 진행합니다.",
             "Viewer PC에서 새 Viewer 패키지의 SamsungSwitchWatch.Viewer.exe를 직접 실행합니다.",
-            "Agent 연결, 장비 목록, 접속 시험, show 명령과 주기 감시를 순서대로 확인합니다.",
+            "Agent 연결, 장비 목록, 로그인 확인, 수집 진단, show 명령과 주기 감시를 순서대로 확인합니다.",
         ],
     )
     add_heading(doc, "Agent 제거", 2, heading_num_id)
@@ -1525,7 +1543,7 @@ Viewer 허용 범위      : 10/8, 172.16/12, 192.168/16
         [
             "Agent 서비스가 창 없이 Running이고 Viewer가 실제 사설 IPv4로 HTTPS 연결되는지 확인",
             "동일 PC 연결 확인 뒤 실제 원격 Viewer에서 Agent PC 주소로 다시 연결 확인",
-            "계정은 Viewer에만 저장되고 접속 시험 실패 장비의 주기 감시는 꺼지는지 확인",
+            "계정은 Viewer에만 저장되고 로그인 확인 실패 장비의 주기 감시는 꺼지는지 확인",
             "show port status와 syslog 명령이 모델별로 동작하는지 확인",
             "민감 출력 비저장·Viewer 재실행·장애/복구·중복 억제는 모의 검증 후 사내 장비로 확인",
         ],

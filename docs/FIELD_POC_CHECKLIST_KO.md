@@ -6,7 +6,7 @@
 ## 1. 반입 파일과 버전
 
 - [ ] 동일 GitHub Release에서 Agent ZIP과 Viewer ZIP을 받음
-- [ ] Agent와 Viewer 파일명이 같은 `0.11.0-poc` 버전을 표시함
+- [ ] Agent와 Viewer 파일명이 같은 `0.11.1-poc` 버전을 표시함
 - [ ] 두 ZIP의 SHA-256을 해당 GitHub Release 본문에 표시된 값과 비교함
 - [ ] Agent ZIP에 `SamsungSwitchWatch.Agent.Setup.exe`와 Agent 런타임 파일이 있음
 - [ ] Viewer ZIP에 `SamsungSwitchWatch.Viewer.exe`와 Viewer 런타임 파일이 있음
@@ -131,7 +131,8 @@ HTTPS는 전송 내용을 암호화하지만 Agent 신원을 인증하지 않습
 - [ ] Agent와 Viewer를 같은 PC에 설치한 경우 Agent 주소에 `localhost`를 입력함
 - [ ] 성공 결과가 Agent 서비스·TCP/18443·HTTPS·API까지만 확인함
 - [ ] 연결 확인 중 장비 자격 증명 복호화, Telnet 접속 또는 show 명령 실행이 없음
-- [ ] 저장 후 `장비 관리 → 접속 시험`에서 스위치를 별도로 검증함
+- [ ] 저장 후 `장비 관리 → 로그인 확인`에서 계정과 프롬프트를 검증함
+- [ ] 수집 진단에서 `show port status`와 시스템 로그 명령을 각각 검증함
 - [ ] 실제 원격 Viewer PC에서 Agent PC의 실제 주소로 연결 진단을 다시 수행함
 
 동일 PC 성공은 Agent 서비스, TCP/18443, HTTPS, API와 버전까지만 증명합니다. 원격 PC 사이의
@@ -149,7 +150,7 @@ HTTPS는 전송 내용을 암호화하지만 Agent 신원을 인증하지 않습
 
 - [ ] Viewer에서 장비명, 모델, IPv4, ID와 로그인 PW를 입력함
 - [ ] 필요한 장비에만 enable PW를 입력함
-- [ ] enable PW가 없는 장비의 접속 시험이 성공함
+- [ ] enable PW가 없는 장비의 로그인 확인이 성공함
 - [ ] enable PW가 필요한 장비에서 `>` → `enable` → `#`를 확인함
 - [ ] 잘못된 ID 또는 PW가 `AUTH_FAILED`로 표시됨
 - [ ] 잘못된 enable PW가 `ENABLE_FAILED`로 표시됨
@@ -179,7 +180,9 @@ HTTPS는 전송 내용을 암호화하지만 Agent 신원을 인증하지 않습
 
 ## 10. 세션 수명과 정리
 
-- [ ] `exec-timeout 5 0` 장비에서 접속 시험이 성공함
+- [ ] `exec-timeout 5 0` 장비에서 로그인 확인이 성공함
+- [ ] IES4224GP 한 대에서 포트·로그 수집을 10회 연속 실행해 `COMMAND_TIMEOUT`이 재발하지 않음
+- [ ] 한 수집 항목을 `COMMAND_TIMEOUT`으로 실패시켜도 다른 항목 결과가 유지되고 장비 전체 Down으로 표시되지 않음
 - [ ] 명령 완료 후 Telnet 세션이 즉시 종료됨
 - [ ] 명령 중 원격 종료 시 완료된 명령은 반복하지 않음
 - [ ] 원격 종료 시 남은 명령만 새 세션에서 최대 한 번 재시도함

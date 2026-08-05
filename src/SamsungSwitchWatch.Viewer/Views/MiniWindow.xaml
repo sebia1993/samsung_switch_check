@@ -1,7 +1,7 @@
 <Window x:Class="SamsungSwitchWatch.Viewer.Views.MiniWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Switch Watch 미니" Width="360" Height="220" MinWidth="340" MinHeight="210"
+        Title="Switch Watch 미니" Width="420" Height="220" MinWidth="380" MinHeight="210"
         WindowStyle="None" ResizeMode="CanResizeWithGrip" ShowInTaskbar="False"
         Topmost="True" Background="Transparent" AllowsTransparency="True"
         Deactivated="OnDeactivated" Closing="OnClosing"
@@ -40,7 +40,7 @@
                         <Run Text="{Binding WarningCount, Mode=OneWay}" /><Run Text="대 · 문제 " />
                         <Run Text="{Binding CriticalDisplayCount, Mode=OneWay}" /><Run Text="대" />
                     </TextBlock>
-                    <TextBlock Margin="0,5,0,0" FontSize="12" Foreground="{StaticResource MutedTextBrush}">
+                    <TextBlock Margin="0,5,0,0" FontSize="11" Foreground="{StaticResource MutedTextBrush}">
                         <Run Text="장애 " /><Run Text="{Binding CriticalCount, Mode=OneWay}" /><Run Text="대 · 접속 끊김 " />
                         <Run Text="{Binding DisconnectedCount, Mode=OneWay}" /><Run Text="대 · 미감시 " />
                         <Run Text="{Binding UnmonitoredCount, Mode=OneWay}" /><Run Text="대 · " />
