@@ -132,6 +132,7 @@ public sealed class HttpAgentClient : IAgentClient
         await _startGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!forceIdentityRefresh && HasValidatedIdentity())
             {
                 return;
